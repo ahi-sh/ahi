@@ -16,7 +16,6 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 pub(crate) mod client;
-pub(crate) mod ledger;
 pub(crate) mod via;
 pub(crate) mod wire;
 
@@ -38,7 +37,7 @@ use crate::directories::Directories;
 use crate::error::ErrorKind;
 use crate::session::recorder::Recorder;
 use crate::session::{Header, Settings, Status, Store, StoreError};
-use ledger::Ledger;
+use ahi_durable::Ledger;
 
 /// Events a subscriber keeps for a session.
 const SUBSCRIBER_CAPACITY: usize = 256;

@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use super::tools::{self, Arguments, PreparedCall, ToolDetail, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
-    ToolRecord,
 };
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::tool_policy::{self as tool_policy, path_within, ActionPolicy, Verdict};
+use ahi_durable::ToolRecord;
 
 /// Model responses that may request tools within one operator turn.
 pub(super) const MAX_ROUNDS: usize = 8;

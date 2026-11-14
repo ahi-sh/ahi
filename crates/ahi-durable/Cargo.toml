@@ -1,0 +1,18 @@
+[package]
+name = "ahi-durable"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/iancleary/ahi"
+description = "Execution records and effect accounting for ahi"
+publish = false
+
+[dependencies]
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

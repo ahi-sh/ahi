@@ -12,7 +12,7 @@ authors = ["Ian Cleary"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/ahi-widgets", "crates/ahi-win32", "crates/ahi-unix"]
+members = [".", "crates/ahi-widgets", "crates/ahi-win32", "crates/ahi-unix", "crates/ahi-durable"]
 
 [lib]
 name = "ahi"
@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
+ahi-durable = { path = "crates/ahi-durable", version = "=0.1.0" }
 clap = { version = "=4.6.7", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.10"
