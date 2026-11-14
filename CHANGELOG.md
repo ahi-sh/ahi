@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.0 (2026-11-14)
+
 ### Added
 
 - `ahi.tools.yaml` takes `action: skill` rules: `match.skill: <name>` names one skill the model may load (no wildcard, deny-by-default, a deny matches the name without regard to case and an approval exactly), with `effect` and `ask` as every other kind. `ahi tools list` and `ahi doctor` show the approved names (`skills approved: …`), and `examples/tools/skills.yaml` shows the rules. Design in `docs/SKILLS.md`.
