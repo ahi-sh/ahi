@@ -10,7 +10,6 @@
 //! turn. Every turn runs on its own thread through the same `HttpBackend`,
 //! `ToolRuntime`, and `Recorder` the chat screen uses.
 //!
-//! `docs/SERVE.md` has the design.
 
 // Without a Unix socket nothing on this platform speaks the wire form yet;
 // the in-process client still goes through `dispatch`.

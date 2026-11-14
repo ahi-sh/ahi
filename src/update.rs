@@ -1,7 +1,7 @@
 //! Replace this ahi binary from the attested Linux archive of the latest
 //! release this repository publishes.
 //!
-//! The flow mirrors `docs/release.md`: resolve the latest release, fetch
+//! The flow mirrors the release archives: resolve the latest release, fetch
 //! `ahi-<version>-sha256sums.txt`, download the archive for the target
 //! architecture, verify the sha256, and verify the GitHub build-provenance
 //! attestation of both files with the `gh` CLI. Only then does it extract

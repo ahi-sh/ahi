@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The design documents, plans, and audits under `docs/` are no longer part of the repository, which now holds the code, scripts, README, and changelog. Older entries that name a `docs/` path refer to documents that were removed.
+
 ## 0.17.0 (2026-11-14)
 
 ### Added
