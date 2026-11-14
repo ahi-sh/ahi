@@ -31,7 +31,6 @@ jobs:
       fail-fast: false
       matrix:
         # macOS is deferred while hosted ARM64 capacity is unavailable.
-        # See docs/macos-update-follow-up.md before restoring it.
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: checkout

@@ -9,7 +9,7 @@
 //! surface is files and an exit code: a prompt in, a result file out,
 //! progress on stderr, the answer on stdout.
 //!
-//! `docs/SERVE.md` has the contract; the exit codes are in `Exit`.
+//! The exit codes are in `Exit`.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
