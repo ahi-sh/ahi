@@ -296,6 +296,10 @@ impl CompletionBackend for ServiceBackend {
         }
     }
 
+    fn session_id(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
     fn reset(&mut self) {
         self.session = None;
         self.settings = None;
@@ -658,7 +662,7 @@ mod tests {
                 "Completed"
             ]
         );
-        let session = backend.session.clone().unwrap();
+        let session = backend.session_id().unwrap().to_owned();
         let store = crate::session::Store::new(&state);
         let stored = store.open(&session).unwrap();
         assert_eq!(
@@ -674,11 +678,12 @@ mod tests {
 
         // /clear: the next turn is a new session; a changed model is a setting.
         backend.reset();
+        assert_eq!(backend.session_id(), None);
         let mut changed = request("new");
         changed.thinking = crate::chat::thinking::ThinkingLevel::High;
         let receiver = backend.submit(changed);
         assert_eq!(collect(&receiver, |_| {}), ["text fresh", "Completed"]);
-        let second = backend.session.clone().unwrap();
+        let second = backend.session_id().unwrap().to_owned();
         assert_ne!(second, session);
         assert_eq!(store.open(&second).unwrap().settings().thinking, "high");
         assert_eq!(store.list().unwrap().0.len(), 2);

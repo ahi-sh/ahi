@@ -75,7 +75,6 @@ impl Recorder {
     }
 
     /// The session being written, once it exists.
-    #[allow(dead_code)] // the chat screen will show it
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session.as_ref().map(Session::id)
     }

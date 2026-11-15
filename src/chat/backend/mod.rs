@@ -126,6 +126,11 @@ pub(crate) trait CompletionBackend {
     /// `/clear`: the conversation starts over; a backend that keeps a
     /// session for it starts a new one at the next turn.
     fn reset(&mut self) {}
+
+    /// The server-owned session, if this backend has created or resumed one.
+    fn session_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// One call awaiting the operator, described by its prepared (normalized)
