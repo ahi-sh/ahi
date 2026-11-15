@@ -10,7 +10,7 @@ The tool executor produces records; the session service aggregates them. The cra
 
 This is the first extraction, not a crash-recovery implementation. Session storage, run admission, approval persistence, and restart recovery have not moved here yet. Tool execution, policy enforcement, provider adapters, and transport remain in ahi.
 
-The crate is not published. Before publishing an ahi release that depends on it, review this API and enable and arrange dependency publication.
+The crate has not been published yet. It participates in workspace packaging so Cargo can verify ahi against the local staged dependency. Publication remains a separate release operation; review this API and publish dependencies before ahi.
 
 ## Verification
 

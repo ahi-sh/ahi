@@ -6,7 +6,6 @@ rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/iancleary/ahi"
 description = "Execution records and effect accounting for ahi"
-publish = false
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
