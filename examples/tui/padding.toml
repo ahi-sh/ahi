@@ -1,0 +1,5 @@
+# Copy to ~/.config/ahi/padding.toml, or $XDG_CONFIG_HOME/ahi/padding.toml.
+# Terminal cells per side inside colored chat message blocks.
+# Values are integers from 0 to 255. Zero disables padding on that axis.
+horizontal = 1
+vertical = 1

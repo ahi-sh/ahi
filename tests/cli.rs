@@ -369,6 +369,25 @@ fn tui_on_a_pipe_lists_openai_and_a_configured_gateway() {
 }
 
 #[test]
+fn invalid_appearance_configuration_fails_before_starting_the_tui() {
+    let dir = fixture();
+    write(
+        &dir.join("theme.toml"),
+        b"[backgrounds]\noperator = 'not-a-color'\n",
+    );
+    let output = ahi()
+        .args(["--state-dir", dir.to_str().unwrap(), "tui"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("theme.toml"), "{error}");
+    assert!(error.contains("expected #RRGGBB or default"), "{error}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn root_session_rejects_a_subcommand() {
     for subcommand in ["doctor", "tui"] {
         let output = ahi()

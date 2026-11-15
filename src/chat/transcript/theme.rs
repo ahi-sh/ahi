@@ -1,21 +1,7 @@
-//! Colors and glyphs for transcript formatting, in one place. Every color is
-//! an explicit RGB so rendering does not depend on the terminal palette and
-//! screen tests compare fixed buffers.
+//! Builtin syntax and chrome styles for transcript formatting.
+//! Configurable message backgrounds and edit-diff colors live in `appearance`.
 
 use ratatui_core::style::{Color, Modifier, Style};
-
-use super::TranscriptRole;
-
-/// Row background by who produced the message.
-pub(crate) fn background(role: TranscriptRole) -> Color {
-    match role {
-        TranscriptRole::Operator => Color::Rgb(30, 45, 60),
-        TranscriptRole::Tool { exit_code: 0 } => Color::Rgb(30, 60, 45),
-        TranscriptRole::Tool { .. } => Color::Rgb(60, 30, 30),
-        TranscriptRole::Alert => Color::Rgb(70, 50, 20),
-        TranscriptRole::Assistant | TranscriptRole::Notice => Color::Reset,
-    }
-}
 
 pub(crate) const ACCENT: Color = Color::Rgb(120, 170, 220);
 const DIM: Color = Color::Rgb(130, 130, 130);
@@ -77,22 +63,6 @@ pub(crate) const DENY_BG: (u8, u8, u8) = (90, 35, 35);
 pub(crate) const APPROVE_BG: (u8, u8, u8) = (35, 85, 45);
 pub(crate) const ASK_BG: (u8, u8, u8) = (55, 55, 65);
 
-fn rgb((r, g, b): (u8, u8, u8)) -> Color {
-    Color::Rgb(r, g, b)
-}
-
-pub(crate) fn diff_removed() -> Style {
-    Style::default().bg(rgb(DENY_BG))
-}
-pub(crate) fn diff_added() -> Style {
-    Style::default().bg(rgb(APPROVE_BG))
-}
-pub(crate) fn diff_removed_emphasis() -> Style {
-    Style::default().bg(Color::Rgb(140, 50, 50))
-}
-pub(crate) fn diff_added_emphasis() -> Style {
-    Style::default().bg(Color::Rgb(50, 130, 65))
-}
 pub(crate) fn diff_hunk() -> Style {
     Style::default().fg(Color::Rgb(150, 160, 200))
 }

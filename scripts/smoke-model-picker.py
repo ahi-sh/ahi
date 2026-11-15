@@ -31,6 +31,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/ahi"))
     parser.add_argument("--capture-directory", type=Path)
+    parser.add_argument("--appearance-only", action="store_true",
+                        help="stop after local appearance, selection, and model-switch checks")
     args = parser.parse_args()
     if args.capture_directory:
         args.capture_directory.mkdir(parents=True, exist_ok=True)
@@ -378,6 +380,9 @@ def main() -> None:
                 for name in ("xclip", "xsel"):
                     (clipboard_bin / name).write_text("#!/bin/sh\n/bin/cat > " + shlex.quote(str(copied_text)) + "\n")
 
+        # Explicit files exercise loading; omitted vertical padding uses one row.
+        (state / "padding.toml").write_text("horizontal = 2\n")
+        (state / "theme.toml").write_text("[backgrounds]\noperator = '#112233'\n")
         session = Session(state, executable_dir=clipboard_bin,
                           environment={"AHI_CLIPBOARD_OSC52": "1"})
         try:
@@ -408,8 +413,15 @@ def main() -> None:
             assert all(character == "─" for character in rows[-2][len("/ commands "):])
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
-            # SGR coordinates are one-based: drag-select "merge" on row 1.
-            session.send("\x1b[<0;1;1M\x1b[<32;5;1M\x1b[<0;5;1m")
+            # The configured inset is two cells; default vertical padding is one row.
+            message_row = next(i for i, row in enumerate(rows) if row.startswith("  merge smoke"))
+            assert b"48;2;17;34;51" in session.output, "configured operator background missing"
+            session.capture("chat-message-padding")
+            assert message_row >= 1, session.screen()
+            assert all(not rows[message_row + offset].strip() for offset in (-1, 1))
+            # SGR coordinates are one-based. Select the text, not its padding.
+            y = message_row + 1
+            session.send(f"\x1b[<0;3;{y}M\x1b[<32;7;{y}M\x1b[<0;7;{y}m")
             session.expect("Selection copied")
             assert copied_text.read_text() == "merge"
             assert b"\x1b]52;c;bWVyZ2U=\x07" in session.output
@@ -486,6 +498,14 @@ def main() -> None:
             (state / "models.json").write_bytes(original)
         finally:
             session.close()
+            (state / "padding.toml").unlink()
+            (state / "theme.toml").unlink()
+            if args.appearance_only:
+                subprocess.run([str(binary), "--state-dir", str(state), "serve", "stop"],
+                               capture_output=True, timeout=10, check=True)
+        if args.appearance_only:
+            print("PASS: configured padding and RGB background, exact clipboard text, model-switch retention, and terminal quit")
+            return
 
         # A configured ID absent from the reference remains checked, can be
         # reordered, survives another process, and is removed only on Space.

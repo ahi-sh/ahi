@@ -445,8 +445,15 @@ impl Selection {
     pub(super) fn text(&self, rows: &[TranscriptRow]) -> Option<String> {
         let (start, end) = self.range()?;
         let (first, last) = self.line_span.unwrap_or((start.row, end.row));
+        let last = (first..=last).rfind(|&i| rows.get(i).is_some_and(|row| !row.decoration))?;
         let mut result = String::new();
-        for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .take(last + 1)
+            .skip(first)
+            .filter(|(_, row)| !row.decoration)
+        {
             let (left, right) = self.columns(index)?;
             let skip = wrap_padding(rows, index);
             let mut column = 0;
@@ -472,6 +479,7 @@ impl Selection {
     pub(super) fn raw_text(&self, rows: &[TranscriptRow]) -> Option<String> {
         let (start, end) = self.range()?;
         let (first, last) = self.line_span.unwrap_or((start.row, end.row));
+        let last = (first..=last).rfind(|&i| rows.get(i).is_some_and(|row| !row.decoration))?;
         let mut result = String::new();
         let mut seen: Vec<*const str> = Vec::new();
         let mut plain_run = String::new();
@@ -481,7 +489,13 @@ impl Selection {
                 plain_run.clear();
             }
         };
-        for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .take(last + 1)
+            .skip(first)
+            .filter(|(_, row)| !row.decoration)
+        {
             match &row.source {
                 Some(source) => {
                     flush_plain(&mut result, &mut plain_run);
@@ -545,10 +559,11 @@ impl Selection {
 /// Bytes at the start of `rows[row]` that only line a soft wrap up under its
 /// content; they are on screen but not part of the text.
 fn wrap_padding(rows: &[TranscriptRow], row: usize) -> usize {
-    match row.checked_sub(1) {
-        Some(previous) if !rows[previous].break_after => rows[row].hang,
-        _ => 0,
-    }
+    rows[row].inset
+        + match row.checked_sub(1) {
+            Some(previous) if !rows[previous].break_after => rows[row].hang,
+            _ => 0,
+        }
 }
 
 fn line_start(rows: &[TranscriptRow], row: usize) -> usize {

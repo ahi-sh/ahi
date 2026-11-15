@@ -63,6 +63,28 @@ fn copying_preserves_original_spaces_and_newlines_but_excludes_screen_padding() 
 }
 
 #[test]
+fn colored_message_padding_is_visual_only_when_copying() {
+    let message = ChatMessage::new(TranscriptRole::Operator, "ab界 cd\n  kept  ");
+    let rows = render::rows(&[message], 8);
+    let area = Rect::new(0, 0, 8, rows.len() as u16);
+    let mut selection = Selection::default();
+    selection.begin(0, 0, area, 0, rows.len());
+    selection.drag(7, area.height - 1, area, 0, rows.len());
+    assert!(selection.release());
+    assert_eq!(selection.text(&rows).as_deref(), Some("ab界 cd\n  kept  "));
+    assert_eq!(
+        selection.raw_text(&rows).as_deref(),
+        Some("ab界 cd\n  kept  ")
+    );
+
+    selection.begin(0, 0, area, 0, rows.len());
+    selection.drag(7, 0, area, 0, rows.len());
+    assert!(selection.release());
+    assert_eq!(selection.text(&rows), None);
+    assert_eq!(selection.raw_text(&rows), None);
+}
+
+#[test]
 fn wheel_scrolling_during_a_drag_keeps_the_original_transcript_anchor() {
     let rows = render::rows(&messages("0\n1\n2\n3\n4"), 8);
     let area = Rect::new(0, 0, 8, 2);
