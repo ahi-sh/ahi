@@ -12,13 +12,14 @@ use super::render::{RowSpan, Styled, Target};
 use super::{diff, highlight, links, markdown, theme, ChatMessage, ToolPayload, TranscriptRole};
 use crate::chat::backend::tools::{self, ToolDetail};
 
-/// Diff and stream bodies stop here; the model-facing content is unaffected.
+/// Non-diff previews stop here; edit diffs retain every hunk.
 const MAX_BODY_ROWS: usize = 200;
 /// Stream previews under a command header.
 const MAX_STREAM_ROWS: usize = 40;
 const MAX_LINE_CHARS: usize = 400;
 
 pub(crate) struct Options<'a> {
+    pub(crate) appearance: &'a crate::chat::appearance::Appearance,
     pub(crate) markdown: bool,
     /// Whether a relative path names a real file in the workspace.
     pub(crate) exists: &'a dyn Fn(&str) -> bool,
@@ -29,6 +30,7 @@ impl Options<'static> {
     /// No markdown, no file targets: what layout tests use.
     pub(crate) const PLAIN: Options<'static> = Options {
         markdown: false,
+        appearance: &crate::chat::appearance::Appearance::DEFAULT,
         exists: &|_| false,
     };
 }
@@ -248,7 +250,7 @@ fn code_block(lang: Option<&str>, lines: &[String], out: &mut Vec<Styled>) {
             style: Some(theme::code_block()),
             ..Styled::default()
         };
-        push_highlighted(&mut styled, language, &expand_tabs(line));
+        push_highlighted(&mut styled, language, &clip(&expand_tabs(line)));
         out.push(styled);
     }
     if lines.len() > MAX_BODY_ROWS {
@@ -277,7 +279,7 @@ fn push_highlighted(styled: &mut Styled, language: Option<highlight::Language>, 
 
 fn expand_tabs(line: &str) -> String {
     if !line.contains('\t') {
-        return clip(line);
+        return line.to_string();
     }
     let mut out = String::new();
     let mut column = 0;
@@ -291,7 +293,7 @@ fn expand_tabs(line: &str) -> String {
             column += 1;
         }
     }
-    clip(&out)
+    out
 }
 
 fn clip(line: &str) -> String {
@@ -485,7 +487,13 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
 
     match &message.detail {
         Some(ToolDetail::Write { before, after }) => {
-            diff_rows(before.as_deref(), after, &target, &mut out);
+            diff_rows(
+                before.as_deref(),
+                after,
+                &target,
+                &options.appearance.theme,
+                &mut out,
+            );
         }
         Some(ToolDetail::Command {
             stdout,
@@ -496,7 +504,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
             ..
         }) => {
             stream_rows("stdout", stdout, *stdout_cut, None, &mut out);
-            let style = (exit_code != &Some(0)).then(theme::diff_removed);
+            let style = (exit_code != &Some(0)).then(|| options.appearance.theme.diff_removed());
             stream_rows("stderr", stderr, *stderr_cut, style, &mut out);
             if stdout.is_empty() && stderr.is_empty() {
                 let mut styled = Styled::default();
@@ -554,7 +562,7 @@ fn read_rows<'a>(
         } else {
             styled.push(&format!("{number:>digits$} "), theme::gutter());
             styled.hang = digits + 1;
-            push_highlighted(&mut styled, language, &expand_tabs(line));
+            push_highlighted(&mut styled, language, &clip(&expand_tabs(line)));
             number += 1;
         }
         out.push(styled);
@@ -618,7 +626,7 @@ fn stream_rows(label: &str, text: &str, cut: bool, style: Option<Style>, out: &m
             ..Styled::default()
         };
         styled.push("  ", Style::default());
-        styled.push(&expand_tabs(line), Style::default());
+        styled.push(&clip(&expand_tabs(line)), Style::default());
         out.push(styled);
     }
     if lines.len() > MAX_STREAM_ROWS || cut {
@@ -639,7 +647,13 @@ fn stream_rows(label: &str, text: &str, cut: bool, style: Option<Style>, out: &m
     }
 }
 
-fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled>) {
+fn diff_rows(
+    before: Option<&str>,
+    after: &str,
+    path: &str,
+    colors: &crate::chat::appearance::Theme,
+    out: &mut Vec<Styled>,
+) {
     let hunks = diff::unified(before, after, 3);
     let language = path.rsplit('.').next().and_then(highlight::language);
     let digits = hunks
@@ -656,13 +670,7 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
         };
         format!("{} {} ", cell(old), cell(new))
     };
-    let mut emitted = 0;
-    let mut total = 0;
     for hunk in &hunks {
-        total += hunk.lines.len() + 1;
-        if emitted >= MAX_BODY_ROWS {
-            continue;
-        }
         let mut head = Styled::default();
         head.push(
             &format!(
@@ -672,12 +680,7 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
             theme::diff_hunk(),
         );
         out.push(head);
-        emitted += 1;
         for line in &hunk.lines {
-            if emitted >= MAX_BODY_ROWS {
-                break;
-            }
-            emitted += 1;
             let (row_style, marker, old, new, text, emphasis, strong) = match line {
                 diff::HunkLine::Context { old, new, text } => (
                     None,
@@ -693,26 +696,26 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
                     text,
                     emphasis,
                 } => (
-                    Some(theme::diff_removed()),
+                    Some(colors.diff_removed()),
                     '-',
                     Some(*old),
                     None,
                     text,
                     emphasis,
-                    theme::diff_removed_emphasis(),
+                    colors.diff_removed_emphasis(),
                 ),
                 diff::HunkLine::Added {
                     new,
                     text,
                     emphasis,
                 } => (
-                    Some(theme::diff_added()),
+                    Some(colors.diff_added()),
                     '+',
                     None,
                     Some(*new),
                     text,
                     emphasis,
-                    theme::diff_added_emphasis(),
+                    colors.diff_added_emphasis(),
                 ),
             };
             let mut styled = Styled {
@@ -725,12 +728,17 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
             let content_start = styled.text.len();
             let source = text.trim_end_matches('\r');
             let text = expand_tabs(source);
-            push_highlighted(&mut styled, language, &text);
+            if row_style.is_some() {
+                // Changed lines use the diff foreground; context retains syntax colors.
+                styled.push(&text, Style::default());
+            } else {
+                push_highlighted(&mut styled, language, &text);
+            }
             // Emphasis overrides the token color's background only; merge
             // by splitting spans is overkill: emphasised ranges are pushed
             // as extra spans that patch over, so they must come after.
-            // The ranges index the line as written. Tab expansion and the
-            // length clip rewrite it, so they apply only to the same bytes.
+            // The ranges index the line as written. Tab expansion rewrites
+            // it, so they apply only to the same bytes.
             for range in emphasis.iter().filter(|_| text == source) {
                 if range.end <= text.len() {
                     styled.spans.push(RowSpan {
@@ -742,11 +750,6 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
             }
             out.push(styled);
         }
-    }
-    if total > emitted {
-        let mut styled = Styled::default();
-        styled.push(&format!("… {} more lines", total - emitted), theme::dim());
-        out.push(styled);
     }
 }
 
@@ -764,6 +767,7 @@ mod tests {
     fn options() -> Options<'static> {
         Options {
             markdown: true,
+            appearance: &crate::chat::appearance::Appearance::DEFAULT,
             exists: &exists,
         }
     }
@@ -825,6 +829,7 @@ mod tests {
             &assistant("# Title\n**bold**"),
             &Options {
                 markdown: false,
+                appearance: &crate::chat::appearance::Appearance::DEFAULT,
                 exists: &exists,
             },
             40,
@@ -994,7 +999,10 @@ mod tests {
                 "  … 0 more lines shown to the model, output truncated",
             ]
         );
-        assert_eq!(out[3].style, Some(theme::diff_removed()));
+        assert_eq!(
+            out[3].style,
+            Some(options().appearance.theme.diff_removed())
+        );
 
         let search = tool(
             "search_files",
@@ -1028,6 +1036,50 @@ mod tests {
     }
 
     #[test]
+    fn edit_diffs_keep_all_changed_lines_and_long_text_with_configured_colors() {
+        use crate::chat::appearance::{Appearance, Padding};
+        use ratatui_core::style::Color;
+        let appearance = Appearance {
+            padding: Padding::default(),
+            theme: toml::from_str("[diff]\nadded = '#010203'\nremoved = '#040506'\n").unwrap(),
+        };
+        let options = Options {
+            appearance: &appearance,
+            ..options()
+        };
+        let before = (0..240).map(|n| format!("old {n}\n")).collect::<String>();
+        let mut after = (0..239).map(|n| format!("new {n}\n")).collect::<String>();
+        after.push_str(&format!("{}TAIL\n", "x".repeat(500)));
+        let message = tool(
+            "edit_file",
+            "edit_file src/main.rs",
+            0,
+            Some(ToolDetail::Write {
+                before: Some(before),
+                after,
+            }),
+        );
+        let out = paragraphs(&message, &options, 80);
+        assert_eq!(
+            out.iter()
+                .filter(|row| row.style.is_some_and(|s| s.fg == Some(Color::Rgb(1, 2, 3))))
+                .count(),
+            240
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|row| row.style.is_some_and(|s| s.fg == Some(Color::Rgb(4, 5, 6))))
+                .count(),
+            240
+        );
+        let last = &out.last().unwrap().text;
+        assert!(last.starts_with("    240 +"), "{last}");
+        assert!(last.ends_with("xxxxxTAIL"));
+        assert!(last.len() > 500);
+        assert!(!out.iter().any(|row| row.text.contains("more lines")));
+    }
+
+    #[test]
     fn edits_render_a_unified_diff_with_gutter_markers_and_emphasis() {
         let edit = tool(
             "edit_file",
@@ -1052,13 +1104,16 @@ mod tests {
                 "4 4  }",
             ]
         );
-        assert_eq!(out[3].style, Some(theme::diff_removed()));
-        assert_eq!(out[5].style, Some(theme::diff_added()));
+        assert_eq!(
+            out[3].style,
+            Some(options().appearance.theme.diff_removed())
+        );
+        assert_eq!(out[5].style, Some(options().appearance.theme.diff_added()));
         assert_eq!(out[2].style, None);
         let strong = out[3]
             .spans
             .iter()
-            .find(|s| s.style == theme::diff_removed_emphasis())
+            .find(|s| s.style == options().appearance.theme.diff_removed_emphasis())
             .expect("the changed word is emphasised");
         assert_eq!(&out[3].text[strong.start..strong.end], "x");
 

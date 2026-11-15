@@ -5,8 +5,8 @@
 //! frame then pads and styles the visible window alone.
 
 use super::format::{self, Options};
-use super::{theme, ChatMessage};
-use ratatui_core::style::Style;
+use super::ChatMessage;
+use ratatui_core::style::{Color, Style};
 use ratatui_core::text::{Line, Span};
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -41,7 +41,8 @@ pub(crate) struct RowTarget {
 }
 
 pub(crate) struct TranscriptRow {
-    /// Rendered content, without terminal padding. Selection and copy read this.
+    /// Rendered content with left insets, but without right-edge fill.
+    /// Selection and copy omit the inset and any hanging-wrap spaces.
     pub(crate) text: String,
     /// False for a soft wrap, true for an original newline/message boundary.
     pub(crate) break_after: bool,
@@ -57,6 +58,10 @@ pub(crate) struct TranscriptRow {
     /// Bytes of leading padding that a soft wrap added so this row lines up
     /// under its paragraph's content. Selection and copy skip them.
     pub(crate) hang: usize,
+    /// Leading cells inside a colored message, excluded from copied text.
+    pub(crate) inset: usize,
+    /// A blank row of message padding, not a transcript newline.
+    pub(crate) decoration: bool,
 }
 
 impl TranscriptRow {
@@ -69,6 +74,8 @@ impl TranscriptRow {
             targets: Vec::new(),
             source: None,
             hang: 0,
+            inset: 0,
+            decoration: false,
         }
     }
 
@@ -187,7 +194,7 @@ impl TranscriptLayout {
         let width = width.max(1);
         let from = match *dirty {
             _ if width != self.width => 0,
-            Dirty::AppendedLast if self.resume_last(messages, width) => messages.len(),
+            Dirty::AppendedLast if self.resume_last(messages, width, options) => messages.len(),
             Dirty::AppendedLast => messages.len().saturating_sub(1),
             Dirty::From(index) => index.min(self.starts.len()).min(messages.len()),
         };
@@ -208,11 +215,15 @@ impl TranscriptLayout {
     /// Re-wrap only the last row of the last message plus its new text.
     /// False when the rows do not cover a prefix of that message, in which
     /// case the caller re-lays it in full.
-    fn resume_last(&mut self, messages: &[ChatMessage], width: usize) -> bool {
+    fn resume_last(&mut self, messages: &[ChatMessage], width: usize, options: &Options) -> bool {
         let Some(message) = messages.last() else {
             return false;
         };
         if self.starts.len() != messages.len() || message.text.len() < self.last_len {
+            return false;
+        }
+        // Colored messages include decorative rows, not an extendable text tail.
+        if options.appearance.theme.background(message.role) != Color::Reset {
             return false;
         }
         let first_row = self.starts[messages.len() - 1];
@@ -260,17 +271,52 @@ fn layout_message(
     width: usize,
     options: &Options,
 ) {
-    let paragraphs = format::paragraphs(message, options, width);
+    let background = options.appearance.theme.background(message.role);
+    let colored = background != Color::Reset;
+    let inset = if colored {
+        usize::from(options.appearance.padding.horizontal).min(width.saturating_sub(1) / 2)
+    } else {
+        0
+    };
+    let content_width = width.saturating_sub(2 * inset).max(1);
+    let paragraphs = format::paragraphs(message, options, content_width);
     if paragraphs.is_empty() {
         return;
     }
     if !rows.is_empty() {
         rows.push(TranscriptRow::plain(String::new(), true, Style::default()));
     }
-    let style = Style::default().bg(theme::background(message.role));
+    let style = Style::default().bg(background);
+    let pad = |rows: &mut Vec<TranscriptRow>| {
+        if colored {
+            for _ in 0..options.appearance.padding.vertical {
+                let mut row = TranscriptRow::plain(String::new(), true, style);
+                row.decoration = true;
+                rows.push(row);
+            }
+        }
+    };
+    pad(rows);
+    let start = rows.len();
     for paragraph in &paragraphs {
-        layout_styled(rows, paragraph, style, width);
+        layout_styled(rows, paragraph, style, content_width);
     }
+    for row in &mut rows[start..] {
+        // At very narrow widths a wide grapheme takes precedence over margins.
+        if inset > 0 && row.text.width() + 2 * inset <= width {
+            row.text.insert_str(0, &" ".repeat(inset));
+            row.inset = inset;
+            for span in &mut row.spans {
+                span.start += inset;
+                span.end += inset;
+            }
+            for target in &mut row.targets {
+                target.start += inset;
+                target.end += inset;
+            }
+        }
+    }
+    pad(rows);
 }
 
 /// Wrap `text` by grapheme cell width, one row per soft wrap or newline.
@@ -341,6 +387,8 @@ pub(crate) fn layout_styled(
             targets,
             source: paragraph.source.clone(),
             hang: lead,
+            inset: 0,
+            decoration: false,
         });
         *row_start = end;
     };
@@ -579,6 +627,30 @@ mod tests {
         dirty = Dirty::AppendedLast;
         layout.sync(&messages, 11, &mut dirty, &Options::PLAIN);
         check(&layout, &messages, 11);
+    }
+
+    #[test]
+    fn colored_messages_wrap_inside_padding_and_keep_it_when_updated() {
+        let mut messages = vec![message(TranscriptRole::Operator, "abcdefghi")];
+        let mut layout = TranscriptLayout::new();
+        layout.sync(&messages, 8, &mut Dirty::From(0), &Options::PLAIN);
+        let lines = |layout: &TranscriptLayout| {
+            visible_lines(layout.rows(), 8, layout.len(), 0)
+                .0
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&layout),
+            ["        ", " abcdef ", " ghi    ", "        "]
+        );
+        messages[0].text.push_str("jklm");
+        layout.sync(&messages, 8, &mut Dirty::AppendedLast, &Options::PLAIN);
+        assert_eq!(
+            lines(&layout),
+            ["        ", " abcdef ", " ghijkl ", " m      ", "        "]
+        );
     }
 
     #[test]

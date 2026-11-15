@@ -284,6 +284,43 @@ Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the
 
 `ahi tui` runs its turns through the session service. When no `ahi serve` answers on the socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`; `--socket <path>` names another), the chat starts one detached, with its output in `<state>/serve.log`, waits up to two seconds for it to answer, and attaches. Two chats started together end up on one server. The server outlives the chat and never idles out, so the next chat, `ahi exec`, and an hc space find it running; `ahi serve stop` ends it. In this mode the server records the session and the screen is a client: the same transcript, tools, approval dialog, `/model`, `/thinking`, and `--resume`, with the approval answered over the socket. `--standalone` runs the engine inside the chat as before and records the session itself; `--no-history` applies there. On Windows the chat is always standalone.
 
+#### Chat appearance
+
+Ahi reads two optional, operator-owned TOML files from its config directory on TUI startup. On Unix this is `$XDG_CONFIG_HOME/ahi`, or `~/.config/ahi`; `--state-dir` overrides it along with the other ahi directories. These files are not read from the workspace or sent to a model. Restart the TUI after editing them; sessions use the current local appearance rather than storing a theme.
+
+`padding.toml` sets space **inside colored message blocks**, not around the overall terminal UI:
+
+```toml
+horizontal = 1 # terminal columns on each side
+vertical = 1   # terminal rows above and below
+```
+
+Ratatui measures terminal cells, not CSS `em` units. Values are integers from 0 to 255; zero disables an axis. Horizontal padding shrinks in very narrow terminals so content can still render. These are application-level transcript settings; `ahi-widgets` remains independent of config files.
+
+`theme.toml` controls message backgrounds and edit-diff colors. All keys are optional. Colors accept `"#RRGGBB"` or `"default"` to use the terminal default:
+
+```toml
+[backgrounds]
+operator = "#1e2d3c"
+assistant = "default"
+tool_success = "#1e3c2d"
+tool_error = "#3c1e1e"
+alert = "#463214"
+notice = "default"
+
+[diff]
+added = "#a0e6aa"
+removed = "#ffa0a0"
+added_background = "#23552d"
+removed_background = "#5a2323"
+added_emphasis = "#328241"
+removed_emphasis = "#8c3232"
+```
+
+Missing files or keys use these defaults without writing configuration. Invalid colors, unknown keys, and invalid padding values stop startup with the filename and parse error. Complete examples are in `examples/tui/`. Menu colors and syntax-token palettes are not configurable through these files yet.
+
+Edit previews show all generated unified-diff hunks with old/new line numbers, red removed text, green added text, and stronger backgrounds for changed words. Long diff lines wrap instead of being clipped at 400 characters; previews no longer stop at 200 rows. Command-output and read-preview limits are unchanged. Diff details and tool durations are currently live-turn presentation data; restoring a session restores its recorded messages but does not reconstruct those rich details.
+
 ### ahi session
 
 Every chat is recorded as it happens into one file of JSON lines under the state directory, `sessions/<id>.jsonl`, created owner-only at the first turn: the operator's message before the request goes out, the model's reply and its tool calls before any tool runs, each tool result after, and one `turn` line per exchange saying how it ended (`ok`, `failed`, `cancelled`). `/model` and `/thinking` are recorded too. Nothing is rewritten: a failed or cancelled turn stays on disk as a branch, and the next turn hangs off the last turn that succeeded, so what the model sees again is the conversation that worked. `ahi tui --no-history` records nothing; `/clear` starts a new session at the next turn.
@@ -342,7 +379,7 @@ ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 
 | Files | Directory | Default |
 | --- | --- | --- |
-| `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
+| `models.json`, `padding.toml`, `theme.toml` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
 | `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
 | `selection`, `thinking`, `audit.log`, `sessions/`, `run/serve.sock` (without `$XDG_RUNTIME_DIR`) | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
 | `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |

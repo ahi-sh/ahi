@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 fn options() -> Options<'static> {
     Options {
         markdown: true,
+        appearance: &crate::chat::appearance::Appearance::DEFAULT,
         exists: &|path| path == "src/main.rs",
     }
 }
@@ -35,18 +36,22 @@ fn trimmed(messages: &[ChatMessage], width: usize) -> Vec<String> {
         .collect()
 }
 
-/// Drawn rows of a tool message without its header, which wraps at narrow
-/// widths and is not what these tests are about.
-fn body(message: &ChatMessage, width: usize) -> Vec<String> {
+/// Tool body at the requested content width, excluding the header and
+/// message padding. These checks focus on gutters and hanging wraps.
+fn body(message: &ChatMessage, content_width: usize) -> Vec<String> {
+    let width = content_width + 2;
     let laid = layout(std::slice::from_ref(message), width);
     let header = laid
         .rows()
         .iter()
-        .position(|row| row.break_after)
+        .position(|row| !row.decoration && row.break_after)
         .map_or(0, |index| index + 1);
-    screen(&laid, width)[header..]
+    screen(&laid, width)
         .iter()
-        .map(|row| row.trim_end().to_string())
+        .zip(laid.rows())
+        .skip(header)
+        .filter(|(_, row)| !row.decoration)
+        .map(|(line, row)| line[row.inset..].trim_end().to_string())
         .collect()
 }
 
@@ -132,12 +137,14 @@ fn check_rows(layout: &TranscriptLayout, width: usize) {
 /// The text of a block with soft wraps rejoined and wrap padding removed,
 /// the way selection copies it.
 fn copied(rows: &[TranscriptRow]) -> String {
+    let rows: Vec<_> = rows.iter().filter(|row| !row.decoration).collect();
     let mut out = String::new();
     for (index, row) in rows.iter().enumerate() {
-        let skip = match index.checked_sub(1) {
-            Some(previous) if !rows[previous].break_after => row.hang,
-            _ => 0,
-        };
+        let skip = row.inset
+            + match index.checked_sub(1) {
+                Some(previous) if !rows[previous].break_after => row.hang,
+                _ => 0,
+            };
         out.push_str(&row.text[skip..]);
         if row.break_after && index + 1 < rows.len() {
             out.push('\n');
@@ -299,6 +306,22 @@ fn wrapped_markdown_lines_up_under_its_text() {
 }
 
 #[test]
+fn padded_tool_links_follow_the_visible_text_not_the_margin() {
+    let laid = layout(&[read(None, &["fn main() {};"])], 40);
+    let row = laid
+        .rows()
+        .iter()
+        .find(|row| !row.targets.is_empty())
+        .unwrap();
+    assert_eq!(row.inset, 1);
+    assert_eq!(row.target_at(0), None);
+    for target in &row.targets {
+        let column = row.text[..target.start].width();
+        assert_eq!(row.target_at(column), Some(&target.target));
+    }
+}
+
+#[test]
 fn read_output_numbers_each_file_line_once_and_hangs_the_wrap() {
     let message = read(
         None,
@@ -344,11 +367,21 @@ fn wrapped_read_rows_copy_as_the_original_line() {
     for width in [10, 16, 23, 40, 200] {
         let laid = layout(std::slice::from_ref(&message), width);
         check_rows(&laid, width);
-        let first = laid.rows().iter().position(|row| row.break_after).unwrap() + 1;
-        let file_rows = &laid.rows()[first..];
+        let first = laid
+            .rows()
+            .iter()
+            .position(|row| !row.decoration && row.break_after)
+            .unwrap()
+            + 1;
+        let file_rows = &laid.rows()[first..laid.len() - 1];
         assert_eq!(copied(file_rows), format!("1 {line}"), "width {width}");
         for row in &file_rows[1..] {
-            assert_eq!(&row.text[..row.hang], "  ", "width {width}: {:?}", row.text);
+            assert_eq!(
+                &row.text[row.inset..row.inset + row.hang],
+                "  ",
+                "width {width}: {:?}",
+                row.text
+            );
         }
     }
 }
@@ -415,8 +448,8 @@ fn diff_rows_wrap_under_the_code_not_the_gutter() {
 
 #[test]
 fn diff_emphasis_survives_only_on_untouched_text() {
-    // The changed word sits beyond the 400-character clip. The clipped row
-    // ends in a multi-byte ellipsis that no emphasis range may split.
+    // Long diff lines remain complete; emphasis ranges must stay on valid
+    // UTF-8 boundaries while wrapping around the former 400-character clip.
     for pad in 380..420 {
         let before = format!("{} old tail", "a".repeat(pad));
         let after = format!("{} new tail", "a".repeat(pad));

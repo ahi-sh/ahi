@@ -54,6 +54,7 @@ pub fn run(
     socket: Option<&Path>,
     via: Option<&str>,
 ) -> Result<RunOutput> {
+    let appearance = chat::appearance::Appearance::load(&state.config)?;
     let actions =
         match actions {
             Some(path) => {
@@ -133,11 +134,16 @@ pub fn run(
             chat::Engine::Service(client)
         };
         let session_id = match selected {
-            Selected::Picked(selection) => {
-                chat::interact(state, &selection, actions.as_deref(), engine, reopen)?
-            }
+            Selected::Picked(selection) => chat::interact(
+                state,
+                &selection,
+                actions.as_deref(),
+                engine,
+                appearance,
+                reopen,
+            )?,
             Selected::Resumed(id) => {
-                chat::interact_resumed(state, &id, actions.as_deref(), engine, reopen)?
+                chat::interact_resumed(state, &id, actions.as_deref(), engine, appearance, reopen)?
             }
         };
         if let Some(id) = session_id {

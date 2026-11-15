@@ -5,6 +5,7 @@
 //! Terminal drawing stays in this module. Key codes are translated by
 //! `key_binding` before the screen applies them.
 
+pub(crate) mod appearance;
 mod approval;
 pub(crate) mod backend;
 mod command;
@@ -124,6 +125,7 @@ struct ChatScreen {
     /// blank input sends the same transcript again.
     resend_available: bool,
     preferences: preferences::Preferences,
+    appearance: appearance::Appearance,
     /// Set on send, cleared at the turn's end; drives the activity counter.
     turn_started: Option<Instant>,
     workspace_root: std::path::PathBuf,
@@ -214,6 +216,7 @@ impl ChatScreen {
             recorder,
             actions_file: None,
             preferences: preferences::read(state_dir),
+            appearance: appearance::Appearance::DEFAULT,
             turn_started: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
             click_origin: None,
@@ -324,6 +327,7 @@ impl ChatScreen {
         let options = transcript::format::Options {
             markdown: self.preferences.markdown,
             exists: &exists,
+            appearance: &self.appearance,
         };
         self.layout.sync(
             &self.messages,
@@ -1668,6 +1672,7 @@ pub(crate) fn interact(
     selection: &str,
     actions: Option<&Path>,
     engine: Engine,
+    appearance: appearance::Appearance,
     reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -1682,7 +1687,7 @@ pub(crate) fn interact(
     );
     screen.actions_file = actions.map(Path::to_path_buf);
     let backend = backend_for(state_dir, engine, &screen, None, actions);
-    interact_screen(state_dir, screen, backend, reopen_picker)
+    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
 }
 
 /// `ahi tui --resume <id>`: the chat over a stored session, continuing it
@@ -1692,6 +1697,7 @@ pub(crate) fn interact_resumed(
     session_id: &str,
     actions: Option<&Path>,
     engine: Engine,
+    appearance: appearance::Appearance,
     reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -1723,7 +1729,7 @@ pub(crate) fn interact_resumed(
         Some(session_id.to_string()),
         actions,
     );
-    interact_screen(state_dir, screen, backend, reopen_picker)
+    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
 }
 
 fn backend_for(
@@ -1759,12 +1765,14 @@ fn interact_screen(
     state_dir: &Directories,
     mut screen: ChatScreen,
     mut backend: Box<dyn CompletionBackend>,
+    appearance: appearance::Appearance,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<Option<String>> {
+    screen.appearance = appearance;
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
     let backend = backend.as_mut();
@@ -2927,6 +2935,71 @@ mod tests {
     }
 
     #[test]
+    fn edit_preview_draws_numbered_red_and_green_lines() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-edit-preview");
+        let mut screen = screen_in(&state);
+        screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "edit-1".into(),
+            tool: "edit_file".into(),
+            content: String::new(),
+            output: "edit_file src/main.rs".into(),
+            exit_code: 0,
+            detail: Some(backend::tools::ToolDetail::Write {
+                before: Some("keep\nold\nend".into()),
+                after: "keep\nnew\nend".into(),
+            }),
+            elapsed: std::time::Duration::from_millis(400),
+            record: None,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = |y| {
+            (0..60)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        assert_eq!(line(1), " edit_file src/main.rs · +1 -1 · 0.4s");
+        assert_eq!(line(4), " 2   -old");
+        assert_eq!(line(5), "   2 +new");
+        assert_eq!(buffer[(6, 4)].fg, Color::Rgb(255, 160, 160));
+        assert_eq!(buffer[(6, 5)].fg, Color::Rgb(160, 230, 170));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn appearance_files_change_message_insets_and_background_cells() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-appearance");
+        fs::write(state.join("padding.toml"), "horizontal = 3\nvertical = 2\n").unwrap();
+        fs::write(
+            state.join("theme.toml"),
+            "[backgrounds]\noperator = '#112233'\n",
+        )
+        .unwrap();
+        let mut screen = screen_in(&state);
+        screen.appearance = appearance::Appearance::load(&state).unwrap();
+        screen
+            .messages
+            .push(ChatMessage::new(TranscriptRole::Operator, "hello"));
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..20).map(|x| buffer[(x, 2)].symbol()).collect();
+        assert_eq!(content, "   hello            ");
+        for y in 0..5 {
+            for x in 0..20 {
+                assert_eq!(buffer[(x, y)].bg, Color::Rgb(17, 34, 51));
+                if y != 2 {
+                    assert_eq!(buffer[(x, y)].symbol(), " ");
+                }
+            }
+        }
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn tool_results_render_as_tinted_blocks_between_streamed_text() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-blocks");
         let mut screen = screen_in(&state);
@@ -2962,17 +3035,17 @@ mod tests {
         }));
         assert_eq!(screen.messages[3].text, "after more");
         assert_eq!(screen.messages[1].text, "before");
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 32)).unwrap();
         terminal.draw(|frame| screen.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
         for (row, text, background) in [
-            (0, "question", Color::Rgb(30, 45, 60)),
-            (2, "before", Color::Reset),
-            (4, "read_file ok", Color::Rgb(30, 60, 45)),
-            (6, "after more", Color::Reset),
+            (1, " question", Color::Rgb(30, 45, 60)),
+            (4, "before", Color::Reset),
+            (7, " read_file ok", Color::Rgb(30, 60, 45)),
+            (10, "after more", Color::Reset),
             (
-                8,
-                "read_file failed (exit 2) · exit 2",
+                13,
+                " read_file failed (exit 2) · exit 2",
                 Color::Rgb(60, 30, 30),
             ),
         ] {
@@ -2982,9 +3055,22 @@ mod tests {
             assert_eq!(rendered, text);
             // The tint covers the entire row, not only its text.
             assert_eq!(buffer[(0, row)].bg, background);
-            assert_eq!(buffer[(39, row)].bg, background);
+            assert_eq!(buffer[(59, row)].bg, background);
         }
-        for row in [1, 3, 5, 7] {
+        for (content_row, background) in [
+            (1, Color::Rgb(30, 45, 60)),
+            (7, Color::Rgb(30, 60, 45)),
+            (13, Color::Rgb(60, 30, 30)),
+        ] {
+            for row in [content_row - 1, content_row + 1] {
+                for x in 0..60 {
+                    assert_eq!(buffer[(x, row)].symbol(), " ", "cell ({x}, {row})");
+                    assert_eq!(buffer[(x, row)].bg, background, "cell ({x}, {row})");
+                }
+            }
+            assert_eq!(buffer[(59, content_row)].symbol(), " ");
+        }
+        for row in [3, 5, 9, 11] {
             assert_eq!(buffer[(0, row)].symbol(), " ");
             assert_eq!(buffer[(0, row)].bg, Color::Reset);
         }
@@ -3435,7 +3521,7 @@ mod tests {
         screen
             .apply_action(KeyAction::JumpToTop, &mut backend)
             .unwrap();
-        assert!(draw_lines(&mut screen, 80, 12)[0].starts_with("line 00"));
+        assert!(draw_lines(&mut screen, 80, 12)[1].starts_with(" line 00"));
         assert_eq!(screen.input_text(), "keep draft");
         assert!(backend.requests.is_empty());
         fs::remove_dir_all(state).unwrap();

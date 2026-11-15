@@ -1,0 +1,19 @@
+# Copy to ~/.config/ahi/theme.toml, or $XDG_CONFIG_HOME/ahi/theme.toml.
+# Omitted values use defaults. Colors are "#RRGGBB" or "default".
+[backgrounds]
+operator = "#1e2d3c"
+assistant = "default"
+tool_success = "#1e3c2d"
+tool_error = "#3c1e1e"
+alert = "#463214"
+notice = "default"
+
+# Edit previews: foregrounds, line backgrounds, and intraline emphasis.
+# The removed style also marks failed command output.
+[diff]
+added = "#a0e6aa"
+removed = "#ffa0a0"
+added_background = "#23552d"
+removed_background = "#5a2323"
+added_emphasis = "#328241"
+removed_emphasis = "#8c3232"
