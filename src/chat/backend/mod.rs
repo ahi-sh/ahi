@@ -15,7 +15,7 @@ pub(crate) use tool_call::ToolCall;
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use ahi_durable::ToolRecord;
+use ahi_durable::{ToolDetail, ToolRecord};
 
 pub(crate) use http::HttpBackend;
 #[allow(unused_imports)]
@@ -91,7 +91,7 @@ pub(crate) enum ResponseEvent {
         content: String,
         exit_code: i32,
         /// Screen-only structure: diff texts, command streams, query.
-        detail: Option<tools::ToolDetail>,
+        detail: Option<ToolDetail>,
         /// Wall time of the call itself, approval excluded.
         elapsed: std::time::Duration,
         /// What the call did to the world, for a caller's ledger. `None` for

@@ -319,7 +319,9 @@ removed_emphasis = "#8c3232"
 
 Missing files or keys use these defaults without writing configuration. Invalid colors, unknown keys, and invalid padding values stop startup with the filename and parse error. Complete examples are in `examples/tui/`. Menu colors and syntax-token palettes are not configurable through these files yet.
 
-Edit previews show all generated unified-diff hunks with old/new line numbers, red removed text, green added text, and stronger backgrounds for changed words. Long diff lines wrap instead of being clipped at 400 characters; previews no longer stop at 200 rows. Command-output and read-preview limits are unchanged. Diff details and tool durations are currently live-turn presentation data; restoring a session restores its recorded messages but does not reconstruct those rich details.
+Edit previews show all generated unified-diff hunks with old/new line numbers, red removed text, green added text, and stronger backgrounds for changed words. Long diff lines wrap instead of being clipped at 400 characters; previews no longer stop at 200 rows. Command-output and read-preview limits are unchanged. Tool presentation is recorded with the session: edit before/after text, command argv and separated output streams, search/read metadata, exit codes, and durations survive resume and export/import. The service-backed live TUI uses the same records. Older sessions without presentation metadata still load with their original plain previews. Presentation data is not sent to the model.
+
+Each serialized tool detail is limited to 512 KiB to leave room for the bounded result text within the service's 2 MiB frame limit. Larger previews display an explicit omission explanation instead of a partial or misleading diff; the result and duration remain recorded. This applies in standalone and service-backed chat. Session files now retain more source/output data and can reach their existing 64 MiB budget sooner; keep exported sessions private.
 
 ### ahi session
 

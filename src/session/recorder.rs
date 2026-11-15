@@ -157,6 +157,7 @@ impl Recorder {
             role: Role::Operator,
             text: prompt.to_string(),
             tool: None,
+            presentation: None,
         }));
     }
 
@@ -179,6 +180,7 @@ impl Recorder {
                 calls: calls.to_vec(),
                 native: native.cloned(),
             }),
+            presentation: None,
         }));
     }
 
@@ -189,6 +191,7 @@ impl Recorder {
         output: &str,
         content: &str,
         exit_code: i32,
+        presentation: ahi_durable::ToolPresentation,
     ) {
         if self.turn.is_none() {
             return;
@@ -201,6 +204,7 @@ impl Recorder {
                 name: name.to_string(),
                 content: content.to_string(),
             }),
+            presentation: Some(presentation),
         }));
     }
 
@@ -277,6 +281,7 @@ impl Recorder {
                 role: Role::Assistant,
                 text,
                 tool: None,
+                presentation: None,
             }));
         }
         self.record(Kind::Turn(Turn {
@@ -380,7 +385,14 @@ mod tests {
             arguments: Map::new(),
         };
         recorder.calls(&[call], None);
-        recorder.tool_result("c1", "read_file", "read_file a.rs\nfn a", "fn a", 0);
+        recorder.tool_result(
+            "c1",
+            "read_file",
+            "read_file a.rs\nfn a",
+            "fn a",
+            0,
+            ahi_durable::ToolPresentation::new(None, std::time::Duration::ZERO),
+        );
         recorder.text("done");
         recorder.end_turn();
         recorder.model_changed(&selection("m2"));

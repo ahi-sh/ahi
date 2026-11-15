@@ -10,7 +10,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::render::{RowSpan, Styled, Target};
 use super::{diff, highlight, links, markdown, theme, ChatMessage, ToolPayload, TranscriptRole};
-use crate::chat::backend::tools::{self, ToolDetail};
+use crate::chat::backend::tools;
+use ahi_durable::ToolDetail;
 
 /// Non-diff previews stop here; edit diffs retain every hunk.
 const MAX_BODY_ROWS: usize = 200;
@@ -467,13 +468,14 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 _ => format!("{lines} lines"),
             });
         }
+        Some(ToolDetail::Omitted { reason }) => summary.push(reason.clone()),
         None => {}
     }
     if let Some(reason) = &reason {
         summary.push(reason.clone());
     } else if exit_code == tools_exit_denied() {
         summary.push("denied".into());
-    } else if exit_code != 0 && message.detail.is_none() {
+    } else if exit_code != 0 && matches!(message.detail, None | Some(ToolDetail::Omitted { .. })) {
         summary.push(format!("exit {exit_code}"));
     }
     if let Some(elapsed) = message.elapsed {
@@ -1033,6 +1035,23 @@ mod tests {
             "unknown files are not clickable"
         );
         assert_eq!(out[3].spans[0].style, theme::dim());
+    }
+
+    #[test]
+    fn an_omitted_preview_explains_the_limit_and_keeps_the_failure_and_duration() {
+        let message = tool(
+            "run_command",
+            "run_command .",
+            1,
+            Some(ToolDetail::Omitted {
+                reason: "preview not retained".into(),
+            }),
+        );
+        let out = paragraphs(&message, &options(), 80);
+        assert_eq!(
+            out.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["run_command . · preview not retained · exit 1 · 3.8s"]
+        );
     }
 
     #[test]

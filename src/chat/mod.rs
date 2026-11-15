@@ -1456,8 +1456,15 @@ impl ChatScreen {
                 elapsed,
                 record,
             } => {
-                self.recorder
-                    .tool_result(&call_id, &tool, &output, &content, exit_code);
+                let presentation = ahi_durable::ToolPresentation::new(detail, elapsed);
+                self.recorder.tool_result(
+                    &call_id,
+                    &tool,
+                    &output,
+                    &content,
+                    exit_code,
+                    presentation.clone(),
+                );
                 if let Some(record) = record.as_deref() {
                     self.recorder.skill_load(record);
                 }
@@ -1467,8 +1474,8 @@ impl ChatScreen {
                     name: tool,
                     content,
                 });
-                message.detail = detail;
-                message.elapsed = Some(elapsed);
+                message.detail = presentation.detail;
+                message.elapsed = Some(presentation.elapsed);
                 self.push_message(message);
                 self.assistant_open = false;
                 false
@@ -2298,6 +2305,7 @@ mod tests {
                 role,
                 text: text.into(),
                 tool: None,
+                presentation: None,
             })
         };
         let turn = |run_id: &str, status| {
@@ -2935,6 +2943,89 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_session_preserves_rendered_edits_and_failed_command_details() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-rich-resume");
+        let dirs = Directories::single_root(&state);
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("change and test");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "edit".into(),
+            tool: "edit_file".into(),
+            output: "edit_file src/a.rs".into(),
+            content: "written".into(),
+            exit_code: 0,
+            detail: Some(ahi_durable::ToolDetail::Write {
+                before: Some("old\n".into()),
+                after: "new\n".into(),
+            }),
+            elapsed: std::time::Duration::from_millis(400),
+            record: None,
+        });
+        screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "test".into(),
+            tool: "run_command".into(),
+            output: "run_command .".into(),
+            content: "tests failed".into(),
+            exit_code: 1,
+            detail: Some(ahi_durable::ToolDetail::Command {
+                argv: vec!["cargo".into(), "test".into()],
+                exit_code: Some(1),
+                stdout: "one test\n".into(),
+                stderr: "assertion failed\n".into(),
+                stdout_cut: false,
+                stderr_cut: false,
+            }),
+            elapsed: std::time::Duration::from_millis(3800),
+            record: None,
+        });
+        screen.apply_event(ResponseEvent::Completed);
+        let id = screen.recorder.session_id().unwrap().to_string();
+        let tools = |screen: &ChatScreen| {
+            screen
+                .messages()
+                .iter()
+                .filter(|message| matches!(message.role, TranscriptRole::Tool { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let live = tools(&screen);
+        assert_eq!(live.len(), 2);
+        let expected = transcript::render::wrapped_lines(&live, 80);
+        assert!(expected.iter().any(|line| line
+            .to_string()
+            .contains("edit_file src/a.rs · +1 -1 · 0.4s")));
+        assert!(expected
+            .iter()
+            .any(|line| line.to_string().contains("cargo test · exit 1 · 3.8s")));
+        drop(screen);
+        let stored = session::Store::new(&dirs).hold(&id).unwrap();
+        let resumed = ChatScreen::load_resumed(&dirs, stored);
+        let restored = tools(&resumed);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(transcript::render::wrapped_lines(&restored, 80), expected);
+        assert_eq!(
+            restored[0].detail,
+            Some(ahi_durable::ToolDetail::Write {
+                before: Some("old\n".into()),
+                after: "new\n".into(),
+            })
+        );
+        assert_eq!(
+            restored[1].elapsed,
+            Some(std::time::Duration::from_millis(3800))
+        );
+        assert!(
+            matches!(&restored[1].tool, Some(ToolPayload::Result { content, .. }) if content == "tests failed")
+        );
+        drop(resumed);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn edit_preview_draws_numbered_red_and_green_lines() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-edit-preview");
         let mut screen = screen_in(&state);
@@ -2944,7 +3035,7 @@ mod tests {
             content: String::new(),
             output: "edit_file src/main.rs".into(),
             exit_code: 0,
-            detail: Some(backend::tools::ToolDetail::Write {
+            detail: Some(ahi_durable::ToolDetail::Write {
                 before: Some("keep\nold\nend".into()),
                 after: "keep\nnew\nend".into(),
             }),

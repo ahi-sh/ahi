@@ -31,8 +31,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/ahi"))
     parser.add_argument("--capture-directory", type=Path)
-    parser.add_argument("--appearance-only", action="store_true",
-                        help="stop after local appearance, selection, and model-switch checks")
+    focused = parser.add_mutually_exclusive_group()
+    focused.add_argument("--appearance-only", action="store_true",
+                         help="stop after local appearance, selection, and model-switch checks")
+    focused.add_argument("--session-details-only", action="store_true",
+                         help="verify rich tool details in resumed standalone and service-backed chats")
     args = parser.parse_args()
     if args.capture_directory:
         args.capture_directory.mkdir(parents=True, exist_ok=True)
@@ -48,7 +51,8 @@ def main() -> None:
         def __init__(self, state: Path, editor: Path | None = None,
                      cwd: Path | None = None, executable_dir: Path | None = None,
                      columns: int = 160, rows: int = 30,
-                     environment: dict[str, str] | None = None) -> None:
+                     environment: dict[str, str] | None = None,
+                     command: tuple[str, ...] = ("tui",)) -> None:
             self.columns = columns
             self.rows = rows
             self.pid, self.fd = pty.fork()
@@ -69,7 +73,7 @@ def main() -> None:
                 env.pop("ANTHROPIC_API_KEY", None)
                 if editor:
                     env["VISUAL"] = f"/bin/sh '{editor}'"
-                os.execve(binary, [str(binary), "--state-dir", str(state), "tui"], env)
+                os.execve(binary, [str(binary), "--state-dir", str(state), *command], env)
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             self.output = b""
             self.recent = b""
@@ -184,6 +188,71 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    if args.session_details_only:
+        with tempfile.TemporaryDirectory(prefix="ahi-rich-session-") as temp:
+            state = Path(temp)
+            session_id = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+            (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                "baseUrl": "http://127.0.0.1:9/v1", "api": "openai-completions",
+                "models": [{"id": "fixture"}],
+            }}}))
+            records = [{"type": "session", "schema": 1, "id": session_id,
+                        "started": "2026-01-01T00:00:00Z", "cwd": str(state),
+                        "host": "fixture", "ahi_version": "0.17.0",
+                        "gateway": "local", "model": "fixture", "thinking": "off"}]
+            entries = [
+                {"type": "message", "role": "operator", "text": "change and test"},
+                {"type": "message", "role": "assistant", "text": "", "calls": [
+                    {"id": "edit", "name": "edit_file", "arguments": {"path": "src/a.rs", "old": "old", "new": "new"}},
+                    {"id": "test", "name": "run_command", "arguments": {"argv": ["cargo", "test"]}},
+                ]},
+                {"type": "message", "role": "tool", "exit_code": 0, "text": "edit_file src/a.rs",
+                 "result": {"call_id": "edit", "name": "edit_file", "content": "written"},
+                 "presentation": {"detail": {"kind": "write", "before": "old\n", "after": "new\n"},
+                                  "elapsed": {"secs": 0, "nanos": 400000000}}},
+                {"type": "message", "role": "tool", "exit_code": 1, "text": "run_command .",
+                 "result": {"call_id": "test", "name": "run_command", "content": "tests failed"},
+                 "presentation": {"detail": {"kind": "command", "argv": ["cargo", "test"], "exit_code": 1,
+                                              "stdout": "one test", "stderr": "assertion failed",
+                                              "stdout_cut": False, "stderr_cut": False},
+                                  "elapsed": {"secs": 3, "nanos": 800000000}}},
+                {"type": "message", "role": "assistant", "text": "The tests failed."},
+                {"type": "turn", "run_id": "00112233aabbccdd", "status": "ok", "prompt_sha256": "", "result": {}},
+            ]
+            for seq, entry in enumerate(entries, 1):
+                records.append(dict(entry, seq=seq, parent=seq - 1 or None, time="2026-01-01T00:00:00Z"))
+            source = state / "fixture.jsonl"
+            source.write_text("".join(json.dumps(record) + "\n" for record in records))
+            subprocess.run([str(binary), "--state-dir", str(state), "session", "import", str(source)],
+                           capture_output=True, timeout=10, check=True)
+            exported = state / "exported.jsonl"
+            subprocess.run([str(binary), "--state-dir", str(state), "session", "export", session_id, "--to", str(exported)],
+                           capture_output=True, timeout=10, check=True)
+            assert [json.loads(line) for line in exported.read_text().splitlines()] == records
+            try:
+                for label, command in [
+                    ("standalone", ("tui", "--session", session_id, "--standalone")),
+                    ("service", ("--session", session_id)),
+                ]:
+                    session = Session(state, columns=100, rows=40, command=command)
+                    try:
+                        session.expect("edit_file src/a.rs · +1 -1 · 0.4s")
+                        session.expect("1   -old")
+                        session.expect("1 +new")
+                        session.expect("cargo test · exit 1 · 3.8s")
+                        session.expect("assertion failed")
+                        session.capture(f"resumed-tool-details-{label}")
+                        session.send("/quit\r")
+                        output = session.finish()
+                        assert f"Resume: ahi --session {session_id}" in output
+                    finally:
+                        session.close()
+            finally:
+                subprocess.run([str(binary), "--state-dir", str(state), "serve", "stop"],
+                               capture_output=True, timeout=10)
+        print("PASS: import/export and resumed edit diffs, failed command streams, exit code, duration, and quit in both engines")
+        return
 
     with tempfile.TemporaryDirectory(prefix="ahi-picker-") as temp:
         state = Path(temp)

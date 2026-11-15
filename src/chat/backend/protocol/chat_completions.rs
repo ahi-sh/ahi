@@ -317,6 +317,28 @@ mod tests {
     }
 
     #[test]
+    fn restored_presentation_is_not_sent_in_model_messages() {
+        let entry = crate::session::Entry::from_json(&json!({
+            "type": "message", "seq": 1, "role": "tool", "exit_code": 0,
+            "text": "read_file a", "result": {"call_id": "a", "name": "read_file", "content": "model result"},
+            "presentation": {"detail": {"kind": "read", "offset": 50, "limit": 4, "lines": 3},
+                             "elapsed": {"secs": 3, "nanos": 800000000}}
+        })).unwrap();
+        let crate::session::Kind::Message(stored) = entry.kind else {
+            panic!("expected message")
+        };
+        let body = messages(
+            &[assistant("", &["a"]), stored.to_chat(None)],
+            &CompletionCompatibility::default(),
+        );
+        assert_eq!(body.len(), 2);
+        assert_eq!(
+            body[1],
+            json!({"role": "tool", "tool_call_id": "a", "content": "model result"})
+        );
+    }
+
+    #[test]
     fn a_bridge_follows_tool_results_only_when_required() {
         let transcript = vec![
             ChatMessage::new(TranscriptRole::Operator, "q"),
