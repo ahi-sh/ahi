@@ -110,6 +110,7 @@ fn render(entry: &Entry) -> String {
             role: Role::Assistant,
             text,
             tool,
+            ..
         }) => {
             let mut out = String::new();
             if !text.trim().is_empty() {

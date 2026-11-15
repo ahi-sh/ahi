@@ -12,14 +12,14 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::tools::{self, Arguments, PreparedCall, ToolDetail, Workspace};
+use super::tools::{self, Arguments, PreparedCall, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
 };
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::tool_policy::{self as tool_policy, path_within, ActionPolicy, Verdict};
-use ahi_durable::ToolRecord;
+use ahi_durable::{ToolDetail, ToolRecord};
 
 /// Model responses that may request tools within one operator turn.
 pub(super) const MAX_ROUNDS: usize = 8;

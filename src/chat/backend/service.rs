@@ -479,6 +479,10 @@ fn entry_event(entry: &Value) -> Option<Vec<ResponseEvent>> {
     let Kind::Message(message) = entry.kind else {
         return None;
     };
+    let (detail, elapsed) = message
+        .presentation
+        .map(|presentation| (presentation.detail, presentation.elapsed))
+        .unwrap_or((None, Duration::ZERO));
     match (message.role, message.tool) {
         (
             crate::session::Role::Assistant,
@@ -498,8 +502,8 @@ fn entry_event(entry: &Value) -> Option<Vec<ResponseEvent>> {
                 output: message.text,
                 content,
                 exit_code,
-                detail: None,
-                elapsed: Duration::ZERO,
+                detail,
+                elapsed,
                 record: None,
             },
             ResponseEvent::ToolCallReturned,
@@ -620,6 +624,30 @@ mod tests {
     }
 
     #[test]
+    fn service_entries_relay_tool_presentation_without_changing_the_model_result() {
+        let mut value = json!({
+            "type": "message", "seq": 1, "role": "tool", "exit_code": 0,
+            "text": "edit_file src/a.rs",
+            "result": {"call_id": "c1", "name": "edit_file", "content": "written"},
+            "presentation": {"detail": {"kind": "write", "before": "old", "after": "new"},
+                "elapsed": {"secs": 3, "nanos": 800000000}}
+        });
+        let events = entry_event(&value).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], ResponseEvent::ToolResult { detail, elapsed, content, .. }
+            if detail == &Some(ahi_durable::ToolDetail::Write { before: Some("old".into()), after: "new".into() })
+            && *elapsed == Duration::from_millis(3800) && content == "written")
+        );
+        assert!(matches!(events[1], ResponseEvent::ToolCallReturned));
+        value.as_object_mut().unwrap().remove("presentation");
+        let legacy = entry_event(&value).unwrap();
+        assert!(
+            matches!(&legacy[0], ResponseEvent::ToolResult { detail: None, elapsed, .. } if elapsed.is_zero())
+        );
+    }
+
+    #[test]
     fn the_screen_backend_runs_turns_through_the_service_and_relays_asks() {
         let (url, gateway) = gateway(vec![
             calls_stream("read_file", json!({"path": "src/a.rs"})),
@@ -671,6 +699,21 @@ mod tests {
             "operator, calls, result, answer, turn"
         );
         assert_eq!(stored.summary().last_turn.unwrap().1, Status::Ok);
+        let Kind::Message(tool) = &stored.entries()[2].kind else {
+            panic!("expected tool result")
+        };
+        assert_eq!(
+            tool.presentation.as_ref().unwrap().detail,
+            Some(ahi_durable::ToolDetail::Read {
+                offset: None,
+                limit: None,
+                lines: 1
+            })
+        );
+        assert_eq!(
+            tool.to_chat(None).elapsed,
+            Some(tool.presentation.as_ref().unwrap().elapsed)
+        );
         assert_eq!(
             fs::read_to_string(dir.join("work/src/a.rs")).unwrap(),
             "fn a() {}\n"

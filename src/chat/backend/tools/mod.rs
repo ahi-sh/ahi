@@ -32,6 +32,7 @@ pub(crate) use write_file::WriteReport;
 
 use super::ToolCall;
 use crate::tool_policy::normalize_relative_path;
+use ahi_durable::ToolDetail;
 
 pub(crate) const READ_FILE: &str = "read_file";
 pub(crate) const LIST_DIR: &str = "list_dir";
@@ -684,42 +685,6 @@ impl From<run_command::RunError> for ToolFailure {
             ran: Some(error.ran),
         }
     }
-}
-
-/// What the screen draws for a finished call beyond its text: the exact
-/// texts a write replaced, the separated streams of a command, or the
-/// query a search ran. Never sent to a model; `content` already carries
-/// what the model needs. Bounded by the caps of the tool that produced it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ToolDetail {
-    Write {
-        /// `None` for a created file.
-        before: Option<String>,
-        after: String,
-    },
-    Command {
-        argv: Vec<String>,
-        exit_code: Option<i32>,
-        stdout: String,
-        stderr: String,
-        stdout_cut: bool,
-        stderr_cut: bool,
-    },
-    Search {
-        pattern: String,
-        literal: bool,
-        glob: Option<String>,
-        matches: usize,
-    },
-    Find {
-        pattern: String,
-        matches: usize,
-    },
-    Read {
-        offset: Option<usize>,
-        limit: Option<usize>,
-        lines: usize,
-    },
 }
 
 /// Run an approved call. `toolchain_env` is the approving command rule's

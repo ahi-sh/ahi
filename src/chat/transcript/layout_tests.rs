@@ -4,7 +4,7 @@
 use super::format::Options;
 use super::render::{visible_lines, Dirty, TranscriptLayout, TranscriptRow};
 use super::{ChatMessage, ToolPayload, TranscriptRole};
-use crate::chat::backend::tools::ToolDetail;
+use ahi_durable::ToolDetail;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 

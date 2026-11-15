@@ -1363,7 +1363,7 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
                 output: "read_file src/a.rs\nfn a() {}".into(),
                 content: "fn a() {}\n".into(),
                 exit_code: 0,
-                detail: Some(super::super::tools::ToolDetail::Read {
+                detail: Some(ahi_durable::ToolDetail::Read {
                     offset: None,
                     limit: None,
                     lines: 1,

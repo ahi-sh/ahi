@@ -9,6 +9,7 @@ description = "Execution records and effect accounting for ahi"
 publish = false
 
 [dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 
 [lints.rust]

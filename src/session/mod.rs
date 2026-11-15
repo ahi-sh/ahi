@@ -167,6 +167,8 @@ pub struct StoredMessage {
     pub role: Role,
     pub text: String,
     pub(crate) tool: Option<ToolPayload>,
+    /// Human-facing metadata, separate from model-facing tool content.
+    pub(crate) presentation: Option<ahi_durable::ToolPresentation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +232,10 @@ impl StoredMessage {
             Role::Tool { exit_code } => TranscriptRole::Tool { exit_code },
         };
         let mut message = ChatMessage::new(role, self.text.clone());
+        if let Some(presentation) = &self.presentation {
+            message.detail = presentation.detail.clone();
+            message.elapsed = Some(presentation.elapsed);
+        }
         message.tool = match &self.tool {
             Some(ToolPayload::Calls { calls, native }) => Some(ToolPayload::Calls {
                 calls: calls.clone(),
@@ -262,6 +268,9 @@ impl Entry {
                     object.insert("exit_code".into(), json!(code));
                 }
                 object.insert("text".into(), json!(message.text));
+                if let Some(presentation) = &message.presentation {
+                    object.insert("presentation".into(), json!(presentation));
+                }
                 match &message.tool {
                     Some(ToolPayload::Calls { calls, native }) => {
                         object.insert(
@@ -402,10 +411,29 @@ impl Entry {
                         None => None,
                     }
                 };
+                let presentation = value
+                    .get("presentation")
+                    .map(|value| {
+                        if !matches!(role, Role::Tool { .. }) {
+                            return Err(StoreError::Corrupt(
+                                "presentation belongs to a tool message".into(),
+                            ));
+                        }
+                        if value["detail"].to_string().len() > ahi_durable::MAX_TOOL_DETAIL_BYTES {
+                            return Err(StoreError::Corrupt(
+                                "tool presentation exceeds the 512 KiB detail limit".into(),
+                            ));
+                        }
+                        serde_json::from_value(value.clone()).map_err(|err| {
+                            StoreError::Corrupt(format!("invalid tool presentation: {err}"))
+                        })
+                    })
+                    .transpose()?;
                 Kind::Message(StoredMessage {
                     role,
                     text: text("text").ok_or_else(|| corrupt("text"))?,
                     tool,
+                    presentation,
                 })
             }
             Some("turn") => Kind::Turn(Turn {
@@ -560,6 +588,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stored_tool_presentation_survives_reopen_without_changing_model_content() {
+        let value = json!({
+            "type": "message", "seq": 1, "parent": null, "time": "2026-01-01T00:00:00Z",
+            "role": "tool", "exit_code": 1, "text": "run_command .",
+            "result": {"call_id": "c1", "name": "run_command", "content": "model result"},
+            "presentation": {
+                "detail": {"kind": "command", "argv": ["cargo", "test"], "exit_code": 1,
+                    "stdout": "one test", "stderr": "failed", "stdout_cut": false, "stderr_cut": false},
+                "elapsed": {"secs": 3, "nanos": 800000000}
+            }
+        });
+        let entry = Entry::from_json(&value).unwrap();
+        let Kind::Message(stored) = &entry.kind else {
+            panic!("expected message")
+        };
+        let restored = stored.to_chat(None);
+        assert_eq!(
+            restored.elapsed,
+            Some(std::time::Duration::from_millis(3800))
+        );
+        assert_eq!(
+            restored.detail,
+            Some(ahi_durable::ToolDetail::Command {
+                argv: vec!["cargo".into(), "test".into()],
+                exit_code: Some(1),
+                stdout: "one test".into(),
+                stderr: "failed".into(),
+                stdout_cut: false,
+                stderr_cut: false,
+            })
+        );
+        assert!(
+            matches!(restored.tool, Some(ToolPayload::Result { content, .. }) if content == "model result")
+        );
+        assert_eq!(entry.to_json(), value);
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("presentation");
+        let Kind::Message(old) = Entry::from_json(&legacy).unwrap().kind else {
+            panic!("expected message")
+        };
+        assert_eq!(old.to_chat(None).detail, None);
+        assert_eq!(old.to_chat(None).elapsed, None);
+
+        let mut invalid = value.clone();
+        invalid["role"] = json!("operator");
+        assert!(Entry::from_json(&invalid).is_err());
+        invalid = value;
+        invalid["presentation"]["detail"]["kind"] = json!("unknown");
+        assert!(Entry::from_json(&invalid).is_err());
+        invalid["presentation"]["detail"] = json!({
+            "kind": "write", "before": null,
+            "after": "x".repeat(ahi_durable::MAX_TOOL_DETAIL_BYTES + 1),
+        });
+        assert!(
+            matches!(Entry::from_json(&invalid), Err(StoreError::Corrupt(message))
+            if message == "tool presentation exceeds the 512 KiB detail limit")
+        );
+    }
+
+    #[test]
     fn entries_round_trip_through_json_and_bad_lines_are_refused() {
         let mut arguments = Map::new();
         arguments.insert("path".into(), json!("src/a.rs"));
@@ -572,6 +660,7 @@ mod tests {
                     role: Role::Operator,
                     text: "hello".into(),
                     tool: None,
+                    presentation: None,
                 }),
             },
             Entry {
@@ -581,6 +670,7 @@ mod tests {
                 kind: Kind::Message(StoredMessage {
                     role: Role::Assistant,
                     text: "reading".into(),
+                    presentation: None,
                     tool: Some(ToolPayload::Calls {
                         calls: vec![ToolCall {
                             id: "c1".into(),
@@ -601,6 +691,7 @@ mod tests {
                 kind: Kind::Message(StoredMessage {
                     role: Role::Tool { exit_code: 126 },
                     text: "denied".into(),
+                    presentation: None,
                     tool: Some(ToolPayload::Result {
                         call_id: "c1".into(),
                         name: "read_file".into(),

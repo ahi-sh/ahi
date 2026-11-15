@@ -559,6 +559,7 @@ mod tests {
             role,
             text: text.into(),
             tool: None,
+            presentation: None,
         })
     }
 
