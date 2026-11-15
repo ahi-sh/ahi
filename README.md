@@ -57,6 +57,7 @@ Use `cargo install ahi --locked`, above. Prebuilt macOS archives and `ahi update
 ahi doctor          # versions, the config, data, state and cache directories, and any mode warnings
 ahi login           # sign in to OpenAI in the browser (optional)
 ahi tui             # register a gateway with /gateway, curate models, chat
+ahi --session <id>  # continue a saved chat (find IDs with ahi session list)
 ahi run --all-files # in a repository with .pre-commit-config.yaml
 ahi dev             # shell in the published dev image, with podman or docker installed
 ```
@@ -115,7 +116,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tools list`, `ahi tools examples [list\|show [<name>]]`, `ahi tools init [--example <name>] [--write]`](#ahi-tools) | Show the working directory's chat tool policy, show the shipped examples, or write one into the working directory. |
-| [`ahi tui [--refresh] [--resume <id>] [--standalone] [--socket <path>]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; turns run through `ahi serve`, started when needed, and every chat is recorded as a session. |
+| [`ahi --session <id>` / `ahi tui [--refresh] [--session <id>] [--standalone] [--socket <path>]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; turns run through `ahi serve`, started when needed, and every chat is recorded as a session. |
 | [`ahi session list\|show\|export\|import`](#ahi-session) | List recorded sessions, print one, copy one out of the store, or bring one in. |
 | [`ahi exec --model <gateway/model> (-p <text> \| --prompt-file <path> \| stdin)`](#ahi-exec) | One model turn from the command line, with tools under policy, a result document, and exit codes; the worker a coordinator runs over ssh. |
 | [`ahi serve [start\|stop]`, `ahi connect`](#ahi-serve) | Serve sessions on a Unix socket for every front end and for herdr-core; bridge stdio to that socket for `ssh host ahi connect`; `--via <command>` attaches a chat or a turn to a server elsewhere. |
@@ -289,7 +290,7 @@ Every chat is recorded as it happens into one file of JSON lines under the state
 
 - `ahi session list [--json]` reads each file line by line (never whole; `--json` rows carry `bytes`) and prints one line per session, newest first: id, start time, gateway and model, working directory, turn count, and the last turn's status and run id. Files this ahi cannot read are named on stderr and skipped.
 - `ahi session show <id|path> [--json] [--branch <seq>]` prints the active path of a session in conversation order: operator lines, replies, the name and target of each tool call, the first line of each tool result, each skill the model read (`— skill <name> (<root>, <size>)`), and the turn lines. An entry type written by a newer ahi is kept in its place and shown as unknown, never treated as corruption. `--branch` follows another branch (a failed attempt) back to the root; `--json` prints the header and those entries as lines. A path shows a session file that is not in the store.
-- `ahi tui --resume <id>` opens the chat over a stored session with its recorded model and thinking level and the active path's messages, and appends new turns to it.
+- `ahi --session <id>` opens the terminal chat over a stored ahi session with its recorded model and thinking level and the active path's messages, and appends new turns to it. `ahi tui --session <id>` and `ahi tui --resume <id>` are equivalent entry points. Use the `tui` form for additional chat options such as `--standalone`, `--socket`, or `--via`. The top-level shortcut accepts global options such as `--state-dir` but cannot be combined with a subcommand. As with `ahi tui`, piped output lists providers instead of opening an interactive chat. Quitting a recorded chat with `/quit` or **Ctrl+D** prints its session ID and `ahi --session <id>` after restoring the terminal. Chats without a saved session do not print a resume command.
 - `ahi session export <id> --to <file>` copies the session file; the destination must not exist. `ahi session import <file>` copies a session file into the store, or extends the stored copy when the file carries new entries after the ones already stored, and refuses a file whose history differs. Across machines that is the whole protocol: the file moves by any means (`scp`, `rsync`, a multiplexer's file transfer) and `import` reads it.
 
 Prompts, replies, tool arguments (including text written to files), tool output, and the provider's native replay items are all in the file, as they were all sent to the provider. One process writes a session at a time, the chat that holds it; readers skip a last line that is still being written.

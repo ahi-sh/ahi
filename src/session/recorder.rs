@@ -75,7 +75,6 @@ impl Recorder {
     }
 
     /// The session being written, once it exists.
-    #[allow(dead_code)] // the chat screen will show it
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session.as_ref().map(Session::id)
     }
@@ -214,11 +213,11 @@ impl Recorder {
     }
 
     /// The model read a skill; written after the tool result it accompanies.
-    pub(crate) fn skill_load(&mut self, record: &crate::chat::backend::ToolRecord) {
+    pub(crate) fn skill_load(&mut self, record: &ahi_durable::ToolRecord) {
         if self.turn.is_none() {
             return;
         }
-        if let crate::chat::backend::ToolRecord::Skill {
+        if let ahi_durable::ToolRecord::Skill {
             name,
             root,
             file,

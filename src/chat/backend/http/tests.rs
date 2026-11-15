@@ -1,13 +1,15 @@
 use super::*;
 use crate::chat::backend::parse_selection;
 use crate::chat::backend::sse::FRAME_CAP;
-// `Caller` and `ToolRecord` are used by the Unix-only cancel and record tests.
+// `Caller` is used by the Unix-only cancel tests.
 #[cfg_attr(not(unix), allow(unused_imports))]
-use crate::chat::backend::{Caller, ProposedAction, ToolCall, ToolDecision, ToolRecord};
+use crate::chat::backend::{Caller, ProposedAction, ToolCall, ToolDecision};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
 use crate::error::ErrorKind;
 use crate::harness::{ModelMetadata, Protocol};
+#[cfg(unix)]
+use ahi_durable::ToolRecord;
 use serde_json::json;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};

@@ -27,7 +27,9 @@ const GLOBAL: &str = "Global options";
         Hooks run only from this binary or from an approved local command; nothing is fetched or \
         installed by `ahi run`. Repository files: .pre-commit-config.yaml (hooks), ahi.hooks.yaml \
         (which local hooks may run), ahi.tools.yaml (chat tool calls), ahi.dev.yaml (dev image).",
-    after_help = "Start with `ahi doctor`, then `ahi run`. Each command has `--help`."
+    after_help = "Continue a chat with `ahi --session <ID>`. List saved chats with `ahi session list`. Each command has `--help`.",
+    subcommand_negates_reqs = true,
+    arg_required_else_help = true
 )]
 struct Cli {
     /// Pre-commit config to read instead of .pre-commit-config.yaml in the git root.
@@ -53,8 +55,12 @@ struct Cli {
     )]
     color: String,
 
+    /// Continue a recorded session in the terminal chat (see `ahi session list`).
+    #[arg(long, required = true, value_name = "ID")]
+    session: Option<String>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -119,7 +125,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
         /// Continue a recorded session by id (see `ahi session list`) instead of opening the picker.
-        #[arg(long, value_name = "SESSION")]
+        #[arg(long = "session", visible_alias = "resume", value_name = "ID")]
         resume: Option<String>,
         /// Do not record this chat as a session (standalone only; the server always records).
         #[arg(long)]
@@ -489,12 +495,25 @@ struct RunArgs {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if cli.session.is_some() && cli.command.is_some() {
+        eprintln!("error: --session cannot be combined with a subcommand; use `ahi --session <ID>` or `ahi tui --session <ID>`");
+        return ExitCode::from(2);
+    }
     if !matches!(cli.color.as_str(), "auto" | "always" | "never") {
         eprintln!("error: --color must be auto, always, or never");
         return ExitCode::from(2);
     }
-    match &cli.command {
+    let command = cli.command.take().unwrap_or_else(|| Command::Tui {
+        refresh: false,
+        tools: None,
+        resume: cli.session.clone(),
+        no_history: false,
+        standalone: false,
+        socket: None,
+        via: None,
+    });
+    match &command {
         Command::Run(args) => run(&cli, args),
         Command::ListChecks { format } => list_checks(format),
         Command::Explain { id } => explain(id),
@@ -1307,4 +1326,41 @@ fn relativize_files(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    const ID: &str = "01a1db77-ba18-74c2-b4cd-f05cf247eb76";
+
+    #[test]
+    fn session_entry_points_preserve_the_selected_id() {
+        let cli = Cli::try_parse_from(["ahi", "--session", ID]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some(ID));
+        assert!(cli.command.is_none());
+        for flag in ["--session", "--resume"] {
+            let cli = Cli::try_parse_from(["ahi", "tui", flag, ID]).unwrap();
+            let Some(Command::Tui { resume, .. }) = cli.command else {
+                panic!("expected the TUI command");
+            };
+            assert_eq!(resume.as_deref(), Some(ID));
+        }
+    }
+
+    #[test]
+    fn session_selection_rejects_missing_and_duplicate_arguments() {
+        for args in [
+            vec!["ahi", "--session"],
+            vec!["ahi", "tui", "--session"],
+            vec!["ahi", "tui", "--resume"],
+            vec!["ahi", "tui", "--session", ID, "--resume", ID],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["ahi"]).err().unwrap().kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        ));
+    }
 }

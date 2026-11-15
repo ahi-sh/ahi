@@ -141,6 +141,14 @@ struct ChatScreen {
 }
 
 impl ChatScreen {
+    fn finish_session(&mut self, backend: &dyn CompletionBackend) -> Option<String> {
+        self.status.clear();
+        backend
+            .session_id()
+            .or_else(|| self.recorder.session_id())
+            .map(str::to_owned)
+    }
+
     #[cfg(test)]
     fn load(state_dir: &Directories, selection: &str) -> Self {
         Self::load_recording(
@@ -1665,7 +1673,7 @@ pub(crate) fn interact(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let record = matches!(engine, Engine::Standalone { record: true });
     let mut screen = ChatScreen::load_recording(
         state_dir,
@@ -1689,7 +1697,7 @@ pub(crate) fn interact_resumed(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let store = session::Store::new(state_dir);
     let mut screen = match engine {
         // The server records; the screen only reads the session to start.
@@ -1756,7 +1764,7 @@ fn interact_screen(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
     let backend = backend.as_mut();
@@ -1776,10 +1784,7 @@ fn interact_screen(
         cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
         let outcome = outcome?;
         match outcome {
-            SessionEnd::Exit => {
-                screen.status.clear();
-                return Ok(());
-            }
+            SessionEnd::Exit => return Ok(screen.finish_session(backend)),
             SessionEnd::Login => {
                 let notice = match crate::tui::login::run(state_dir) {
                     Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),
@@ -1794,10 +1799,7 @@ fn interact_screen(
                     match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
                         PickerOutcome::Selected(next) => screen.set_selection(&next),
                         PickerOutcome::Back => {}
-                        PickerOutcome::Exit => {
-                            screen.status.clear();
-                            return Ok(());
-                        }
+                        PickerOutcome::Exit => return Ok(screen.finish_session(backend)),
                     }
                 }
                 Ok(None) => screen.push_notice("Gateway discovery cancelled".to_string()),
@@ -1811,10 +1813,7 @@ fn interact_screen(
                 match reopen_picker(view, &screen.selection.gateway, None)? {
                     PickerOutcome::Selected(next) => screen.set_selection(&next),
                     PickerOutcome::Back => {}
-                    PickerOutcome::Exit => {
-                        screen.status.clear();
-                        return Ok(());
-                    }
+                    PickerOutcome::Exit => return Ok(screen.finish_session(backend)),
                 }
             }
         }
@@ -2273,6 +2272,7 @@ mod tests {
         press(&mut quiet, &mut backend, crossterm::event::KeyCode::Enter);
         quiet.apply_event(ResponseEvent::Completed);
         assert_eq!(store.list().unwrap().0.len(), 2);
+        assert_eq!(quiet.finish_session(&backend), None);
         fs::remove_dir_all(state).unwrap();
     }
 
@@ -2365,6 +2365,12 @@ mod tests {
         let after = store.open(&id).unwrap();
         assert_eq!(after.entries().len(), 10);
         assert_eq!(after.entries()[8].parent, Some(3));
+        assert_eq!(screen.finish_session(&backend), Some(id));
+        screen.response_in_progress = false;
+        screen.receiver = None;
+        screen.set_input_text("/clear");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        assert_eq!(screen.finish_session(&backend), None);
         fs::remove_dir_all(state).unwrap();
     }
 

@@ -5,24 +5,24 @@
 
 use serde_json::{json, Value};
 
-use crate::chat::backend::ToolRecord;
+use crate::ToolRecord;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct Ledger {
+pub struct Ledger {
     /// Calls the model requested.
-    pub(crate) calls: usize,
+    pub calls: usize,
     /// Calls a rule or an operator denied.
-    pub(crate) denied: usize,
+    pub denied: usize,
     /// Calls denied because nobody could answer an `ask`.
-    pub(crate) ask_denied: usize,
+    pub ask_denied: usize,
     /// Calls that reached a tool and failed.
-    pub(crate) errors: usize,
+    pub errors: usize,
     /// Tool rounds the model ran.
-    pub(crate) rounds: usize,
+    pub rounds: usize,
     /// Results still owed for the current round.
     pending: usize,
     /// Whether the turn ended with a call in flight.
-    pub(crate) interrupted: bool,
+    pub interrupted: bool,
     records: Vec<ToolRecord>,
 }
 
@@ -31,19 +31,19 @@ const EXIT_DENIED: i32 = 126;
 
 impl Ledger {
     /// The model asked for `count` calls.
-    pub(crate) fn requested(&mut self, count: usize) {
+    pub fn requested(&mut self, count: usize) {
         self.calls += count;
         self.rounds += 1;
         self.pending = count;
     }
 
     /// Nobody could answer an `ask` for `count` calls.
-    pub(crate) fn unattended(&mut self, count: usize) {
+    pub fn unattended(&mut self, count: usize) {
         self.ask_denied += count;
     }
 
     /// One call returned.
-    pub(crate) fn returned(&mut self, exit_code: i32, record: Option<&ToolRecord>) {
+    pub fn returned(&mut self, exit_code: i32, record: Option<&ToolRecord>) {
         self.pending = self.pending.saturating_sub(1);
         if exit_code == EXIT_DENIED {
             self.denied += 1;
@@ -56,7 +56,7 @@ impl Ledger {
     }
 
     /// The turn ended; `pending` calls never returned.
-    pub(crate) fn close(&mut self) {
+    pub fn close(&mut self) {
         self.interrupted = self.pending > 0;
         self.pending = 0;
     }
@@ -64,7 +64,7 @@ impl Ledger {
     /// `none` when nothing effectful ran, `some` when every effect is
     /// recorded, `unknown` when a call was in flight at the end or a
     /// command's fate is not known.
-    pub(crate) fn effects(&self) -> &'static str {
+    pub fn effects(&self) -> &'static str {
         if self.interrupted || self.records.iter().any(|record| record.effect().is_none()) {
             return "unknown";
         }
@@ -79,7 +79,7 @@ impl Ledger {
         }
     }
 
-    pub(crate) fn to_json(&self) -> Value {
+    pub fn to_json(&self) -> Value {
         json!({
             "tools": {
                 "calls": self.calls,

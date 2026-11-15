@@ -132,13 +132,18 @@ pub fn run(
             crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)?;
             chat::Engine::Service(client)
         };
-        match selected {
+        let session_id = match selected {
             Selected::Picked(selection) => {
                 chat::interact(state, &selection, actions.as_deref(), engine, reopen)?
             }
             Selected::Resumed(id) => {
                 chat::interact_resumed(state, &id, actions.as_deref(), engine, reopen)?
             }
+        };
+        if let Some(id) = session_id {
+            picker
+                .print_on_exit
+                .push(format!("Session: {id}\nResume: ahi --session {id}"));
         }
     }
     Ok(RunOutput {

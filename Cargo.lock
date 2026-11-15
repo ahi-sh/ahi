@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "ahi"
 version = "0.17.0"
 dependencies = [
+ "ahi-durable",
  "ahi-unix",
  "ahi-widgets",
  "ahi-win32",
@@ -33,6 +34,13 @@ dependencies = [
  "unicode-width",
  "ureq",
  "yaml-rust2",
+]
+
+[[package]]
+name = "ahi-durable"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

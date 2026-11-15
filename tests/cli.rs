@@ -369,6 +369,42 @@ fn tui_on_a_pipe_lists_openai_and_a_configured_gateway() {
 }
 
 #[test]
+fn root_session_rejects_a_subcommand() {
+    for subcommand in ["doctor", "tui"] {
+        let output = ahi()
+            .args(["--session", "saved-chat", subcommand])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("--session cannot be combined with a subcommand"));
+    }
+}
+
+#[test]
+fn session_shortcut_and_tui_aliases_use_the_existing_piped_tui() {
+    let dir = fixture();
+    for args in [
+        vec!["--session", "01a1db77-ba18-74c2-b4cd-f05cf247eb76"],
+        vec!["tui", "--session", "01a1db77-ba18-74c2-b4cd-f05cf247eb76"],
+        vec!["tui", "--resume", "01a1db77-ba18-74c2-b4cd-f05cf247eb76"],
+    ] {
+        let output = ahi()
+            .args(["--state-dir", dir.to_str().unwrap()])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("provider openai"), "{args:?}: {text}");
+        assert!(text.contains("auth signed-out"), "{args:?}: {text}");
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn tui_refresh_on_a_pipe_preserves_curated_ids_and_reports_partial_failure() {
     use std::io::{Read, Write};
     let dir = fixture();
