@@ -158,8 +158,15 @@ fn aliases_preserve_explicit_write_and_preview_semantics() {
         "migrate",
         0,
     );
-    assert!(String::from_utf8_lossy(&preview.stdout)
-        .contains("Left .pre-commit-config.yaml unchanged."));
+    // Git and the OS can spell the same directory differently (notably on
+    // Windows); the CLI then displays the full path rather than a relative one.
+    assert!(
+        String::from_utf8_lossy(&preview.stdout).lines().any(|line| {
+            line.starts_with("Left ")
+                && line.ends_with(".pre-commit-config.yaml unchanged. Rerun with --write --force to replace it with the suggestion above.")
+        }),
+        "{preview:?}"
+    );
     assert_eq!(
         fs::read_to_string(repo.0.join(".pre-commit-config.yaml")).unwrap(),
         CONFIG
