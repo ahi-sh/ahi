@@ -24,10 +24,10 @@ use serde_json::{json, Map, Value};
 
 pub(crate) use store::{Session, Store};
 
-use crate::chat::backend::ToolCall;
 pub(crate) use crate::chat::transcript::ToolPayload;
 use crate::chat::transcript::{ChatMessage, NativeReplay, TranscriptRole};
 use crate::harness::Protocol;
+use crate::tools::ToolCall;
 
 /// Version of the line format. A header naming a newer schema is refused,
 /// never read with guesses.

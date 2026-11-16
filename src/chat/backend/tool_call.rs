@@ -9,12 +9,7 @@ use crate::error::{Error, Result};
 const MAX_CALLS: usize = 32;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ToolCall {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) arguments: Map<String, Value>,
-}
+use crate::tools::ToolCall;
 
 #[derive(Deserialize)]
 pub(super) struct ToolCallDelta {

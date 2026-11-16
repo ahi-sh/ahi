@@ -7,13 +7,18 @@
 //! The file is operator policy. Model output, tool results, and transcript text
 //! never write it and never create a grant.
 
-use std::fs;
+mod config;
+mod evaluate;
+pub(crate) mod examples;
+pub(crate) mod grants;
+
+#[cfg(test)]
+pub(crate) use config::parse;
+pub(crate) use config::{load, load_file};
+
 use std::path::{Component, Path};
 
 use serde::Deserialize;
-
-use crate::error::{Error, Result};
-use crate::yaml_safe::check_config_yaml;
 
 pub(crate) const FILE_NAME: &str = "ahi.tools.yaml";
 /// The name this file had before 0.7.0. Its presence is an error, never silence.
@@ -66,18 +71,6 @@ pub(crate) struct ToolRule {
     pub(crate) ask: bool,
 }
 
-impl ToolRule {
-    fn governs(&self, tool: &str) -> bool {
-        self.tools.iter().any(|t| t == tool)
-    }
-
-    fn argv_matches(&self, argv: &[String]) -> bool {
-        self.argv
-            .as_deref()
-            .is_none_or(|prefix| argv.len() >= prefix.len() && argv[..prefix.len()] == *prefix)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Effect {
@@ -97,119 +90,6 @@ pub(crate) enum Verdict {
     Approve { rule_id: String },
     Ask { rule_id: String },
     Deny { rule_id: Option<String> },
-}
-
-impl ActionPolicy {
-    /// Builtin tools that at least one rule could approve, in rule order.
-    pub(crate) fn advertised_tools(&self) -> Vec<String> {
-        let mut tools: Vec<String> = Vec::new();
-        for rule in &self.rules {
-            if rule.effect == Effect::Approve {
-                for tool in &rule.tools {
-                    if !tools.contains(tool) {
-                        tools.push(tool.clone());
-                    }
-                }
-            }
-        }
-        tools
-    }
-
-    pub(crate) fn rule(&self, id: &str) -> Option<&ToolRule> {
-        self.rules.iter().find(|rule| rule.id == id)
-    }
-
-    /// Skill names at least one rule could approve, in rule order.
-    pub(crate) fn approved_skills(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        for rule in &self.rules {
-            if rule.action == ActionKind::Skill && rule.effect == Effect::Approve {
-                if let Some(name) = rule.argv.as_ref().and_then(|argv| argv.first()) {
-                    if !names.contains(name) {
-                        names.push(name.clone());
-                    }
-                }
-            }
-        }
-        names
-    }
-
-    /// The verdict for loading the skill called `name`: a deny rule matches
-    /// without regard to case (`Deploy` is `deploy` to a deny), an approval
-    /// only exactly, and a name no rule approves is denied.
-    pub(crate) fn evaluate_skill(&self, name: &str) -> Verdict {
-        let skill_rules = || {
-            self.rules
-                .iter()
-                .filter(|rule| rule.action == ActionKind::Skill)
-        };
-        let named = |rule: &ToolRule| rule.argv.as_ref().and_then(|argv| argv.first().cloned());
-        if let Some(rule) = skill_rules().find(|rule| {
-            rule.effect == Effect::Deny && named(rule).is_some_and(|n| n.eq_ignore_ascii_case(name))
-        }) {
-            return Verdict::Deny {
-                rule_id: Some(rule.id.clone()),
-            };
-        }
-        let approving = |rule: &&ToolRule| {
-            rule.effect == Effect::Approve && named(rule).is_some_and(|n| n == name)
-        };
-        if let Some(rule) = skill_rules().find(|rule| approving(rule) && !rule.ask) {
-            return Verdict::Approve {
-                rule_id: rule.id.clone(),
-            };
-        }
-        if let Some(rule) = skill_rules().find(approving) {
-            return Verdict::Ask {
-                rule_id: rule.id.clone(),
-            };
-        }
-        Verdict::Deny { rule_id: None }
-    }
-
-    /// `path` is the file, directory, or working directory the call names;
-    /// `argv` is empty for every tool but `run_command`.
-    pub(crate) fn evaluate(&self, tool: &str, path: &str, argv: &[String]) -> Verdict {
-        let matching = || {
-            self.rules.iter().filter(move |rule| {
-                rule.governs(tool)
-                    && rule.argv_matches(argv)
-                    && rule
-                        .path
-                        .as_deref()
-                        .is_none_or(|prefix| path_within(prefix, path))
-            })
-        };
-        // Deny rules match without regard to case: macOS and Windows
-        // filesystems usually resolve `SRC/x` and `src/x` to the same file, and
-        // canonicalization keeps the requested spelling. Approvals stay exact,
-        // so a differently cased path falls through to ask or default deny.
-        let folded = path.to_lowercase();
-        if let Some(rule) = self.rules.iter().find(|rule| {
-            rule.effect == Effect::Deny
-                && rule.governs(tool)
-                && rule.argv_matches(argv)
-                && rule
-                    .path
-                    .as_deref()
-                    .is_none_or(|prefix| path_within(&prefix.to_lowercase(), &folded))
-        }) {
-            return Verdict::Deny {
-                rule_id: Some(rule.id.clone()),
-            };
-        }
-        if let Some(rule) = matching().find(|rule| rule.effect == Effect::Approve && !rule.ask) {
-            return Verdict::Approve {
-                rule_id: rule.id.clone(),
-            };
-        }
-        if let Some(rule) = matching().find(|rule| rule.effect == Effect::Approve) {
-            return Verdict::Ask {
-                rule_id: rule.id.clone(),
-            };
-        }
-        Verdict::Deny { rule_id: None }
-    }
 }
 
 /// Component-wise prefix test on normalized relative paths.
@@ -258,324 +138,10 @@ fn is_invisible_format(c: char) -> bool {
         | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
-/// Load `ahi.tools.yaml` from `root`. `Ok(None)` when the file is absent. The
-/// retired `ahi.tools.yaml` is an error so a renamed allowlist is never
-/// silently ignored.
-pub(crate) fn load(root: &Path, builtin_tools: &[&str]) -> Result<Option<ActionPolicy>> {
-    let retired = root.join(RETIRED_FILE_NAME);
-    if retired.is_file() {
-        return Err(Error::new(format!(
-            "{} is no longer read; rename it to {FILE_NAME} (the rule grammar is unchanged)",
-            retired.display()
-        )));
-    }
-    let path = root.join(FILE_NAME);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    read(&path, FILE_NAME, builtin_tools).map(Some)
-}
-
-/// Load the policy file the operator named (`ahi tui --tools`). Unlike the
-/// working-directory lookup, a missing or unreadable file is an error: the
-/// operator asked for this file, so its absence implies nothing.
-pub(crate) fn load_file(path: &Path, builtin_tools: &[&str]) -> Result<ActionPolicy> {
-    read(path, &path.display().to_string(), builtin_tools)
-}
-
-fn read(path: &Path, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
-    let text = fs::read_to_string(path)
-        .map_err(|err| Error::new(format!("failed to read {origin}: {err}")))?;
-    parse(&text, origin, builtin_tools)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPolicy {
-    version: u32,
-    #[serde(default)]
-    default: Option<String>,
-    #[serde(default)]
-    rules: Vec<RawRule>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRule {
-    id: String,
-    action: String,
-    #[serde(rename = "match")]
-    matcher: RawMatch,
-    effect: Effect,
-    #[serde(default)]
-    ask: bool,
-    #[serde(default)]
-    sandbox: Option<String>,
-    /// `command` only.
-    #[serde(default)]
-    toolchain_env: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMatch {
-    /// Required for `tool_call`; optional for `file_write` and `command`.
-    #[serde(default)]
-    tool: Option<String>,
-    /// A prefix of the file, directory, or working directory.
-    #[serde(default)]
-    path: Option<String>,
-    /// `command` only: the argv prefix, required.
-    #[serde(default)]
-    argv: Option<Vec<String>>,
-    /// `delegate` only: the worker label, required.
-    #[serde(default)]
-    worker: Option<String>,
-    /// `skill` only: the skill name, required.
-    #[serde(default)]
-    skill: Option<String>,
-}
-
-const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
-
-pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
-    check_config_yaml(src, origin)?;
-    let raw: RawPolicy = crate::yaml_safe::typed(src, origin)?;
-    if raw.version != 1 {
-        return Err(Error::new(format!(
-            "{origin}: {FILE_NAME} version {} is not supported (expected 1)",
-            raw.version
-        )));
-    }
-    if raw.default.as_deref().is_some_and(|value| value != "deny") {
-        return Err(Error::new(format!(
-            "{origin}: default must be deny; tool calls are deny-by-default"
-        )));
-    }
-    let mut rules: Vec<ToolRule> = Vec::new();
-    for mut rule in raw.rules {
-        let id = rule.id;
-        let fail = |message: String| Error::new(format!("{origin}: rule `{id}`: {message}"));
-        if !crate::hooks::policy::valid_rule_id(&id) {
-            return Err(Error::new(format!(
-                "{origin}: rule ids must be 1-64 ASCII letters, digits, '-', '_', or '.'"
-            )));
-        }
-        if rules.iter().any(|existing| existing.id == id) {
-            return Err(fail("duplicate rule id".into()));
-        }
-        if rule.action != "command" {
-            if rule.matcher.argv.is_some() {
-                return Err(fail("match.argv applies only to action: command".into()));
-            }
-            if rule.toolchain_env.is_some() {
-                return Err(fail("toolchain_env applies only to action: command".into()));
-            }
-        }
-        if rule.action != "delegate" && rule.matcher.worker.is_some() {
-            return Err(fail("match.worker applies only to action: delegate".into()));
-        }
-        if rule.action != "skill" && rule.matcher.skill.is_some() {
-            return Err(fail("match.skill applies only to action: skill".into()));
-        }
-        let mut argv = None;
-        let mut toolchain_env = Vec::new();
-        let (action, tools) = match rule.action.as_str() {
-            "command" => {
-                if rule
-                    .matcher
-                    .tool
-                    .as_deref()
-                    .is_some_and(|tool| tool != COMMAND_TOOL)
-                {
-                    return Err(fail(format!(
-                        "action: command governs `{COMMAND_TOOL}` only; omit match.tool"
-                    )));
-                }
-                let Some(prefix) = rule.matcher.argv.take() else {
-                    return Err(fail(
-                        "match.argv is required for action: command (the argv prefix, as a list)"
-                            .into(),
-                    ));
-                };
-                if prefix.is_empty() || prefix.iter().any(|token| token.is_empty()) {
-                    return Err(fail(
-                        "match.argv must list at least one non-empty token".into(),
-                    ));
-                }
-                argv = Some(prefix);
-                toolchain_env = crate::hooks::policy::parse_toolchain_names(
-                    &rule.toolchain_env.unwrap_or_default(),
-                    origin,
-                    &format!("rule `{id}`: toolchain_env"),
-                )?;
-                (ActionKind::Command, vec![COMMAND_TOOL.to_string()])
-            }
-            "delegate" => {
-                if rule
-                    .matcher
-                    .tool
-                    .as_deref()
-                    .is_some_and(|tool| tool != DELEGATE_TOOL)
-                {
-                    return Err(fail(format!(
-                        "action: delegate governs `{DELEGATE_TOOL}` only; omit match.tool"
-                    )));
-                }
-                if rule.matcher.path.is_some() {
-                    return Err(fail(
-                        "match.path does not apply to action: delegate; a worker is named by its label"
-                            .into(),
-                    ));
-                }
-                let Some(worker) = rule.matcher.worker.take() else {
-                    return Err(fail(
-                        "match.worker is required for action: delegate (the worker's label)".into(),
-                    ));
-                };
-                if !crate::hooks::policy::valid_rule_id(&worker) {
-                    return Err(fail(
-                        "match.worker is a label of 1-64 ASCII letters, digits, '-', '_', or '.'"
-                            .into(),
-                    ));
-                }
-                argv = Some(vec![worker]);
-                (ActionKind::Delegate, vec![DELEGATE_TOOL.to_string()])
-            }
-            "skill" => {
-                if rule
-                    .matcher
-                    .tool
-                    .as_deref()
-                    .is_some_and(|tool| tool != SKILL_TOOL)
-                {
-                    return Err(fail(format!(
-                        "action: skill governs `{SKILL_TOOL}` only; omit match.tool"
-                    )));
-                }
-                if rule.matcher.path.is_some() {
-                    return Err(fail(
-                        "match.path does not apply to action: skill; a skill is named".into(),
-                    ));
-                }
-                let Some(skill) = rule.matcher.skill.take() else {
-                    return Err(fail(
-                        "match.skill is required for action: skill (the skill's name)".into(),
-                    ));
-                };
-                if !crate::hooks::policy::valid_rule_id(&skill) {
-                    return Err(fail(
-                        "match.skill is a name of 1-64 ASCII letters, digits, '-', '_', or '.'"
-                            .into(),
-                    ));
-                }
-                if skill == "*" {
-                    return Err(fail(
-                        "match.skill names one skill; there is no wildcard".into(),
-                    ));
-                }
-                argv = Some(vec![skill]);
-                (ActionKind::Skill, vec![SKILL_TOOL.to_string()])
-            }
-            "tool_call" => {
-                let Some(tool) = rule.matcher.tool else {
-                    return Err(fail("match.tool is required for action: tool_call".into()));
-                };
-                if WRITE_TOOLS.contains(&tool.as_str()) {
-                    return Err(fail(format!(
-                        "`{tool}` changes files; govern it with action: file_write"
-                    )));
-                }
-                if tool == COMMAND_TOOL {
-                    return Err(fail(format!(
-                        "`{tool}` runs a program; govern it with action: command"
-                    )));
-                }
-                if tool == DELEGATE_TOOL {
-                    return Err(fail(format!(
-                        "`{tool}` hands a task to a worker; govern it with action: delegate"
-                    )));
-                }
-                if tool == SKILL_TOOL {
-                    return Err(fail(format!(
-                        "`{tool}` reads a skill; govern it with action: skill"
-                    )));
-                }
-                if !builtin_tools.contains(&tool.as_str()) {
-                    let readers: Vec<&str> = builtin_tools
-                        .iter()
-                        .copied()
-                        .filter(|t| {
-                            !WRITE_TOOLS.contains(t) && *t != COMMAND_TOOL && *t != DELEGATE_TOOL
-                        })
-                        .collect();
-                    return Err(fail(format!(
-                        "`{tool}` is not a builtin tool (expected one of: {})",
-                        readers.join(", ")
-                    )));
-                }
-                (ActionKind::ToolCall, vec![tool])
-            }
-            "file_write" => {
-                let tools = match rule.matcher.tool {
-                    None => WRITE_TOOLS.iter().map(|t| t.to_string()).collect(),
-                    Some(tool) if WRITE_TOOLS.contains(&tool.as_str()) => vec![tool],
-                    Some(tool) => {
-                        return Err(fail(format!(
-                            "`{tool}` is not a file-writing tool (expected {}, or omit match.tool for both)",
-                            WRITE_TOOLS.join(" or ")
-                        )));
-                    }
-                };
-                (ActionKind::FileWrite, tools)
-            }
-            other => {
-                return Err(fail(if PLANNED_KINDS.contains(&other) {
-                    format!("action `{other}` is not implemented yet")
-                } else {
-                    format!(
-                        "unknown action `{other}` (expected tool_call, file_write, command, or delegate)"
-                    )
-                }));
-            }
-        };
-        if rule.ask && rule.effect == Effect::Deny {
-            return Err(fail("ask applies only to effect: approve".into()));
-        }
-        // Rules are written for the sandbox that will contain effects. Until a
-        // profile beyond the in-process default exists, a wider one fails closed.
-        if rule
-            .sandbox
-            .as_deref()
-            .is_some_and(|value| value != "default")
-        {
-            return Err(fail(
-                "only sandbox: default is implemented; other profiles are not available yet".into(),
-            ));
-        }
-        let path = match rule.matcher.path {
-            None => None,
-            Some(path) => Some(normalize_relative_path(&path).ok_or_else(|| {
-                fail("match.path must be relative to the repository, without `..`".into())
-            })?),
-        };
-        rules.push(ToolRule {
-            id,
-            action,
-            tools,
-            path,
-            argv,
-            toolchain_env,
-            effect: rule.effect,
-            ask: rule.ask,
-        });
-    }
-    Ok(ActionPolicy { rules })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     const TOOLS: [&str; 7] = [
         "read_file",
@@ -947,12 +513,13 @@ mod tests {
 #[cfg(test)]
 mod delegate_tests {
     use super::*;
+    use crate::error::Result;
 
     fn parse_rules(rules: &str) -> Result<ActionPolicy> {
         parse(
             &format!("version: 1\nrules:\n{rules}"),
             "test",
-            &crate::chat::backend::tools::BUILTIN,
+            &crate::tools::BUILTIN,
         )
     }
 

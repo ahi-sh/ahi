@@ -82,7 +82,7 @@ pub(super) fn run(
     if !cwd.is_dir() {
         return Err(RunError::before("not a directory"));
     }
-    let mut env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), toolchain_env);
+    let mut env = crate::precommit::local_hook::scrub_env(std::env::vars_os(), toolchain_env);
     // The hook runner's marker is not this; name the caller honestly.
     env.retain(|(key, _)| key != "PRE_COMMIT");
     env.push((OsString::from("AHI_TOOL"), OsString::from("run_command")));

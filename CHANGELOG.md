@@ -4,7 +4,10 @@
 
 ### Changed
 
-- The design documents, plans, and audits under `docs/` are no longer part of the repository, which now holds the code, scripts, README, and changelog. Older entries that name a `docs/` path refer to documents that were removed.
+- Precommit commands now use `ahi precommit run`, `list-checks`, `explain`, `migrate`, `install`, and `uninstall`. Existing top-level runner commands and `ahi hooks install/uninstall` remain temporary aliases with migration warnings on stderr. They retain the canonical commands' arguments, stdout, and exit status. Install/uninstall remain unimplemented. See [MIGRATING.md](MIGRATING.md) for the minimum support window and migration steps.
+- Model-callable implementations now live in `src/tools/`, one module per tool name. Tool authorization and policy templates live in `src/tool_policy/`; operator policy commands live in `src/cli/tool_policy.rs`. The pre-commit runner moves from `hooks` to `precommit`. Rust implementation paths change without compatibility re-exports; tool names and permission semantics are unchanged.
+- Durable omitted tool details now carry typed reasons; application code supplies display wording. Historical string reasons remain readable. Older readers cannot read the new object-shaped reasons; see the migration guide before downgrading.
+- Older design documents, plans, and audits under `docs/` were removed; historical changelog links may refer to those removed files. The newly reviewed `docs/MODULE_STRUCTURE.md` is tracked as a narrow exception, distinguishing implemented module boundaries from future proposals.
 
 ## 0.17.0 (2026-11-14)
 

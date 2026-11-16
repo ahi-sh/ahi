@@ -39,7 +39,7 @@ impl Exchanges {
         let mut paired_results = BitSet::new(messages.len());
         let mut answered = Vec::new();
         // The open assistant batch: its index and which positions are answered.
-        let mut open: Option<(usize, &[crate::chat::backend::ToolCall], u64)> = None;
+        let mut open: Option<(usize, &[crate::tools::ToolCall], u64)> = None;
         for (index, message) in messages.iter().enumerate() {
             match (&message.role, &message.tool) {
                 (TranscriptRole::Assistant, Some(ToolPayload::Calls { calls, .. })) => {
@@ -93,7 +93,7 @@ impl Exchanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::backend::tools::call;
+    use crate::tools::call;
     use serde_json::json;
 
     fn assistant(ids: &[&str]) -> ChatMessage {

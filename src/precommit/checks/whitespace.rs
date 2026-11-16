@@ -15,7 +15,7 @@ impl Check for TrailingWhitespace {
         "Trim Trailing Whitespace"
     }
     fn description(&self) -> &'static str {
-        "Reports lines with trailing whitespace. A Markdown double-space linebreak is kept when --markdown-linebreak-ext names that extension (or *). The check is report-only unless `ahi run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
+        "Reports lines with trailing whitespace. A Markdown double-space linebreak is kept when --markdown-linebreak-ext names that extension (or *). The check is report-only unless `ahi precommit run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
     }
     fn default_types(&self) -> &'static [&'static str] {
         &["text"]
@@ -69,7 +69,7 @@ impl Check for EndOfFile {
         "Fix End of Files"
     }
     fn description(&self) -> &'static str {
-        "Reports a missing final newline, extra trailing newlines, or a file that is only newlines. Empty files are allowed. The check is report-only unless `ahi run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
+        "Reports a missing final newline, extra trailing newlines, or a file that is only newlines. Empty files are allowed. The check is report-only unless `ahi precommit run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
     }
     fn default_types(&self) -> &'static [&'static str] {
         &["text"]
@@ -118,7 +118,7 @@ impl Check for LineEndings {
         "Mixed Line Endings"
     }
     fn description(&self) -> &'static str {
-        "Reports CR, LF, and CRLF mixed in one file. The check is report-only, like upstream --fix=no, unless `ahi run --fix` or a hook argument `--fix` (auto, lf, crlf, or cr) is set. --fix=no stays report-only."
+        "Reports CR, LF, and CRLF mixed in one file. The check is report-only, like upstream --fix=no, unless `ahi precommit run --fix` or a hook argument `--fix` (auto, lf, crlf, or cr) is set. --fix=no stays report-only."
     }
     fn default_types(&self) -> &'static [&'static str] {
         &["text"]

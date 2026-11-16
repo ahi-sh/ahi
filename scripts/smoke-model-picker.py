@@ -206,6 +206,8 @@ def main() -> None:
                 {"type": "message", "role": "assistant", "text": "", "calls": [
                     {"id": "edit", "name": "edit_file", "arguments": {"path": "src/a.rs", "old": "old", "new": "new"}},
                     {"id": "test", "name": "run_command", "arguments": {"argv": ["cargo", "test"]}},
+                    {"id": "oversize", "name": "read_file", "arguments": {"path": "large.txt"}},
+                    {"id": "legacy", "name": "read_file", "arguments": {"path": "legacy.txt"}},
                 ]},
                 {"type": "message", "role": "tool", "exit_code": 0, "text": "edit_file src/a.rs",
                  "result": {"call_id": "edit", "name": "edit_file", "content": "written"},
@@ -217,6 +219,14 @@ def main() -> None:
                                               "stdout": "one test", "stderr": "assertion failed",
                                               "stdout_cut": False, "stderr_cut": False},
                                   "elapsed": {"secs": 3, "nanos": 800000000}}},
+                {"type": "message", "role": "tool", "exit_code": 0, "text": "read_file large.txt",
+                 "result": {"call_id": "oversize", "name": "read_file", "content": "bounded result"},
+                 "presentation": {"detail": {"kind": "omitted", "reason": {"kind": "detail_too_large"}},
+                                  "elapsed": {"secs": 1, "nanos": 0}}},
+                {"type": "message", "role": "tool", "exit_code": 0, "text": "read_file legacy.txt",
+                 "result": {"call_id": "legacy", "name": "read_file", "content": "legacy result"},
+                 "presentation": {"detail": {"kind": "omitted", "reason": "Historical preview unavailable"},
+                                  "elapsed": {"secs": 2, "nanos": 0}}},
                 {"type": "message", "role": "assistant", "text": "The tests failed."},
                 {"type": "turn", "run_id": "00112233aabbccdd", "status": "ok", "prompt_sha256": "", "result": {}},
             ]
@@ -235,13 +245,15 @@ def main() -> None:
                     ("standalone", ("tui", "--session", session_id, "--standalone")),
                     ("service", ("--session", session_id)),
                 ]:
-                    session = Session(state, columns=100, rows=40, command=command)
+                    session = Session(state, columns=100, rows=60, command=command)
                     try:
                         session.expect("edit_file src/a.rs · +1 -1 · 0.4s")
                         session.expect("1   -old")
                         session.expect("1 +new")
                         session.expect("cargo test · exit 1 · 3.8s")
                         session.expect("assertion failed")
+                        session.expect("512 KiB session-detail limit")
+                        session.expect("Historical preview unavailable")
                         session.capture(f"resumed-tool-details-{label}")
                         session.send("/quit\r")
                         output = session.finish()
@@ -251,7 +263,7 @@ def main() -> None:
             finally:
                 subprocess.run([str(binary), "--state-dir", str(state), "serve", "stop"],
                                capture_output=True, timeout=10)
-        print("PASS: import/export and resumed edit diffs, failed command streams, exit code, duration, and quit in both engines")
+        print("PASS: import/export and resumed edit diffs, failed command streams, typed/legacy omissions, exit code, duration, and quit in both engines")
         return
 
     with tempfile.TemporaryDirectory(prefix="ahi-picker-") as temp:

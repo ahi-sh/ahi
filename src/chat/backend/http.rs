@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::protocol::{self, RequestContext, StreamOutcome};
-use super::tool_loop::{Caller, SessionGrants, ToolRuntime, TurnContext};
+use super::tool_loop::{Caller, ToolRuntime, TurnContext};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
 use crate::error::{Error, ErrorKind, Result};
 use crate::harness::{CompletionConnection, CompletionTransport, Credential, Protocol};
+use crate::tool_policy::grants::SessionGrants;
 
 /// Connection attempts per request when a gateway cannot be reached, and the
 /// pauses between them. Only failures to connect are retried: a request the

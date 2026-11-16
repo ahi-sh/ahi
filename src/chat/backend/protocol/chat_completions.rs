@@ -10,10 +10,10 @@ use super::replay::Exchanges;
 use super::{emit, usage_event, RequestContext, StreamOutcome};
 use crate::chat::backend::sse::{SseError, SseReader};
 use crate::chat::backend::tool_call::{ToolCallAssembler, ToolCallDelta};
-use crate::chat::backend::tools::ToolSchema;
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::harness::{CompletionCompatibility, ModelMetadata};
+use crate::tools::ToolSchema;
 
 pub(super) fn request(context: &RequestContext<'_>) -> Value {
     let metadata = context.metadata;
@@ -290,7 +290,7 @@ pub(super) fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::backend::tools::call;
+    use crate::tools::call;
 
     fn assistant(text: &str, ids: &[&str]) -> ChatMessage {
         let mut message = ChatMessage::new(TranscriptRole::Assistant, text);

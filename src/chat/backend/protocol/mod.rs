@@ -18,8 +18,8 @@ use crate::chat::transcript::{ChatMessage, NativeReplay};
 use crate::error::{Error, Result};
 use crate::harness::{ModelMetadata, Protocol};
 
-use super::tools::ToolSchema;
 use super::{ResponseEvent, ToolCall};
+use crate::tools::ToolSchema;
 
 /// Conservative output budget sent when a model declares `maxTokens`.
 pub(super) const DEFAULT_OUTPUT_BUDGET: u64 = 4096;

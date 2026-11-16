@@ -13,12 +13,12 @@ use super::replay::Exchanges;
 use super::{emit, usage_event, RequestContext, StreamOutcome, DEFAULT_OUTPUT_BUDGET};
 use crate::chat::backend::sse::{SseError, SseReader};
 use crate::chat::backend::tool_call::ToolCallAssembler;
-use crate::chat::backend::tools::ToolSchema;
 use crate::chat::backend::ResponseEvent;
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::harness::{ModelMetadata, Protocol, ThinkingMode};
+use crate::tools::ToolSchema;
 
 /// Content blocks one message may carry.
 const MAX_BLOCKS: usize = 128;
@@ -524,7 +524,7 @@ pub(super) fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::backend::tools::call;
+    use crate::tools::call;
     use std::sync::mpsc;
 
     fn events(body: &[Value]) -> String {
@@ -772,7 +772,7 @@ mod tests {
             ..Default::default()
         };
         let messages = [ChatMessage::new(TranscriptRole::Operator, "q")];
-        let schemas = crate::chat::backend::tools::schemas(&["read_file".to_string()], &[]);
+        let schemas = crate::tools::schemas(&["read_file".to_string()], &[]);
         let context = RequestContext {
             model: "claude-x",
             thinking: ThinkingLevel::High,

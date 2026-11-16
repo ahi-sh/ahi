@@ -123,7 +123,7 @@ impl Client {
             .split_first()
             .ok_or_else(|| usage("empty connect command"))?;
         let extra: Vec<String> = VIA_ENV.iter().map(|name| name.to_string()).collect();
-        let env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), &extra);
+        let env = crate::precommit::local_hook::scrub_env(std::env::vars_os(), &extra);
         let mut child = std::process::Command::new(program)
             .args(args)
             .env_clear()
@@ -489,7 +489,7 @@ mod via_tests {
     #[test]
     fn the_connect_command_keeps_the_ssh_agent_and_nothing_secret() {
         let extra: Vec<String> = VIA_ENV.iter().map(|name| name.to_string()).collect();
-        let env = crate::hooks::local_hook::scrub_env(
+        let env = crate::precommit::local_hook::scrub_env(
             [
                 ("SSH_AUTH_SOCK", "/run/agent.sock"),
                 ("SSH_AGENT_PID", "42"),

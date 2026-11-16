@@ -15,8 +15,9 @@ use std::path::Path;
 use serde_json::json;
 
 use super::{Header, Kind, Role, Session, Status, Store, StoredMessage, Turn};
-use crate::chat::backend::{Selection, ToolCall};
+use crate::chat::backend::Selection;
 use crate::chat::transcript::{NativeReplay, ToolPayload};
+use crate::tools::ToolCall;
 
 pub(crate) struct Recorder {
     enabled: bool,

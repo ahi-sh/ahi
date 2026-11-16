@@ -12,7 +12,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::hooks::check::builtin_by_id;
+use crate::precommit::checks::builtin_by_id;
 use crate::yaml_safe::check_config_yaml;
 use crate::PRE_COMMIT_SCHEMA;
 
@@ -504,7 +504,7 @@ fn materialize_hook(
         .chain(types_or.iter())
         .chain(exclude_types.iter())
     {
-        if !crate::hooks::identify::is_known_tag(tag) {
+        if !crate::precommit::identify::is_known_tag(tag) {
             return Err(Error::new(format!(
                 "{origin}: hook `{}` type tag `{tag}` is not recognized",
                 raw.id
@@ -561,7 +561,7 @@ fn check_stages(stages: &[String], origin: &str, what: &str) -> Result<Vec<Strin
     for stage in stages {
         if let Some(modern) = legacy_stage(stage) {
             return Err(Error::new(format!(
-                "{origin}: `{what}` uses legacy stage `{stage}`; use `{modern}`. ahi migrate does not rewrite legacy stages"
+                "{origin}: `{what}` uses legacy stage `{stage}`; use `{modern}`. ahi precommit migrate does not rewrite legacy stages"
             )));
         }
         if !STAGES.contains(&stage.as_str()) {

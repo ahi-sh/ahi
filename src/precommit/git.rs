@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Error, Result};
-use crate::hooks::filter::normalize_slashes;
+use crate::precommit::filter::normalize_slashes;
 
 #[derive(Debug, Clone)]
 pub struct GitFiles {

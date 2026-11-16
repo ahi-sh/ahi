@@ -15,6 +15,9 @@ mod find_files;
 mod glob;
 mod ignore;
 mod list_dir;
+mod load_skill;
+
+pub(crate) use load_skill::SkillReport;
 mod read_file;
 mod run_command;
 mod search_files;
@@ -30,7 +33,14 @@ use std::sync::atomic::AtomicBool;
 pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
-use super::ToolCall;
+/// A parsed model tool call. Parsing does not authorize execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: serde_json::Map<String, Value>,
+}
+
 use crate::tool_policy::normalize_relative_path;
 use ahi_durable::ToolDetail;
 
@@ -387,14 +397,6 @@ fn skill_description(skills: &[crate::skills::Skill]) -> String {
 }
 
 /// Chat Completions `tools[]` definitions for the enabled builtins.
-#[cfg(test)]
-pub(super) fn definitions(enabled: &[String]) -> Vec<Value> {
-    schemas(enabled, &[])
-        .iter()
-        .map(crate::chat::backend::protocol::chat_completions::definition)
-        .collect()
-}
-
 /// Every argument any builtin accepts. Unknown keys are rejected; the
 /// per-tool match below rejects keys a tool does not take.
 #[derive(Deserialize)]
@@ -485,7 +487,7 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                     && raw.task.is_none(),
             )?;
             let name = raw.name.ok_or(INVALID)?;
-            if !crate::hooks::policy::valid_rule_id(&name) {
+            if !crate::precommit::policy::valid_rule_id(&name) {
                 return Err("name is a skill name of 1 to 64 letters, digits, '-', '_', or '.'");
             }
             if let Some(file) = &raw.file {
@@ -501,7 +503,7 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         DELEGATE => {
             only(path.is_empty() && no_paging && no_search && no_write)?;
             let worker = raw.worker.ok_or(INVALID)?;
-            if !crate::hooks::policy::valid_rule_id(&worker) {
+            if !crate::precommit::policy::valid_rule_id(&worker) {
                 return Err("worker is a label of 1 to 64 letters, digits, '-', '_', or '.'");
             }
             let prompt = raw.prompt.ok_or(INVALID)?;
@@ -652,16 +654,6 @@ pub(super) struct Executed {
     pub(super) detail: Option<ToolDetail>,
 }
 
-/// What a `load_skill` call read, for the record: never the text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SkillReport {
-    pub(super) name: String,
-    pub(super) root: String,
-    pub(super) file: Option<String>,
-    pub(super) sha256: String,
-    pub(super) bytes: usize,
-}
-
 /// A call that did not finish: the text the model and the operator see,
 /// and for a command whether a process ran first. `None` is "not known from
 /// here": a read or a write that failed in the workspace, where nothing
@@ -702,54 +694,7 @@ pub(super) fn execute(
     // matches, so counts are approximate for the screen header only.
     let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
-        Arguments::Skill { name, file } => {
-            // The catalog was built at turn start from the workdir and the
-            // operator root; a name the policy approves but no root holds is
-            // not loadable, and the text is read again with every check.
-            let skill = skills
-                .get(&name[0])
-                .ok_or("no valid skill of that name is installed; `ahi doctor` lists them")?;
-            if file
-                .as_deref()
-                .is_some_and(|file| !skill.references.iter().any(|declared| declared == file))
-            {
-                return Err("the skill declares no reference of that name".into());
-            }
-            let text = crate::skills::read(skill, file.as_deref())
-                .map_err(|_| "the skill could not be read; `ahi doctor` says why")?;
-            let digest = crate::session::sha256_hex(text.as_bytes());
-            let report = SkillReport {
-                name: skill.name.clone(),
-                root: skill.root.as_str().to_string(),
-                file: file.clone(),
-                sha256: digest.clone(),
-                bytes: text.len(),
-            };
-            let content = match file {
-                Some(file) => format!(
-                    "skill {} reference {file} from {} ({} bytes, sha256 {})\n{text}",
-                    skill.name,
-                    skill.root.as_str(),
-                    text.len(),
-                    &digest[..12]
-                ),
-                None => format!(
-                    "skill {} from {} ({} bytes, sha256 {})\n{text}",
-                    skill.name,
-                    skill.root.as_str(),
-                    text.len(),
-                    &digest[..12]
-                ),
-            };
-            Ok(Executed {
-                content,
-                detail: None,
-                write: None,
-                command: None,
-                delegation: None,
-                skill: Some(report),
-            })
-        }
+        Arguments::Skill { name, file } => load_skill::run(name, file, skills),
         Arguments::Delegate {
             worker,
             prompt,
@@ -1022,12 +967,15 @@ mod tests {
     }
 
     #[test]
-    fn definitions_follow_the_enabled_builtins() {
+    fn schemas_follow_the_enabled_builtins() {
         let names = |enabled: &[&str]| {
-            definitions(&enabled.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                .into_iter()
-                .map(|value| value["function"]["name"].as_str().unwrap().to_string())
-                .collect::<Vec<_>>()
+            schemas(
+                &enabled.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                &[],
+            )
+            .into_iter()
+            .map(|schema| schema.name.to_string())
+            .collect::<Vec<_>>()
         };
         assert_eq!(
             names(&[SEARCH_FILES, LIST_DIR, READ_FILE]),

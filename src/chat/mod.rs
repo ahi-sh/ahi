@@ -1128,15 +1128,15 @@ impl ChatScreen {
             return Ok(text.to_string());
         };
         let (name, remainder) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        if !crate::hooks::policy::valid_rule_id(name) {
+        if !crate::precommit::policy::valid_rule_id(name) {
             return Err(
                 "`$` names a skill: 1 to 64 letters, digits, '-', '_', or '.'; the draft was kept"
                     .to_string(),
             );
         }
         let policy = match &self.actions_file {
-            Some(file) => crate::tool_policy::load_file(file, &backend::tools::BUILTIN).map(Some),
-            None => crate::tool_policy::load(&self.workspace_root, &backend::tools::BUILTIN),
+            Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
+            None => crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN),
         };
         let approved = policy
             .ok()
@@ -1656,7 +1656,7 @@ fn rule_line(width: usize) -> String {
 /// Validate an explicit `--tools` policy file before any screen opens, so
 /// a typo fails at startup instead of on every chat turn.
 pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
-    crate::tool_policy::load_file(path, &backend::tools::BUILTIN).map(drop)
+    crate::tool_policy::load_file(path, &crate::tools::BUILTIN).map(drop)
 }
 
 /// Run the chat screen until the operator exits or asks for the model picker.
@@ -2424,7 +2424,7 @@ mod tests {
         screen.apply_event(event);
         screen.answer_approval(approval::ApprovalKey::Approve);
         screen.apply_event(ResponseEvent::ToolCallsRequested {
-            calls: vec![backend::ToolCall {
+            calls: vec![crate::tools::ToolCall {
                 id: "c1".into(),
                 name: "read_file".into(),
                 arguments: serde_json::Map::new(),
@@ -3817,7 +3817,7 @@ mod tests {
     fn tool_requests_attach_to_the_assistant_turn_without_argument_disclosure() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-tool-request");
         let mut screen = screen_in(&state);
-        let call = backend::ToolCall {
+        let call = crate::tools::ToolCall {
             id: "call_a".into(),
             name: "read_file".into(),
             arguments: serde_json::from_value(serde_json::json!({"path": "private-path"})).unwrap(),
