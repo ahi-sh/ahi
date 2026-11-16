@@ -27,7 +27,7 @@ Rule paths and tool confinement are always relative to the directory where
 | `list-only.yaml` | Listing only. The model can see the tree but reads are denied. |
 | `edit-sources.yaml` | Reads anywhere; `edit_file` under `src` and `tests` asks first; `write_file` may create files under `tests` without asking; `Cargo.lock` is never written. |
 | `commands.yaml` | Reads anywhere except the root `.env`; `cargo check` and `cargo test` run without a prompt, other `cargo` subcommands ask, `cargo publish` and `cargo install` are denied, any `sh` command run from `scripts` asks. |
-| `delegate.yaml` | Reads anywhere; tasks may be handed to the workers labeled `rust-ci` (asks first) and `docs`; `prod` is denied. A label names a worker in herdr-core's registry, reached through `AHI_DELEGATE_VIA`, never a host. |
+| `delegate.yaml` | Reads anywhere; tasks may be handed to the workers labeled `rust-ci` (asks first) and `docs`; `prod` is denied. A label names an operator-routed worker, reached through an explicitly configured `AHI_DELEGATE_VIA` connector speaking ahi's session protocol, never a host. There is no default connector. |
 | `skills.yaml` | Reads anywhere; the skills named `rust-review` and `release` (asks first) may be loaded, `deploy` is denied. A skill is text under `.ahi/skills/<name>/SKILL.md`, advice to the model and never authority; nothing is advertised without a rule naming it. |
 | `deny-all.yaml` | Valid, but no approve rule: no tool is advertised and any requested call fails with `tool execution is disabled`. |
 | `invalid-version.yaml` | Deliberately invalid (`version: 2`): `ahi tui --tools` exits with the parse error, and as `ahi.tools.yaml` every turn fails closed. |

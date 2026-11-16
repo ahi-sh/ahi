@@ -37,8 +37,8 @@ mod tests {
     #[test]
     fn words_split_like_a_shell_would_without_being_one() {
         assert_eq!(
-            split("hc connect --worker rust-ci").unwrap(),
-            ["hc", "connect", "--worker", "rust-ci"]
+            split("ssh rust-ci ahi connect").unwrap(),
+            ["ssh", "rust-ci", "ahi", "connect"]
         );
         assert_eq!(
             split("ssh box '/opt/my tools/ahi' connect").unwrap(),

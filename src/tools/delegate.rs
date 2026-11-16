@@ -1,13 +1,10 @@
 //! `delegate`: hand a task to a worker and wait for its answer.
 //!
-//! The worker is another `ahi serve`, reached the way herdr-core reaches a
-//! remote core: a command whose stdin and stdout carry the JSON lines.
-//! `AHI_DELEGATE_VIA` names that command as an argv template with
-//! `{worker}` for the label; the default, `hc connect --worker {worker}`,
-//! asks hc, which owns the registry of labels and hosts, to connect this
-//! process to the worker it maps the label to. ahi never learns the host:
-//! the policy names a label, the command resolves it, and this module speaks
-//! the service protocol over whatever comes back.
+//! The worker is another `ahi serve`. An explicitly configured
+//! `AHI_DELEGATE_VIA` command carries ahi's session protocol over stdio;
+//! `{worker}` is replaced after argv splitting. The operator's connector
+//! resolves labels to workers. Neither `hc connect` nor a Rex terminal
+//! control connection speaks ahi's protocol. There is no implicit connector.
 //!
 //! One call is one turn on the worker: a session is created on the worker
 //! (continuing `task` when given) in the directory its server runs in, the
@@ -28,8 +25,6 @@ use std::io::IsTerminal;
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 pub(crate) use crate::service::wire::MAX_TIMEOUT_SECS;
 pub(crate) const MAX_PROMPT_BYTES: usize = 1024 * 1024;
-/// The default `AHI_DELEGATE_VIA`.
-pub(crate) const DEFAULT_VIA: &str = "hc connect --worker {worker}";
 /// How much of the worker's answer reaches the model.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// A worker's error message kept for the model.
@@ -57,16 +52,11 @@ pub(crate) struct Outcome {
     pub(crate) report: DelegationReport,
 }
 
-/// The active connect command template: `AHI_DELEGATE_VIA`, or the
-/// default when it is unset or blank. The flag says which.
-pub(crate) fn via_template() -> (String, bool) {
-    match std::env::var("AHI_DELEGATE_VIA")
+/// Only an explicit connector is valid. Unset, blank, or non-Unicode is unconfigured.
+pub(crate) fn via_template() -> Option<String> {
+    std::env::var("AHI_DELEGATE_VIA")
         .ok()
         .filter(|value| !value.trim().is_empty())
-    {
-        Some(set) => (set, true),
-        None => (DEFAULT_VIA.to_string(), false),
-    }
 }
 
 /// The connect command for `worker`: the template split like every other
@@ -75,7 +65,8 @@ pub(crate) fn via_template() -> (String, bool) {
 /// configuration error the operator sees, not something the model can
 /// work around, so it comes back as the refusal text.
 pub(crate) fn via_command(worker: &str) -> Result<Vec<String>, String> {
-    let (template, _) = via_template();
+    let template = via_template()
+        .ok_or("set AHI_DELEGATE_VIA to a connector speaking ahi's session protocol")?;
     Ok(crate::service::via::split(&template)?
         .into_iter()
         .map(|token| token.replace("{worker}", worker))
@@ -90,11 +81,10 @@ pub(super) fn run(
     cancel: &AtomicBool,
 ) -> Result<Outcome, &'static str> {
     let argv = via_command(worker).map_err(|_| {
-        "the connect command AHI_DELEGATE_VIA names does not parse; see `ahi doctor`"
+        "configure a valid AHI_DELEGATE_VIA connector speaking ahi's session protocol; see `ahi doctor`"
     })?;
-    let mut client = Client::via(&argv).map_err(|_| {
-        "cannot reach the worker: the connect command did not start (is hc on PATH?)"
-    })?;
+    let mut client = Client::via(&argv)
+        .map_err(|_| "cannot reach the worker: the configured connect command did not start")?;
     // Every failure below is a fixed sentence for the model. What the
     // connect command said on stderr is the operator's, so it goes to this
     // process's stderr only when that is not a screen.
@@ -298,10 +288,11 @@ mod tests {
     #[test]
     fn the_connect_command_comes_from_the_environment_with_the_label_filled_in() {
         std::env::remove_var("AHI_DELEGATE_VIA");
-        assert_eq!(
-            via_command("rust-ci").unwrap(),
-            ["hc", "connect", "--worker", "rust-ci"]
-        );
+        assert!(via_command("rust-ci")
+            .unwrap_err()
+            .contains("set AHI_DELEGATE_VIA"));
+        std::env::set_var("AHI_DELEGATE_VIA", "   ");
+        assert!(via_command("rust-ci").is_err());
         std::env::set_var(
             "AHI_DELEGATE_VIA",
             "ssh {worker}.example '/opt/my tools/ahi' connect",

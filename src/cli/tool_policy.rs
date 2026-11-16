@@ -246,8 +246,10 @@ pub fn doctor_lines(root: &Path) -> Vec<String> {
 
 /// The connect command `delegate` would run, parsed the way it will be.
 fn delegate_via_line() -> String {
-    let (template, set) = crate::tools::delegate::via_template();
-    let source = if set { "AHI_DELEGATE_VIA" } else { "default" };
+    let Some(template) = crate::tools::delegate::via_template() else {
+        return "delegate via: unconfigured; set AHI_DELEGATE_VIA to an ahi session-protocol connector (for example, ssh {worker} ahi connect); hc connect speaks a different protocol".into();
+    };
+    let source = "AHI_DELEGATE_VIA";
     match crate::service::via::split(&template) {
         Ok(argv) => format!(
             "delegate via: {} ({source}; `{{worker}}` is the label)",

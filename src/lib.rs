@@ -23,6 +23,7 @@ pub mod session;
 mod shlex;
 pub mod skills;
 pub mod term;
+pub mod terminal_host;
 mod tool_policy;
 pub(crate) mod tools;
 pub mod tui;

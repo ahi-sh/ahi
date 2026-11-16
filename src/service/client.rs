@@ -1,7 +1,7 @@
 //! A client of the service with one calling shape and three transports:
 //! the service built in this process, the socket of a running `ahi serve`,
 //! or the stdio of a command that carries the lines somewhere else
-//! (`ssh host ahi connect`, `hc connect --worker label`). `ahi exec`,
+//! (for example, `ssh host ahi connect`, not hc's native protocol). `ahi exec`,
 //! `ahi tui`, and the `delegate` tool all speak through it.
 
 // Without a Unix socket only the in-process transport exists on this platform.
