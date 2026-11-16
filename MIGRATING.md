@@ -1,5 +1,34 @@
 # Migrating to explicit primitive names
 
+After the 0.17.0 release, ahi began reorganizing its `src/` modules around the
+primitives it is aiming to provide: model-callable tools, explicit execution
+policy, a precommit runner, terminal interfaces, durable sessions, skills, and
+development environments. The goal is to make each responsibility easy to find
+and keep its boundaries clear—not to turn every module into a separate crate
+or introduce a plugin system.
+
+The distinctions matter. A tool implements an operation; tool policy determines
+whether a requested operation is authorized; and the CLI lets an operator manage
+that policy. Precommit runs repository checks, while Git hooks are entry points
+that invoke it. Durable records retain execution facts, while application code
+decides how to present them. These responsibilities should not be hidden inside
+terminal chat code or share a name merely because they currently share helpers.
+
+This first refactoring establishes the `tools`, `tool_policy`, `precommit`, and
+corresponding CLI module boundaries, and separates durable omission reasons from
+their display wording. It also makes `ahi precommit` the canonical command
+namespace, with temporary deprecated aliases for existing scripts and workflows.
+Tool names and authorization semantics remain unchanged.
+
+The broader structure is still a direction, not a claim of completion. Separating
+the agent runtime from providers and the TUI, moving session storage into
+`ahi-durable`, and defining execution and containment boundaries remain follow-up
+work. Terminal multiplexing and external orchestration belong to Rex or
+Herdr-core; ahi will expose a small integration boundary rather than implement
+its own multiplexer. The migration steps below cover the changes implemented
+now; the [module structure proposal](docs/MODULE_STRUCTURE.md) describes the
+remaining work.
+
 ## Precommit commands
 
 The pre-commit-compatible runner now has an explicit `ahi precommit` namespace.
