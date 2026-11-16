@@ -256,7 +256,7 @@ pub fn peer_uid<S: std::os::unix::io::AsRawFd>(socket: &S) -> std::io::Result<u3
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -290,22 +290,33 @@ mod tests {
         // the shell alone; it holds the pipe open, which is how a leaked
         // grandchild is observed: the read does not end.
         let mut child = Command::new("sh")
-            .args(["-c", "sleep 30 & sleep 30"])
+            .args(["-c", "sleep 30 & echo ready; wait"])
             .stdout(Stdio::piped())
             .process_group(0)
             .spawn()
             .unwrap();
-        let mut stdout = child.stdout.take().unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        std::io::BufRead::read_line(&mut stdout, &mut ready).unwrap();
+        assert_eq!(
+            ready, "ready\n",
+            "the shell must spawn its child before the kill"
+        );
         assert!(kill_process_group(child.id()));
         let started = Instant::now();
         let mut sink = Vec::new();
         std::io::Read::read_to_end(&mut stdout, &mut sink).unwrap();
-        child.wait().unwrap();
+        assert_eq!(
+            child.wait().unwrap().signal(),
+            Some(9),
+            "shell ended by SIGKILL"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the grandchild kept the pipe open"
         );
-        assert!(!kill_process_group(child.id()), "the group is gone");
+        // EOF proves descendants released the pipe. Their dead processes may
+        // still await reaping, so the kernel need not have removed the group yet.
         assert!(!kill_process_group(0));
     }
 
