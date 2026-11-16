@@ -22,8 +22,6 @@ use crate::tool_policy::{self, path_within, ActionPolicy, Verdict};
 use crate::tools::{self, Arguments, PreparedCall, Workspace};
 use ahi_durable::{ToolDetail, ToolRecord};
 
-/// Model responses that may request tools within one operator turn.
-pub(super) const MAX_ROUNDS: usize = 8;
 /// Tool content returned to the model within one operator turn.
 pub(super) const MAX_TURN_OUTPUT_BYTES: usize = 256 * 1024;
 const PREVIEW_LINES: usize = 8;
@@ -80,7 +78,6 @@ pub(super) struct ToolRuntime {
     gateway: String,
     destination: String,
     grants: SessionGrants,
-    rounds: usize,
     output_bytes: usize,
 }
 
@@ -154,7 +151,6 @@ impl ToolRuntime {
             gateway: gateway.to_string(),
             destination: destination.to_string(),
             grants,
-            rounds: 0,
             output_bytes: 0,
         }))
     }
@@ -172,22 +168,11 @@ impl ToolRuntime {
         calls: &[ToolCall],
         sender: &Sender<ResponseEvent>,
     ) -> Result<Vec<ChatMessage>> {
-        self.rounds += 1;
-        let over_limit = self.rounds > MAX_ROUNDS;
         let mut plans: Vec<Plan> = calls
             .iter()
-            .map(|call| {
-                if over_limit {
-                    return Plan::Done(Box::new(error(
-                        &call.name,
-                        None,
-                        "tool round limit reached",
-                    )));
-                }
-                match tools::prepare(call) {
-                    Err(message) => Plan::Done(Box::new(error(&call.name, None, message))),
-                    Ok(prepared) => self.plan(prepared),
-                }
+            .map(|call| match tools::prepare(call) {
+                Err(message) => Plan::Done(Box::new(error(&call.name, None, message))),
+                Ok(prepared) => self.plan(prepared),
             })
             .collect();
         let cancelled = self.ask(calls, &mut plans, sender)?;
@@ -232,11 +217,6 @@ impl ToolRuntime {
             )?;
             emit(sender, ResponseEvent::ToolCallReturned)?;
             messages.push(message);
-        }
-        if over_limit {
-            return Err(Error::limit(format!(
-                "model exceeded {MAX_ROUNDS} tool rounds in one turn; no further calls ran"
-            )));
         }
         if cancelled {
             return Err(Error::new(
