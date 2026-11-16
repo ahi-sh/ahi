@@ -1,7 +1,7 @@
 //! Pre-commit hook runner: config parsing, file selection, builtin checks,
 //! local hook policy, and the text/JSON/SARIF reports.
 pub mod audit;
-pub mod check;
+pub mod checks;
 pub mod config;
 pub mod filter;
 pub mod git;

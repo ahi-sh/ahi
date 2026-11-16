@@ -3,11 +3,12 @@ use crate::chat::backend::parse_selection;
 use crate::chat::backend::sse::FRAME_CAP;
 // `Caller` is used by the Unix-only cancel tests.
 #[cfg_attr(not(unix), allow(unused_imports))]
-use crate::chat::backend::{Caller, ProposedAction, ToolCall, ToolDecision};
+use crate::chat::backend::{Caller, ProposedAction, ToolDecision};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
 use crate::error::ErrorKind;
 use crate::harness::{ModelMetadata, Protocol};
+use crate::tools::ToolCall;
 #[cfg(unix)]
 use ahi_durable::ToolRecord;
 use serde_json::json;
@@ -1350,7 +1351,7 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
         without_timing(events),
         vec![
             ResponseEvent::ToolCallsRequested {
-                calls: vec![super::super::tools::call(
+                calls: vec![crate::tools::call(
                     "call_a",
                     "read_file",
                     json!({"path": "./src/a.rs"})
@@ -2075,7 +2076,7 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     let state = state_for(&url);
     let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "checking");
     assistant.tool = Some(ToolPayload::Calls {
-        calls: vec![super::super::tools::call(
+        calls: vec![crate::tools::call(
             "call_a",
             "read_file",
             json!({"path": "a"}),

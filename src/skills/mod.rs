@@ -268,7 +268,7 @@ fn scan_root(
 }
 
 fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
-    if !crate::hooks::policy::valid_rule_id(name) {
+    if !crate::precommit::policy::valid_rule_id(name) {
         return Err(
             "the directory name is not a skill name (1-64 of letters, digits, '-', '_', '.')"
                 .into(),

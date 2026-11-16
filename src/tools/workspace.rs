@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-pub(in crate::chat::backend) struct Workspace {
+pub(crate) struct Workspace {
     root: PathBuf,
     /// ahi's own state (credentials, `models.json`, catalogs). Never readable,
     /// even when it lies inside the working directory.
@@ -12,10 +12,7 @@ pub(in crate::chat::backend) struct Workspace {
 }
 
 impl Workspace {
-    pub(in crate::chat::backend) fn open(
-        directory: &Path,
-        state: &crate::directories::Directories,
-    ) -> Result<Self> {
+    pub(crate) fn open(directory: &Path, state: &crate::directories::Directories) -> Result<Self> {
         let root = directory
             .canonicalize()
             .map_err(|_| Error::new("cannot resolve the working directory for tools"))?;
@@ -27,7 +24,7 @@ impl Workspace {
         Ok(Self { root, excluded })
     }
 
-    pub(in crate::chat::backend) fn root(&self) -> &Path {
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 

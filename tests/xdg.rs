@@ -179,7 +179,7 @@ fn the_hook_audit_log_is_state_not_cache() {
     let output = fixture
         .ahi()
         .current_dir(&repo)
-        .args(["run", "--all-files"])
+        .args(["precommit", "run", "--all-files"])
         .output()
         .unwrap();
     assert!(
@@ -228,7 +228,7 @@ fn created_directories_and_files_are_owner_only() {
     let output = fixture
         .ahi()
         .current_dir(&repo)
-        .args(["run", "--all-files"])
+        .args(["precommit", "run", "--all-files"])
         .output()
         .unwrap();
     assert!(

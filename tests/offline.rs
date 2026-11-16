@@ -1,4 +1,4 @@
-//! Offline local hooks, fixer mode, and best-effort `ahi migrate`.
+//! Offline local hooks, fixer mode, and best-effort `ahi precommit migrate`.
 //!
 //! The cargo-backed case is Ian's rewritten config. A second case uses `git`
 //! so the suite still runs where cargo is not on PATH.
@@ -60,7 +60,7 @@ fn system_hook_without_a_policy_prints_the_snippet_and_does_not_run() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("action: hook"), "{text}");
@@ -115,13 +115,13 @@ fn ahi_ids_stay_report_only_until_fix() {
     );
     write(&dir.join("notes.txt"), b"hello \nworld\r\n");
     git(&dir, &["add", "-A"]);
-    let report = run(&dir, &["run", "--all-files"]);
+    let report = run(&dir, &["precommit", "run", "--all-files"]);
     assert_eq!(report.status.code(), Some(1));
     assert_eq!(
         fs::read(dir.join("notes.txt")).unwrap(),
         b"hello \nworld\r\n"
     );
-    let fixed = run(&dir, &["run", "--all-files", "--fix"]);
+    let fixed = run(&dir, &["precommit", "run", "--all-files", "--fix"]);
     assert_eq!(fixed.status.code(), Some(1));
     let bytes = fs::read(dir.join("notes.txt")).unwrap();
     assert_eq!(
@@ -146,7 +146,7 @@ fn fixer_refuses_a_file_with_unstaged_changes() {
     write(&dir.join("notes.txt"), b"hello");
     git(&dir, &["add", "notes.txt"]);
     write(&dir.join("notes.txt"), b"hello dirty");
-    let output = run(&dir, &["run", "--fix"]);
+    let output = run(&dir, &["precommit", "run", "--fix"]);
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("unstaged"), "{text}");
     assert_eq!(fs::read(dir.join("notes.txt")).unwrap(), b"hello dirty");
@@ -166,7 +166,7 @@ fn wrong_entry_is_not_authorized_and_other_languages_stay_unsupported() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(1), "{text}");
     assert!(
@@ -190,7 +190,7 @@ fn remote_without_substitution_is_not_fetched() {
     );
     write(&dir.join("ok.yml"), b"a: 1\n");
     git(&dir, &["add", "-A"]);
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         text.contains("from a remote repo is not executed"),
@@ -230,13 +230,13 @@ repos:
 ";
     write(&dir.join(".pre-commit-config.yaml"), original.as_bytes());
     git(&dir, &["add", "-A"]);
-    let help = run(&dir, &["migrate", "--help"]);
+    let help = run(&dir, &["precommit", "migrate", "--help"]);
     let help_text = String::from_utf8(help.stdout).unwrap();
     assert!(
         help_text.contains("does not guarantee") || help_text.contains("feature parity"),
         "{help_text}"
     );
-    let dry = run(&dir, &["migrate"]);
+    let dry = run(&dir, &["precommit", "migrate"]);
     let stdout = String::from_utf8(dry.stdout).unwrap();
     let stderr = String::from_utf8(dry.stderr).unwrap();
     assert_eq!(dry.status.code(), Some(0), "{stdout}\n{stderr}");
@@ -252,7 +252,7 @@ repos:
     assert!(stdout.contains("Add to ahi.hooks.yaml"), "{stdout}");
     let unchanged = fs::read_to_string(dir.join(".pre-commit-config.yaml")).unwrap();
     assert_eq!(unchanged, original);
-    let refused = run(&dir, &["migrate", "--write"]);
+    let refused = run(&dir, &["precommit", "migrate", "--write"]);
     assert_eq!(refused.status.code(), Some(1));
     let refused_err = String::from_utf8(refused.stderr).unwrap();
     assert!(refused_err.contains("--force"), "{refused_err}");
@@ -260,7 +260,7 @@ repos:
         fs::read_to_string(dir.join(".pre-commit-config.yaml")).unwrap(),
         original
     );
-    let wrote = run(&dir, &["migrate", "--write", "--force"]);
+    let wrote = run(&dir, &["precommit", "migrate", "--write", "--force"]);
     assert_eq!(
         wrote.status.code(),
         Some(0),
@@ -304,7 +304,7 @@ fn script_hook_receives_filenames_without_a_shell() {
     let output = Command::new(env!("CARGO_BIN_EXE_ahi"))
         .current_dir(&dir)
         .env("SECRET_TOKEN", "should-not-pass")
-        .args(["run", "--all-files"])
+        .args(["precommit", "run", "--all-files"])
         .output()
         .unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
@@ -388,7 +388,7 @@ fn secret_toolchain_name_is_refused_before_the_hook_runs() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     let err = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(err.contains("never passed through"), "{err}");
@@ -517,7 +517,7 @@ fn the_retired_policy_filename_is_an_error_not_silence() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     assert_ne!(output.status.code(), Some(0));
     let text = format!(
         "{}{}",

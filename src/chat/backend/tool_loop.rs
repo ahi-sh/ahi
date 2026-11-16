@@ -9,16 +9,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::tools::{self, Arguments, PreparedCall, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
 };
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
-use crate::tool_policy::{self as tool_policy, path_within, ActionPolicy, Verdict};
+use crate::tool_policy::grants::{SessionGrant, SessionGrants};
+use crate::tool_policy::{self, path_within, ActionPolicy, Verdict};
+use crate::tools::{self, Arguments, PreparedCall, Workspace};
 use ahi_durable::{ToolDetail, ToolRecord};
 
 /// Model responses that may request tools within one operator turn.
@@ -33,26 +34,6 @@ pub(super) const EXIT_ERROR: i32 = 1;
 pub(super) const EXIT_DENIED: i32 = 126;
 
 static NEXT_BATCH: AtomicU64 = AtomicU64::new(1);
-
-/// An operator approval that outlives one batch: this tool, under this
-/// non-empty prefix, in this workspace, for this gateway at this destination.
-/// Switching the gateway, reconfiguring its URL, or changing the working
-/// directory needs a new approval, because the grant decides which files
-/// leave the machine and where they go.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SessionGrant {
-    root: PathBuf,
-    gateway: String,
-    destination: String,
-    tool: String,
-    prefix: String,
-    /// For `run_command`, the approving rule's argv prefix: the grant is
-    /// exactly as wide as the rule that asked, never the full command.
-    argv: Vec<String>,
-}
-
-/// Held by the backend for the life of the chat process.
-pub(super) type SessionGrants = Arc<Mutex<Vec<SessionGrant>>>;
 
 /// Who is running the turn, for the audit log: the screen, a one-shot
 /// command, or the server, and the turn's run id so a ledger and
@@ -625,9 +606,9 @@ impl ToolRuntime {
                 after,
                 lines_added,
                 lines_removed,
-            } => crate::hooks::audit::append_write(
+            } => crate::precommit::audit::append_write(
                 &self.state_dir,
-                &crate::hooks::audit::WriteEvent {
+                &crate::precommit::audit::WriteEvent {
                     origin: caller.origin,
                     run_id: caller.run_id.as_deref(),
                     tool,
@@ -647,9 +628,9 @@ impl ToolRuntime {
                 exit_code,
                 duration_ms,
                 ran: _,
-            } => crate::hooks::audit::append_command(
+            } => crate::precommit::audit::append_command(
                 &self.state_dir,
-                &crate::hooks::audit::CommandEvent {
+                &crate::precommit::audit::CommandEvent {
                     origin: caller.origin,
                     run_id: caller.run_id.as_deref(),
                     repo: self.workspace.root(),
@@ -668,9 +649,9 @@ impl ToolRuntime {
                 outcome,
                 sha256,
                 bytes,
-            } => crate::hooks::audit::append_skill(
+            } => crate::precommit::audit::append_skill(
                 &self.state_dir,
-                &crate::hooks::audit::SkillEvent {
+                &crate::precommit::audit::SkillEvent {
                     origin: caller.origin,
                     run_id: caller.run_id.as_deref(),
                     repo: self.workspace.root(),
@@ -691,9 +672,9 @@ impl ToolRuntime {
                 status,
                 effects,
                 duration_ms,
-            } => crate::hooks::audit::append_delegate(
+            } => crate::precommit::audit::append_delegate(
                 &self.state_dir,
-                &crate::hooks::audit::DelegateEvent {
+                &crate::precommit::audit::DelegateEvent {
                     origin: caller.origin,
                     run_id: caller.run_id.as_deref(),
                     repo: self.workspace.root(),

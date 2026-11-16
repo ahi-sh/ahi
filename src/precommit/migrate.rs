@@ -1,7 +1,7 @@
 //! Best-effort suggestion of an ahi config from a pre-commit config.
 //!
-//! `ahi migrate` prints a report and a suggested document. It does not
-//! guarantee feature parity or the same file scope. `ahi run` does not read
+//! `ahi precommit migrate` prints a report and a suggested document. It does not
+//! guarantee feature parity or the same file scope. `ahi precommit run` does not read
 //! this table and does not substitute remote hooks. The command is not
 //! upstream `migrate-config` (it does not rewrite `sha`, `python_venv`, or
 //! legacy stage names).
@@ -10,14 +10,14 @@ use yaml_rust2::yaml::{Hash, Yaml};
 use yaml_rust2::YamlEmitter;
 
 use crate::error::{Error, Result};
-use crate::hooks::policy;
+use crate::precommit::policy;
 use crate::yaml_safe::check_config_yaml;
 
 #[derive(Debug, Clone, Copy)]
 struct Equivalent {
     upstream_id: &'static str,
     builtin_id: &'static str,
-    /// Report text only. A fixer still rewrites only when `ahi run --fix`
+    /// Report text only. A fixer still rewrites only when `ahi precommit run --fix`
     /// (or a per-hook `--fix` argument) is set.
     fixer: bool,
 }
@@ -129,10 +129,10 @@ fn equivalent(id: &str) -> Option<&'static Equivalent> {
 }
 
 const HEADER: &str = "\
-# Suggested by `ahi migrate`.
+# Suggested by `ahi precommit migrate`.
 # Best-effort only. This does not guarantee feature parity or the same file scope.
-# Remote repositories were not fetched. `ahi run` does not substitute hook ids.
-# End-of-file, trailing-whitespace, and mixed line endings rewrite only with `ahi run --fix`.
+# Remote repositories were not fetched. `ahi precommit run` does not substitute hook ids.
+# End-of-file, trailing-whitespace, and mixed line endings rewrite only with `ahi precommit run --fix`.
 ";
 
 const TOP_LEVEL: &[&str] = &[
@@ -243,7 +243,7 @@ pub fn suggest(src: &str, origin: &str) -> Result<Suggestion> {
         let mut notes = Notes::default();
         notes.skip(
             origin,
-            "the document is not a mapping. Upstream migrate-config wraps a top-level list in `repos:`; ahi migrate does not rewrite that shape",
+            "the document is not a mapping. Upstream migrate-config wraps a top-level list in `repos:`; ahi precommit migrate does not rewrite that shape",
         );
         return Ok(Suggestion {
             report: render_report(origin, &notes, false),
@@ -370,7 +370,7 @@ fn copy_remote(
         return;
     }
     let fix = if known.fixer {
-        "rewrites only with `ahi run --fix`"
+        "rewrites only with `ahi precommit run --fix`"
     } else {
         "report-only"
     };
@@ -426,7 +426,9 @@ fn copy_local(hook: &Yaml, local_hooks: &mut Vec<Yaml>, notes: &mut Notes) {
 }
 
 fn legacy_stage_reason(stage: &str) -> String {
-    format!("uses legacy stage `{stage}`; ahi migrate does not rewrite legacy stage names")
+    format!(
+        "uses legacy stage `{stage}`; ahi precommit migrate does not rewrite legacy stage names"
+    )
 }
 
 /// `https://github.com/pre-commit/pre-commit-hooks` -> `pre-commit/pre-commit-hooks`.
@@ -543,9 +545,9 @@ fn section(out: &mut String, title: &str, count: usize) {
 /// every reader must see fit in the three header lines.
 fn render_report(origin: &str, notes: &Notes, parsed: bool) -> String {
     let mut out = format!(
-        "ahi migrate: a best-effort suggestion from {origin}\n\
+        "ahi precommit migrate: a best-effort suggestion from {origin}\n\
          This does not guarantee feature parity or the same file scope. Remote repositories and\n\
-         revs are not fetched, comments are not copied, and `ahi run` does not use this mapping.\n"
+         revs are not fetched, comments are not copied, and `ahi precommit run` does not use this mapping.\n"
     );
     if !parsed {
         section(&mut out, "Not ported", notes.skipped.len());
@@ -665,7 +667,7 @@ repos:
         assert!(suggestion.report.contains("ahi/check-yaml"));
         assert!(suggestion.report.contains("ahi/end-of-file"));
         assert!(suggestion.report.contains("ahi/trailing-whitespace"));
-        assert!(suggestion.report.contains("ahi run --fix"));
+        assert!(suggestion.report.contains("ahi precommit run --fix"));
         assert!(suggestion.report.contains("Add to ahi.hooks.yaml"));
         assert!(suggestion.report.contains("  - id: rust-linting\n"));
         assert_eq!(
@@ -685,7 +687,7 @@ repos:
             .suggested
             .contains("https://github.com/pre-commit/pre-commit-hooks"));
         let parsed =
-            crate::hooks::config::parse_config_str(&suggestion.suggested, "suggested").unwrap();
+            crate::precommit::config::parse_config_str(&suggestion.suggested, "suggested").unwrap();
         assert!(parsed.repos.iter().any(|repo| repo.repo == "builtin"));
         assert!(parsed.repos.iter().any(|repo| repo.repo == "local"));
     }

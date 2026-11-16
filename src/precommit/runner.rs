@@ -9,12 +9,14 @@ use std::path::Path;
 use regex::Regex;
 
 use crate::error::{Error, Result};
-use crate::hooks::check::{self, builtin_by_id, writes_enabled, Check, CheckContext, Finding};
-use crate::hooks::config::{stage_selects_files, Config, Hook, HookOriginKind};
-use crate::hooks::filter::{existing_paths, filter_by_include_exclude, filter_by_types};
-use crate::hooks::git::{self, GitFiles};
-use crate::hooks::local_hook::{self, LocalRequest};
-use crate::hooks::policy::{self, Policy, SystemAuth};
+use crate::precommit::checks::{
+    self as check, builtin_by_id, writes_enabled, Check, CheckContext, Finding,
+};
+use crate::precommit::config::{stage_selects_files, Config, Hook, HookOriginKind};
+use crate::precommit::filter::{existing_paths, filter_by_include_exclude, filter_by_types};
+use crate::precommit::git::{self, GitFiles};
+use crate::precommit::local_hook::{self, LocalRequest};
+use crate::precommit::policy::{self, Policy, SystemAuth};
 
 #[derive(Debug, Clone)]
 pub enum Selection {
@@ -76,7 +78,7 @@ pub struct RunRequest<'a> {
 }
 
 pub fn run(request: &RunRequest<'_>) -> Result<Report> {
-    if !crate::hooks::config::STAGES.contains(&request.stage) {
+    if !crate::precommit::config::STAGES.contains(&request.stage) {
         return Err(Error::new(format!(
             "hook stage `{}` is not a pre-commit stage",
             request.stage

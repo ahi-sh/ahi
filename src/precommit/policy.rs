@@ -224,7 +224,7 @@ pub(crate) fn parse_toolchain_names(
 ) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for name in names {
-        if let Some(err) = crate::hooks::local_hook::toolchain_name_error(name) {
+        if let Some(err) = crate::precommit::local_hook::toolchain_name_error(name) {
             return Err(Error::new(format!("{origin}: {what}: {err}")));
         }
         if !out.iter().any(|existing| existing == name) {

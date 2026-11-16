@@ -1,4 +1,4 @@
-//! ahi library: the pre-commit hook runner (`hooks`), the model picker and
+//! ahi library: the pre-commit-compatible runner (`precommit`), the model picker and
 //! chat terminal screens (`tui`, `chat`), the provider harness (`harness`), and
 //! the development container command (`dev`).
 //!
@@ -7,13 +7,14 @@
 #![forbid(unsafe_code)]
 
 pub mod chat;
+pub mod cli;
 mod clipboard;
 pub mod dev;
 pub mod directories;
 pub mod error;
 pub mod exec;
 pub mod harness;
-pub mod hooks;
+pub mod precommit;
 pub mod program_status;
 pub mod sandbox;
 pub mod serve;
@@ -23,7 +24,7 @@ mod shlex;
 pub mod skills;
 pub mod term;
 mod tool_policy;
-pub mod tools;
+pub(crate) mod tools;
 pub mod tui;
 pub mod update;
 mod util;
@@ -34,7 +35,7 @@ mod yaml_safe;
 mod fixture_directory;
 
 pub use error::{Error, Result};
-pub use hooks::local_hook::{base_env_names, default_toolchain_names};
+pub use precommit::local_hook::{base_env_names, default_toolchain_names};
 
 /// Version baked in from the library package. The `ahi` binary uses the same number.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

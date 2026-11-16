@@ -170,7 +170,7 @@ fn size(bytes: usize) -> String {
 
 /// The path or argv a call names, for `show`: never the whole argument
 /// object, which may hold file contents.
-fn target_of(call: &crate::chat::backend::ToolCall) -> String {
+fn target_of(call: &crate::tools::ToolCall) -> String {
     if let Some(argv) = call.arguments.get("argv").and_then(Value::as_array) {
         return argv
             .iter()

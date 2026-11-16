@@ -1,7 +1,7 @@
 //! `ahi tools`: write a shipped tool policy into the working directory and
 //! describe the one that is there. The chat screen never writes
 //! `ahi.tools.yaml`; this command is the operator's pen, run before any
-//! model is involved, and it follows `ahi migrate`: print first, write only
+//! model is involved, and it follows `ahi precommit migrate`: print first, write only
 //! with `--write`, replace only with `--write --force`.
 //!
 //! The examples are the files under `examples/tools`, embedded at build
@@ -9,86 +9,18 @@
 
 use std::path::Path;
 
-use crate::chat::backend::tools::BUILTIN;
-use crate::chat::transcript::theme;
+use crate::tool_policy::examples::{example, Example, DEFAULT_EXAMPLE, EXAMPLES};
+use crate::tools::BUILTIN;
+use std::process::ExitCode;
+
+const DENY_BG: (u8, u8, u8) = (90, 35, 35);
+const APPROVE_BG: (u8, u8, u8) = (35, 85, 45);
+const ASK_BG: (u8, u8, u8) = (55, 55, 65);
 use crate::error::Result;
 use crate::tool_policy::{self, Effect};
 
 /// The policy file name, `ahi.tools.yaml`.
 pub const FILE_NAME: &str = crate::tool_policy::FILE_NAME;
-
-/// One shipped policy: its file stem, the text, and what the model gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Example {
-    pub name: &'static str,
-    pub text: &'static str,
-    pub summary: &'static str,
-}
-
-/// The default for `ahi tools init`: the policy this repository ships.
-pub const DEFAULT_EXAMPLE: &str = "read-all";
-
-/// Shipped policies, in the order `ahi tools examples` prints them. The
-/// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
-/// the fail-closed walkthrough and is not offered here.
-pub const EXAMPLES: [Example; 9] = [
-    Example {
-        name: "read-all",
-        text: include_str!("../examples/tools/read-all.yaml"),
-        summary: "read, list, find, and search the whole working directory; root .env denied; no prompts",
-    },
-    Example {
-        name: "ask-every-read",
-        text: include_str!("../examples/tools/ask-every-read.yaml"),
-        summary: "every read, listing, find, and search in the working directory asks in chat",
-    },
-    Example {
-        name: "sources-only",
-        text: include_str!("../examples/tools/sources-only.yaml"),
-        summary: "list the whole working directory; read, find, and search only src and docs",
-    },
-    Example {
-        name: "list-only",
-        text: include_str!("../examples/tools/list-only.yaml"),
-        summary: "list directories in the working directory only; reads are denied",
-    },
-    Example {
-        name: "edit-sources",
-        text: include_str!("../examples/tools/edit-sources.yaml"),
-        summary: "read the whole working directory; edit under src and tests after a prompt; create under tests",
-    },
-    Example {
-        name: "commands",
-        text: include_str!("../examples/tools/commands.yaml"),
-        summary: "read the whole working directory; cargo check and test run; other cargo asks; publish and install denied",
-    },
-    Example {
-        name: "delegate",
-        text: include_str!("../examples/tools/delegate.yaml"),
-        summary: "read the whole working directory; hand tasks to the workers labeled rust-ci (after a prompt) and docs; prod denied",
-    },
-    Example {
-        name: "skills",
-        text: include_str!("../examples/tools/skills.yaml"),
-        summary: "read the whole working directory; the skills rust-review and release (after a prompt) may be loaded; deploy denied",
-    },
-    Example {
-        name: "deny-all",
-        text: include_str!("../examples/tools/deny-all.yaml"),
-        summary: "valid, no approve rule: no tool is advertised",
-    },
-];
-
-/// The example called `name`, or the names that exist.
-pub fn example(name: &str) -> std::result::Result<&'static Example, String> {
-    EXAMPLES.iter().find(|e| e.name == name).ok_or_else(|| {
-        let names: Vec<&str> = EXAMPLES.iter().map(|e| e.name).collect();
-        format!(
-            "no example named `{name}`; `ahi tools examples list` prints them: {}",
-            names.join(", ")
-        )
-    })
-}
 
 /// `ahi tools examples list`: one line per example, name then summary,
 /// and the commands that show them.
@@ -132,9 +64,9 @@ enum Outcome {
 impl Outcome {
     fn background(self) -> (u8, u8, u8) {
         match self {
-            Outcome::Approve => theme::APPROVE_BG,
-            Outcome::Ask => theme::ASK_BG,
-            Outcome::Deny => theme::DENY_BG,
+            Outcome::Approve => APPROVE_BG,
+            Outcome::Ask => ASK_BG,
+            Outcome::Deny => DENY_BG,
         }
     }
 
@@ -314,7 +246,7 @@ pub fn doctor_lines(root: &Path) -> Vec<String> {
 
 /// The connect command `delegate` would run, parsed the way it will be.
 fn delegate_via_line() -> String {
-    let (template, set) = crate::chat::backend::tools::delegate::via_template();
+    let (template, set) = crate::tools::delegate::via_template();
     let source = if set { "AHI_DELEGATE_VIA" } else { "default" };
     match crate::service::via::split(&template) {
         Ok(argv) => format!(
@@ -357,6 +289,49 @@ fn policy_lines(root: &Path) -> Vec<String> {
     }
 }
 
+/// Preview an operator policy; create or replace it only with explicit flags.
+pub(super) fn init(name: &str, write: bool, force: bool, color: bool) -> ExitCode {
+    if force && !write {
+        eprintln!("error: --force does not write a file; pass --write --force to replace one");
+        return ExitCode::from(2);
+    }
+    let example = match example(name) {
+        Ok(example) => example,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let path = std::path::Path::new(FILE_NAME);
+    print!("{}", render_policy(example.text, color));
+    println!();
+    if !write {
+        println!(
+            "Left {} unchanged. Rerun with --write to create it from `{}`; rule paths are relative to this directory.",
+            path.display(),
+            example.name
+        );
+        return ExitCode::from(0);
+    }
+    if path.exists() && !force {
+        eprintln!(
+            "error: refusing to overwrite {}; pass --write --force to replace it",
+            path.display()
+        );
+        return ExitCode::from(1);
+    }
+    if let Err(err) = std::fs::write(path, example.text) {
+        eprintln!("error: cannot write {}: {err}", path.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "Wrote {} from `{}`. `ahi tui` in this directory advertises the tools it approves; `ahi doctor` lists them.",
+        path.display(),
+        example.name
+    );
+    ExitCode::from(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,7 +368,7 @@ mod tests {
     #[test]
     fn repository_policy_starts_with_read_all() {
         let root = tool_policy::parse(
-            include_str!("../ahi.tools.yaml"),
+            include_str!("../../ahi.tools.yaml"),
             "ahi.tools.yaml",
             &BUILTIN,
         )
@@ -429,12 +404,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle}"))
                 .to_string()
         };
-        assert!(line_with("id: no-env").starts_with(&bg(theme::DENY_BG)));
-        assert!(line_with("match: {tool: read_file, path: .env}").starts_with(&bg(theme::DENY_BG)));
-        assert!(line_with("id: cargo-check").starts_with(&bg(theme::APPROVE_BG)));
-        assert!(line_with("toolchain_env: [CARGO_TARGET_DIR]").starts_with(&bg(theme::APPROVE_BG)));
-        assert!(line_with("id: cargo-other").starts_with(&bg(theme::ASK_BG)));
-        assert!(line_with("id: no-publish").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("id: no-env").starts_with(&bg(DENY_BG)));
+        assert!(line_with("match: {tool: read_file, path: .env}").starts_with(&bg(DENY_BG)));
+        assert!(line_with("id: cargo-check").starts_with(&bg(APPROVE_BG)));
+        assert!(line_with("toolchain_env: [CARGO_TARGET_DIR]").starts_with(&bg(APPROVE_BG)));
+        assert!(line_with("id: cargo-other").starts_with(&bg(ASK_BG)));
+        assert!(line_with("id: no-publish").starts_with(&bg(DENY_BG)));
         assert!(line_with("# Reads anywhere").starts_with("# Reads"));
         assert!(line_with("version: 1").starts_with("version: 1"));
         assert!(painted.lines().last().unwrap().contains("approve"));
@@ -454,7 +429,7 @@ mod tests {
         assert!(render_examples(Some("nope"), false).is_err());
         // The repository policy's section comments sit between rules and
         // stay unpainted; every rule still gets its own outcome.
-        let root = render_policy(include_str!("../ahi.tools.yaml"), true);
+        let root = render_policy(include_str!("../../ahi.tools.yaml"), true);
         let section = root
             .lines()
             .find(|l| l.contains("Repository commands"))
@@ -464,7 +439,7 @@ mod tests {
             .lines()
             .find(|l| l.contains("id: no-git-push"))
             .unwrap()
-            .starts_with(&bg(theme::DENY_BG)));
+            .starts_with(&bg(DENY_BG)));
     }
 
     #[test]

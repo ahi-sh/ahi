@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::backend::ToolCall;
 use crate::harness::Protocol;
+use crate::tools::ToolCall;
 use ahi_durable::ToolDetail;
 
 /// One transcript entry sent to a backend, or a local notice.

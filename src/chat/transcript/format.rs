@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::render::{RowSpan, Styled, Target};
 use super::{diff, highlight, links, markdown, theme, ChatMessage, ToolPayload, TranscriptRole};
-use crate::chat::backend::tools;
+use crate::tools;
 use ahi_durable::ToolDetail;
 
 /// Non-diff previews stop here; edit diffs retain every hunk.
@@ -468,7 +468,13 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 _ => format!("{lines} lines"),
             });
         }
-        Some(ToolDetail::Omitted { reason }) => summary.push(reason.clone()),
+        Some(ToolDetail::Omitted { reason }) => summary.push(match reason {
+            ahi_durable::ToolOmissionReason::DetailTooLarge {} => format!(
+                "Tool preview exceeded the {} KiB session-detail limit; the result and duration were retained.",
+                ahi_durable::MAX_TOOL_DETAIL_BYTES / 1024
+            ),
+            ahi_durable::ToolOmissionReason::Legacy(message) => message.clone(),
+        }),
         None => {}
     }
     if let Some(reason) = &reason {
@@ -758,8 +764,8 @@ fn diff_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::backend::ToolCall;
     use crate::chat::transcript::render::RowTarget;
+    use crate::tools::ToolCall;
     use std::time::Duration;
 
     fn exists(path: &str) -> bool {
@@ -1044,7 +1050,7 @@ mod tests {
             "run_command .",
             1,
             Some(ToolDetail::Omitted {
-                reason: "preview not retained".into(),
+                reason: ahi_durable::ToolOmissionReason::Legacy("preview not retained".into()),
             }),
         );
         let out = paragraphs(&message, &options(), 80);

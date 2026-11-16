@@ -9,9 +9,8 @@ pub(crate) mod service;
 mod sse;
 mod tool_call;
 mod tool_loop;
-pub(crate) mod tools;
 
-pub(crate) use tool_call::ToolCall;
+use crate::tools::ToolCall;
 
 use std::sync::mpsc::{Receiver, Sender};
 

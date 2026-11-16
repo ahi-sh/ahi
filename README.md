@@ -58,7 +58,7 @@ ahi doctor          # versions, the config, data, state and cache directories, a
 ahi login           # sign in to OpenAI in the browser (optional)
 ahi tui             # register a gateway with /gateway, curate models, chat
 ahi --session <id>  # continue a saved chat (find IDs with ahi session list)
-ahi run --all-files # in a repository with .pre-commit-config.yaml
+ahi precommit run --all-files # in a repository with .pre-commit-config.yaml
 ahi dev             # shell in the published dev image, with podman or docker installed
 ```
 
@@ -81,7 +81,7 @@ Where ahi keeps `models.json`, the credential, and its logs is in [Files and dir
 For the hook runner, the `examples/` directory has ready-made configurations. `examples/starter` is builtins plus the two local Rust hooks, with a matching policy. `examples/ian-repos` is the same Rust hooks and the three pre-commit-hooks checks expressed as `repo: builtin`. Both expect:
 
 ```sh
-ahi run --fix
+ahi precommit run --fix
 ```
 
 `examples/tools` holds chat tool policies (`ahi.tools.yaml`) from read-everything to deny-all, for `ahi tui --tools <file>` or copying into a repository; its README describes each.
@@ -90,30 +90,32 @@ ahi run --fix
 
 ```sh
 #!/bin/sh
-exec ahi run --fix
+exec ahi precommit run --fix
 ```
 
 A repository can carry up to four ahi-related files, one per job. The two allowlists share one rule grammar (`id`, `action`, `match`, `effect`, optional `ask`), and the filename says which trust boundary a diff touches. Unknown keys are errors in every file, and the retired names `ahi.policy.yaml` and `ahi.actions.yaml` are refused rather than ignored.
 
 | File | Decides | Read by |
 | --- | --- | --- |
-| `.pre-commit-config.yaml` | Which hooks run; upstream pre-commit format | `ahi run`, `ahi migrate` |
-| `ahi.hooks.yaml` | Which local `system`/`script` hooks may execute, by id and exact entry (`action: hook`) | `ahi run` |
+| `.pre-commit-config.yaml` | Which hooks run; upstream pre-commit format | `ahi precommit run`, `ahi precommit migrate` |
+| `ahi.hooks.yaml` | Which local `system`/`script` hooks may execute, by id and exact entry (`action: hook`) | `ahi precommit run` |
 | `ahi.tools.yaml` | Which builtin tools the model may call, where, and whether to ask: `action: tool_call` for `read_file`, `list_dir`, `find_files`, `search_files`; `action: file_write` for `edit_file`, `write_file`; `action: command` for `run_command` by argv prefix; `action: delegate` for `delegate` by worker label; `action: skill` for the skills the model may load, by name | `ahi tui` |
 | `ahi.dev.yaml` | The development image, tag, shell, and runtime this repository prefers; grants nothing | `ahi dev` |
 
 ## Commands
 
+Precommit commands now use `ahi precommit …`. The old `ahi run`, `list-checks`, `explain`, `migrate`, and `hooks install/uninstall` spellings remain temporary aliases that warn on stderr. See [MIGRATING.md](MIGRATING.md) for replacements, the support window, and Git shim guidance. The [module structure proposal](docs/MODULE_STRUCTURE.md) distinguishes this implemented slice from follow-up architecture work.
+
 Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` controls color, which only `ahi tools init` uses so far (`auto` colors a terminal unless `NO_COLOR` is set).
 
 | Command | Summary |
 | --- | --- |
-| [`ahi run [HOOK]`](#ahi-run) | Run the configured hooks on staged files, a file list, or a ref range, with text, JSON, or SARIF output. |
-| [`ahi list-checks`](#ahi-list-checks) | List the builtin check ids and aliases. |
-| [`ahi explain <id>`](#ahi-explain) | Describe one builtin check and the environment names local hooks receive. |
+| [`ahi precommit run [HOOK]`](#ahi-precommit-run) | Run the configured hooks on staged files, a file list, or a ref range, with text, JSON, or SARIF output. |
+| [`ahi precommit list-checks`](#ahi-precommit-list-checks) | List the builtin check ids and aliases. |
+| [`ahi precommit explain <id>`](#ahi-precommit-explain) | Describe one builtin check and the environment names local hooks receive. |
 | [`ahi doctor`](#ahi-doctor) | Report versions, paths, directories, modes, and policy. |
-| [`ahi migrate`](#ahi-migrate) | Suggest an ahi config from an existing `.pre-commit-config.yaml`. |
-| [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
+| [`ahi precommit migrate`](#ahi-precommit-migrate) | Suggest an ahi config from an existing `.pre-commit-config.yaml`. |
+| [`ahi precommit install`, `ahi precommit uninstall`](#ahi-precommit-install--uninstall) | Hook shim commands; not implemented, exit 1. |
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tools list`, `ahi tools examples [list\|show [<name>]]`, `ahi tools init [--example <name>] [--write]`](#ahi-tools) | Show the working directory's chat tool policy, show the shipped examples, or write one into the working directory. |
 | [`ahi --session <id>` / `ahi tui [--refresh] [--session <id>] [--standalone] [--socket <path>]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; turns run through `ahi serve`, started when needed, and every chat is recorded as a session. |
@@ -124,11 +126,11 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
 
-### ahi run
+### ahi precommit run
 
 Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings.
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when an `ahi.hooks.yaml` rule approves that hook id and the exact `entry` string. The entry is split without a shell. A missing rule prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi precommit install` and `ahi precommit uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when an `ahi.hooks.yaml` rule approves that hook id and the exact `entry` string. The entry is split without a shell. A missing rule prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 
@@ -138,7 +140,7 @@ ahi runs tools that are already installed. It can pass a toolchain manager the v
 | Policy only (`toolchain_env`) | `GOROOT`, `GOPATH`, `VIRTUAL_ENV`, `NVM_DIR`. Not enabled by default. `NVM_DIR` does not enable Node and does not run `npm install`. |
 | Never passed | Names containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and names starting with `AWS_`, `AZURE_`, or `GITHUB_`. Listing one in the policy is an error. |
 
-`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one rule applies only to that rule's id and entry.
+`ahi precommit explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one rule applies only to that rule's id and entry.
 
 Builtin checks are report-only unless `--fix` is passed. `--fix` rewrites only `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings`, then the hook fails because the file changed. A hook argument `--fix` does the same for those three. `--fix=no` on mixed line endings stays report-only. The write is a temp file in the same directory, fsynced, then renamed. Symlinks are refused. Paths outside the selected set are refused. A file with unstaged changes is left unchanged. ahi does not stash.
 
@@ -165,17 +167,17 @@ repos:
 
 `ahi/byte-order-marker` reports a leading UTF-8 BOM and does not remove it. `ahi/aws-credentials` matches access-key id shapes and labeled secret assignments in the selected files. It does not read `~/.aws` or the environment. `ahi/no-commit-to-branch` defaults to `main` and `master`.
 
-### ahi list-checks
+### ahi precommit list-checks
 
 Builtin check ids with aliases. `--format` is `text` (default) or `json`.
 
-The ids, aliases, and what each check reports are the same table `ahi explain` draws on. The hook configuration example under [ahi run](#ahi-run) lists every builtin id.
+The ids, aliases, and what each check reports are the same table `ahi precommit explain` draws on. The hook configuration example under [ahi precommit run](#ahi-precommit-run) lists every builtin id.
 
-### ahi explain
+### ahi precommit explain
 
 What one check reports.
 
-It also prints the environment names a local hook receives by default; see the table under [ahi run](#ahi-run).
+It also prints the environment names a local hook receives by default; see the table under [ahi precommit run](#ahi-precommit-run).
 
 ### ahi doctor
 
@@ -183,13 +185,13 @@ Version, git, config path, the `models.json`, data, state, and cache directories
 
 It warns about any ahi directory or file that other users can read; see [Files and directories](#files-and-directories).
 
-### ahi migrate
+### ahi precommit migrate
 
-Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report in four parts, "Builtin equivalents", "Local hooks kept as repo: local", "Not ported" with a reason per hook, and the `ahi.hooks.yaml` rules the local hooks need, then the suggested config and a closing line that says the file was left unchanged. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping.
+Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report in four parts, "Builtin equivalents", "Local hooks kept as repo: local", "Not ported" with a reason per hook, and the `ahi.hooks.yaml` rules the local hooks need, then the suggested config and a closing line that says the file was left unchanged. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi precommit run` does not use the mapping.
 
-`ahi migrate` is a reading aid, not upstream `migrate-config`. It does not rewrite `sha`, `python_venv`, or legacy stage names, and it does not fetch a `rev`. Hooks with an obvious builtin id are suggested as `repo: builtin`. `repo: local` system and script hooks are copied with the policy snippet they need. Everything else is listed under "Not ported" with a reason. A run-time substitution of remote hook ids was removed; native checks run only from `repo: builtin`.
+`ahi precommit migrate` is a reading aid, not upstream `migrate-config`. It does not rewrite `sha`, `python_venv`, or legacy stage names, and it does not fetch a `rev`. Hooks with an obvious builtin id are suggested as `repo: builtin`. `repo: local` system and script hooks are copied with the policy snippet they need. Everything else is listed under "Not ported" with a reason. A run-time substitution of remote hook ids was removed; native checks run only from `repo: builtin`.
 
-### ahi hooks
+### ahi precommit install / uninstall
 
 Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands.
 
@@ -201,7 +203,7 @@ Installation and the manual verification steps are under [Installation](#install
 
 ### ahi tools
 
-Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy. `ahi tools list` shows the `ahi.tools.yaml` in the working directory with the same summary `ahi doctor` prints, or says it is absent. `ahi tools examples list` (or bare `ahi tools examples`) names the shipped policies with what each lets the model do; `ahi tools examples show` prints every one and `ahi tools examples show <name>` prints one. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves. In a terminal, `list`, `examples`, and `init` paint each rule with the chat's colors for its outcome, green for approve, gray for ask, red for deny, with a legend; `--color never` prints plain text and the written file is always plain. Every builtin tool works inside the working directory: rule paths are relative to it, absolute paths, `..`, and symbolic links are refused before any read, write, or command, and `run_command` starts only in a directory inside it, so a rule's `path` narrows access and never widens it. This is not a sandbox: a program approved by a command rule runs on the host with the operator's access and can follow symbolic links, read files above the working directory, and run other programs, so command rules deserve the most care; `ahi tui` inside `ahi dev run` adds a container boundary.
+Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi precommit migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy. `ahi tools list` shows the `ahi.tools.yaml` in the working directory with the same summary `ahi doctor` prints, or says it is absent. `ahi tools examples list` (or bare `ahi tools examples`) names the shipped policies with what each lets the model do; `ahi tools examples show` prints every one and `ahi tools examples show <name>` prints one. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves. In a terminal, `list`, `examples`, and `init` paint each rule by its outcome, green for approve, gray for ask, red for deny, with a legend; `--color never` prints plain text and the written file is always plain. Every builtin tool works inside the working directory: rule paths are relative to it, absolute paths, `..`, and symbolic links are refused before any read, write, or command, and `run_command` starts only in a directory inside it, so a rule's `path` narrows access and never widens it. This is not a sandbox: a program approved by a command rule runs on the host with the operator's access and can follow symbolic links, read files above the working directory, and run other programs, so command rules deserve the most care; `ahi tui` inside `ahi dev run` adds a container boundary.
 
 ### ahi tui
 

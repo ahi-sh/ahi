@@ -14,11 +14,11 @@ use super::replay::Exchanges;
 use super::{emit, usage_event, RequestContext, StreamOutcome};
 use crate::chat::backend::sse::{SseError, SseReader};
 use crate::chat::backend::tool_call::ToolCallAssembler;
-use crate::chat::backend::tools::ToolSchema;
 use crate::chat::backend::ResponseEvent;
 use crate::chat::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::harness::{ModelMetadata, Protocol};
+use crate::tools::ToolSchema;
 
 /// Output items one response may carry.
 const MAX_SLOTS: usize = 128;
@@ -655,7 +655,7 @@ pub(super) fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::backend::tools::call;
+    use crate::tools::call;
 
     #[test]
     fn complete_exchanges_replay_as_function_call_items() {

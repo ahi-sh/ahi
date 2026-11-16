@@ -9,7 +9,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::hooks::identify;
+use crate::precommit::identify;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionError {

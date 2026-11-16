@@ -37,7 +37,8 @@ impl WriteReport {
         lines_added: usize,
         lines_removed: usize,
     ) -> Result<Self, &'static str> {
-        crate::hooks::check::atomic_replace(path, after).map_err(|_| "cannot write the file")?;
+        crate::precommit::checks::atomic_replace(path, after)
+            .map_err(|_| "cannot write the file")?;
         Ok(Self {
             before: Some(hex(before)),
             after: hex(after),
@@ -64,7 +65,7 @@ pub(super) fn run(
         if exists {
             return Err("file exists; set overwrite to replace it");
         }
-        crate::hooks::check::create_new(path, content.as_bytes())
+        crate::precommit::checks::create_new(path, content.as_bytes())
             .map_err(|_| "cannot create the file")?;
         return Ok((
             format!("created {name}: {lines} lines"),

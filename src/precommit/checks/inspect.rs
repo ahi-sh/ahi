@@ -9,7 +9,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use super::{flag_values, Check, CheckContext, CheckOutcome, Finding};
-use crate::hooks::git;
+use crate::precommit::git;
 
 pub struct ShebangExecutable;
 pub struct ExecutableShebang;
@@ -488,7 +488,7 @@ impl Check for ByteOrderMarker {
         "Fix Utf-8 Byte Order Marker"
     }
     fn description(&self) -> &'static str {
-        "Reports a leading UTF-8 BOM (EF BB BF). The check is report-only. `ahi run --fix` does not strip the marker."
+        "Reports a leading UTF-8 BOM (EF BB BF). The check is report-only. `ahi precommit run --fix` does not strip the marker."
     }
     fn default_types(&self) -> &'static [&'static str] {
         &["text"]

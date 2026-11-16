@@ -1,4 +1,4 @@
-//! CLI behavior that needs a git repository: golden `ahi run` output, and
+//! CLI behavior that needs a git repository: golden `ahi precommit run` output, and
 //! the refusal for hooks this slice does not execute.
 //!
 //! JSON and SARIF snapshots include the crate version. Comparison substitutes
@@ -267,14 +267,14 @@ fn version_matches_package_exactly() {
 
 #[test]
 fn list_checks_and_explain() {
-    let listed = ahi().args(["list-checks"]).output().unwrap();
+    let listed = ahi().args(["precommit", "list-checks"]).output().unwrap();
     assert!(listed.status.success());
     let text = String::from_utf8(listed.stdout).unwrap();
     assert!(text.contains("ahi/trailing-whitespace"));
     assert!(text.contains("ahi/dockerfile"));
 
     let explained = ahi()
-        .args(["explain", "ahi/shell-strict"])
+        .args(["precommit", "explain", "ahi/shell-strict"])
         .output()
         .unwrap();
     assert!(explained.status.success());
@@ -286,7 +286,10 @@ fn list_checks_and_explain() {
     assert!(text.contains("RUSTUP_TOOLCHAIN"));
     assert!(text.contains("names only"));
 
-    let missing = ahi().args(["explain", "nope"]).output().unwrap();
+    let missing = ahi()
+        .args(["precommit", "explain", "nope"])
+        .output()
+        .unwrap();
     assert_eq!(missing.status.code(), Some(1));
 }
 
@@ -494,7 +497,10 @@ fn rejects_unknown_color_and_format() {
         .unwrap();
     assert_eq!(color.status.code(), Some(2));
     let dir = fixture();
-    let format = run(&dir, &["run", "--all-files", "--format", "xml"]);
+    let format = run(
+        &dir,
+        &["precommit", "run", "--all-files", "--format", "xml"],
+    );
     assert_eq!(format.status.code(), Some(2));
     let _ = fs::remove_dir_all(dir);
 }
@@ -502,7 +508,7 @@ fn rejects_unknown_color_and_format() {
 #[test]
 fn run_all_files_matches_golden_output() {
     let dir = fixture();
-    let text = run(&dir, &["run", "--all-files"]);
+    let text = run(&dir, &["precommit", "run", "--all-files"]);
     assert_eq!(text.status.code(), Some(1));
     let stdout = String::from_utf8(text.stdout.clone()).unwrap();
     for needle in [
@@ -528,11 +534,17 @@ fn run_all_files_matches_golden_output() {
     assert!(!stdout.contains(".env.example"));
     expect_golden("run.txt", &text.stdout);
 
-    let json = run(&dir, &["run", "--all-files", "--format", "json"]);
+    let json = run(
+        &dir,
+        &["precommit", "run", "--all-files", "--format", "json"],
+    );
     assert_eq!(json.status.code(), Some(1));
     expect_golden("run.json", &json.stdout);
 
-    let sarif = run(&dir, &["run", "--all-files", "--format", "sarif"]);
+    let sarif = run(
+        &dir,
+        &["precommit", "run", "--all-files", "--format", "sarif"],
+    );
     assert_eq!(sarif.status.code(), Some(1));
     expect_golden("run.sarif", &sarif.stdout);
     let _ = fs::remove_dir_all(dir);
@@ -541,7 +553,10 @@ fn run_all_files_matches_golden_output() {
 #[test]
 fn crate_version_change_does_not_fail_golden_json_or_sarif() {
     let dir = fixture();
-    let json = run(&dir, &["run", "--all-files", "--format", "json"]);
+    let json = run(
+        &dir,
+        &["precommit", "run", "--all-files", "--format", "json"],
+    );
     assert_eq!(json.status.code(), Some(1));
     let json_text = String::from_utf8(json.stdout).unwrap();
     assert_eq!(
@@ -560,7 +575,10 @@ fn crate_version_change_does_not_fail_golden_json_or_sarif() {
         "a finding change must still fail the JSON golden comparison"
     );
 
-    let sarif = run(&dir, &["run", "--all-files", "--format", "sarif"]);
+    let sarif = run(
+        &dir,
+        &["precommit", "run", "--all-files", "--format", "sarif"],
+    );
     assert_eq!(sarif.status.code(), Some(1));
     let sarif_text = String::from_utf8(sarif.stdout).unwrap();
     assert_eq!(sarif_driver_version(&sarif_text), env!("CARGO_PKG_VERSION"));
@@ -591,7 +609,7 @@ fn crate_version_change_does_not_fail_golden_json_or_sarif() {
 #[test]
 fn files_flag_limits_the_set() {
     let dir = fixture();
-    let output = run(&dir, &["run", "--files", "ok.txt"]);
+    let output = run(&dir, &["precommit", "run", "--files", "ok.txt"]);
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -611,7 +629,7 @@ fn remote_and_language_hooks_are_not_skipped() {
         &dir.join(".pre-commit-config.yaml"),
         b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: 'true'\n    language: system\n- repo: https://example.invalid/hooks\n  rev: abc\n  hooks:\n  - id: remote-hook\n- repo: meta\n  hooks:\n  - id: identity\n",
     );
-    let output = run(&dir, &["run", "--all-files"]);
+    let output = run(&dir, &["precommit", "run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("language `python`"));

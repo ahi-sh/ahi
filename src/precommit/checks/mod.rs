@@ -1,7 +1,7 @@
 //! Builtin checks. Implementations do not spawn processes and do not touch the network.
 //!
 //! Fixers rewrite a file only when `CheckContext::fix` is set. The runner sets
-//! that for `ahi run --fix` and for a per-hook `--fix` argument on the three
+//! that for `ahi precommit run --fix` and for a per-hook `--fix` argument on the three
 //! fixer checks. A rewrite is atomic, does not follow a symlink, and is refused
 //! when the file has unstaged changes.
 
@@ -26,7 +26,7 @@ use supply::{DockerfileCheck, GithubActions, ShellStrict};
 use whitespace::{EndOfFile, LineEndings, TrailingWhitespace};
 
 use crate::error::{Error, Result};
-use crate::hooks::paths::join_inside;
+use crate::precommit::paths::join_inside;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -299,7 +299,7 @@ pub trait Check: Send + Sync {
     fn upstream(&self) -> Option<&'static str> {
         None
     }
-    /// `ahi run --fix` or a per-hook `--fix` argument may write.
+    /// `ahi precommit run --fix` or a per-hook `--fix` argument may write.
     fn fixes(&self) -> bool {
         false
     }
