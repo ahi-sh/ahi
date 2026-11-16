@@ -130,3 +130,7 @@ rules:
     action: command
     match: {argv: [git, push]}
     effect: deny
+  - id: run-release
+    action: command
+    match: {argv: [just, cut-release]}
+    effect: approve
