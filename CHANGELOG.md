@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.18.2 (2026-11-16)
+
+### Fixed
+
+- Remove the fixed eight-round tool-call cap so longer tasks can finish within one turn. Repeated calls with identical arguments remain allowed for workflows such as rereading edited files and rerunning tests. Tool output budgets, request-size limits, policy approvals, cancellation, and configured deadlines remain unchanged.
+
+- The release runner accepts a version already prepared in a PR, without creating a redundant version commit; existing-tag checks still apply.
+
 ## 0.18.1 (2026-11-16)
 
 ### Fixed

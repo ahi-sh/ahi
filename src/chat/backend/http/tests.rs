@@ -1992,30 +1992,25 @@ fn a_dropped_approval_denies_the_batch_and_ends_the_turn() {
 }
 
 #[test]
-fn the_round_cap_returns_results_and_stops() {
-    let rounds = super::super::tool_loop::MAX_ROUNDS;
-    let responses = (0..=rounds)
+fn repeated_tool_calls_continue_past_eight_rounds_and_complete() {
+    let mut responses: Vec<_> = (0..12)
         .map(|n| calls_stream(&[(&format!("c{n}"), "read_file", json!({"path": "src/a.rs"}))]))
         .collect();
+    responses.push(text_stream("done"));
     let (url, server) = server_sequence(responses);
     let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
     let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
     let outcomes = results(&events);
-    assert_eq!(outcomes.len(), rounds + 1);
-    assert!(outcomes[..rounds].iter().all(|(_, code, _)| *code == 0));
     assert_eq!(
-        outcomes[rounds].2,
-        "error: tool round limit reached".to_string()
+        outcomes,
+        (0..12)
+            .map(|n| (format!("c{n}"), 0, "fn a() {}\n".into()))
+            .collect::<Vec<_>>()
     );
-    assert_eq!(returns(&events), rounds + 1);
-    assert_eq!(
-        events.last(),
-        Some(&failed(
-            format!("model exceeded {rounds} tool rounds in one turn; no further calls ran"),
-            ErrorKind::Limit
-        ))
-    );
-    assert_eq!(server.join().unwrap().len(), rounds + 1);
+    assert_eq!(returns(&events), 12);
+    assert!(events.contains(&ResponseEvent::TextDelta("done".into())));
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    assert_eq!(server.join().unwrap().len(), 13);
 }
 
 #[test]

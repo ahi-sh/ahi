@@ -105,11 +105,6 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+
   exit 2
 fi
 
-if [[ "$version" == "$current_version" ]]; then
-  echo "error: version is already $current_version" >&2
-  exit 2
-fi
-
 if [[ -n "$notes_file" && ! -f "$notes_file" ]]; then
   echo "error: notes file not found: $notes_file" >&2
   exit 2
@@ -156,6 +151,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   trap restore_dry_run EXIT
 fi
 
+if [[ "$version" != "$current_version" ]]; then
 run_python "$version" <<'PY'
 import pathlib
 import re
@@ -194,6 +190,10 @@ if not changed:
     raise SystemExit(f"package {package_name} not found in Cargo.lock")
 lockfile.write_text("".join(updated_blocks))
 PY
+fi
+
+# A version prepared in a PR must also be present in the lockfile.
+cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
 bash scripts/check-published-members.sh
 cargo fmt --all -- --check
@@ -204,7 +204,10 @@ cargo package --workspace --allow-dirty
 
 if [[ "$dry_run" -eq 1 ]]; then
   echo "Dry run succeeded for $package_name $tag."
-  echo "Would commit Cargo.toml and Cargo.lock, tag $tag, push main and $tag, then create the GitHub release."
+  if [[ "$version" != "$current_version" ]]; then
+    echo "Would commit Cargo.toml and Cargo.lock."
+  fi
+  echo "Would tag $tag, push main and $tag, then create the GitHub release."
   if [[ -n "$notes_file" ]]; then
     echo "Would run: gh release create $tag --verify-tag --notes-file $notes_file"
   else
@@ -213,8 +216,10 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-git add Cargo.toml Cargo.lock
-git commit -m "chore: release $tag"
+if [[ "$version" != "$current_version" ]]; then
+  git add Cargo.toml Cargo.lock
+  git commit -m "chore: release $tag"
+fi
 git tag -a "$tag" -m "Release $tag"
 git push origin HEAD
 git push origin "$tag"
