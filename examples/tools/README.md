@@ -9,7 +9,9 @@ tools: the read-only `read_file`, `list_dir`, `find_files`, and `search_files`
 `load_skill` (`action: skill`, matched on a skill name). Write one into the working directory
 with `ahi tools init --example <name> --write` (the examples are embedded in
 the binary; `ahi tools examples list` names them and `ahi tools examples show [<name>]` prints them), copy one by hand, or point a session
-at it without copying:
+at it without copying. To select a mode with explanations in a terminal, use `ahi tools init --interactive` (preview) or add `--write` to save; replacing a file still requires `--force`. Permissive selection requires an explicit acknowledgement of host access.
+
+For example, without copying:
 
 ```sh
 ahi tui --tools examples/tools/ask-every-read.yaml
@@ -21,7 +23,8 @@ Rule paths and tool confinement are always relative to the directory where
 
 | File | What the model gets |
 |---|---|
-| `read-all.yaml` | Read, list, find, and search anywhere in the tree; the root `.env` is denied; no prompts. The repository root's `ahi.tools.yaml` starts with these rules. |
+| `read-all.yaml` | Read, list, find, and search anywhere in the tree; the root `.env` is denied; no prompts. |
+| `permissive.yaml` | Read and write without prompts; commands through `sh`, `bash`, `pwsh`, `powershell`, or `cmd` run with host access without prompts. Not sandboxed: commands can bypass builtin file protections. Other executable prefixes, skills, and delegation need explicit rules. |
 | `ask-every-read.yaml` | Every read, listing, find, and search asks in chat (`y` once, `s` for the session, `n` deny). |
 | `sources-only.yaml` | Listing anywhere; reads, finds, and searches only under `src` and `docs`, with the root `.env` and `target` denied. |
 | `list-only.yaml` | Listing only. The model can see the tree but reads are denied. |

@@ -8,17 +8,22 @@ pub struct Example {
     pub summary: &'static str,
 }
 
-/// The default for `ahi tools init`: the policy this repository ships.
+/// The read-only default for noninteractive `ahi tools init`.
 pub const DEFAULT_EXAMPLE: &str = "read-all";
 
 /// Shipped policies, in the order `ahi tools examples` prints them. The
 /// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
 /// the fail-closed walkthrough and is not offered here.
-pub const EXAMPLES: [Example; 9] = [
+pub const EXAMPLES: [Example; 10] = [
     Example {
         name: "read-all",
         text: include_str!("../../examples/tools/read-all.yaml"),
         summary: "read, list, find, and search the whole working directory; root .env denied; no prompts",
+    },
+    Example {
+        name: "permissive",
+        text: include_str!("../../examples/tools/permissive.yaml"),
+        summary: "trusted workspace: read/write freely; sh, bash, pwsh, powershell, cmd run without prompts with host access (not sandboxed)",
     },
     Example {
         name: "ask-every-read",

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.19.0 (2026-11-16)
+
+### Added
+
+- `ahi tools init --interactive` walks through shipped policy modes in a terminal. Enter selects the read-only default, `q` cancels, and permissive mode requires an explicit host-access acknowledgement. Preview remains the default; saving requires `--write`, and replacement requires `--force`. Noninteractive callers use `--example`.
+- The `permissive` policy allows builtin workspace reads and writes, plus commands through `sh`, `bash`, `pwsh`, `powershell`, or `cmd`, without approval prompts. Shell commands have host-account access and can bypass builtin file protections; this is not a sandbox. Other executable prefixes, skills, and delegation require explicit rules.
+
+### Changed
+
+- This repository now uses the shipped permissive policy. Rendering tests use a static fixture rather than the repository's operator policy.
+
 ## 0.18.2 (2026-11-16)
 
 ### Fixed

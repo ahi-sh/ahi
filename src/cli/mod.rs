@@ -396,12 +396,14 @@ enum ToolsCommand {
     /// outcome: approve green, ask gray, deny red (`--color never` for plain
     /// text; the file is always written plain). `ahi tools list` shows the
     /// policy in place the same way. Rule paths confine the builtin tools
-    /// to the working directory; an approved command is not confined. Rules confine the model to
-    /// the working directory; none can reach above it.
+    /// to the working directory; an approved command is not confined.
     Init {
         /// Which shipped policy; `ahi tools examples list` names them.
         #[arg(long, value_name = "NAME", default_value = crate::tool_policy::examples::DEFAULT_EXAMPLE)]
         example: String,
+        /// Walk through shipped modes in a terminal before previewing or writing.
+        #[arg(long, conflicts_with = "example")]
+        interactive: bool,
         /// Write ahi.tools.yaml in the working directory. Refuses an existing file without --force.
         #[arg(long)]
         write: bool,
@@ -515,9 +517,10 @@ pub fn run() -> ExitCode {
         Command::Tools { command } => match command {
             ToolsCommand::Init {
                 example,
+                interactive,
                 write,
                 force,
-            } => tool_policy::init(example, *write, *force, use_color(&cli.color)),
+            } => tool_policy::init(example, *interactive, *write, *force, use_color(&cli.color)),
             ToolsCommand::List => match env::current_dir() {
                 Ok(cwd) => {
                     print!(
