@@ -1,0 +1,17 @@
+version: 1
+default: deny
+rules:
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+  # Repository commands
+  - id: git-workflow
+    action: command
+    match: {argv: [git]}
+    effect: approve
+    ask: true
+  - id: no-install
+    action: command
+    match: {argv: [cargo, install]}
+    effect: deny

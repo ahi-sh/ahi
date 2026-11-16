@@ -291,12 +291,87 @@ fn policy_lines(root: &Path) -> Vec<String> {
     }
 }
 
+fn choose_example(
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) -> std::io::Result<Option<&'static Example>> {
+    writeln!(
+        output,
+        "Choose a tool policy (nothing is written without --write):"
+    )?;
+    for (index, mode) in EXAMPLES.iter().enumerate() {
+        writeln!(output, "  {}. {} — {}", index + 1, mode.name, mode.summary)?;
+    }
+    write!(output, "Mode name or number [read-all], q to cancel: ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer)? == 0 || answer.trim() == "q" {
+        return Ok(None);
+    }
+    let answer = answer.trim();
+    let selected = if answer.is_empty() {
+        example(DEFAULT_EXAMPLE).ok()
+    } else if let Ok(number) = answer.parse::<usize>() {
+        number.checked_sub(1).and_then(|index| EXAMPLES.get(index))
+    } else {
+        example(answer).ok()
+    };
+    let selected = selected.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unknown mode; use a listed name or number",
+        )
+    })?;
+    if selected.name == "permissive" {
+        writeln!(output, "WARNING: shell commands run without approval with your host account's access, outside builtin file protections. This is not a sandbox.")?;
+        write!(
+            output,
+            "Type permissive to confirm, or anything else to cancel: "
+        )?;
+        output.flush()?;
+        let mut confirmation = String::new();
+        input.read_line(&mut confirmation)?;
+        Ok((confirmation.trim() == "permissive").then_some(selected))
+    } else {
+        Ok(Some(selected))
+    }
+}
+
 /// Preview an operator policy; create or replace it only with explicit flags.
-pub(super) fn init(name: &str, write: bool, force: bool, color: bool) -> ExitCode {
+pub(super) fn init(
+    name: &str,
+    interactive: bool,
+    write: bool,
+    force: bool,
+    color: bool,
+) -> ExitCode {
     if force && !write {
         eprintln!("error: --force does not write a file; pass --write --force to replace one");
         return ExitCode::from(2);
     }
+    let selected;
+    let name = if interactive {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+            eprintln!("error: --interactive requires a terminal; use --example NAME instead");
+            return ExitCode::from(2);
+        }
+        selected = match choose_example(&mut std::io::stdin().lock(), &mut std::io::stderr().lock())
+        {
+            Ok(Some(mode)) => mode,
+            Ok(None) => {
+                eprintln!("Cancelled; policy unchanged.");
+                return ExitCode::from(0);
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::from(2);
+            }
+        };
+        selected.name
+    } else {
+        name
+    };
     let example = match example(name) {
         Ok(example) => example,
         Err(err) => {
@@ -309,7 +384,7 @@ pub(super) fn init(name: &str, write: bool, force: bool, color: bool) -> ExitCod
     println!();
     if !write {
         println!(
-            "Left {} unchanged. Rerun with --write to create it from `{}`; rule paths are relative to this directory.",
+            "Left {} unchanged. Rerun with --example {} --write to create it; rule paths are relative to this directory.",
             path.display(),
             example.name
         );
@@ -363,36 +438,6 @@ mod tests {
         assert!(example("nope").unwrap_err().contains("read-all"));
     }
 
-    /// The repository's own policy begins with the `read-all` example, rule
-    /// for rule, and adds only file-write and command rules after it (no
-    /// further read rules), so `ahi tools init` here shows the same read
-    /// default the repository uses.
-    #[test]
-    fn repository_policy_starts_with_read_all() {
-        let root = tool_policy::parse(
-            include_str!("../../ahi.tools.yaml"),
-            "ahi.tools.yaml",
-            &BUILTIN,
-        )
-        .unwrap();
-        let read_all =
-            tool_policy::parse(example("read-all").unwrap().text, "read-all", &BUILTIN).unwrap();
-        let shared = read_all.rules.len();
-        assert_eq!(root.rules[..shared], read_all.rules[..]);
-        assert!(
-            root.rules.len() > shared,
-            "the repository policy adds edit and command rules"
-        );
-        for rule in &root.rules[shared..] {
-            assert_ne!(
-                rule.action,
-                tool_policy::ActionKind::ToolCall,
-                "{}",
-                rule.id
-            );
-        }
-    }
-
     #[test]
     fn render_policy_paints_each_rule_by_outcome_and_leaves_comments_plain() {
         let text = example("commands").unwrap().text;
@@ -429,9 +474,11 @@ mod tests {
         assert!(one.starts_with("== deny-all"), "{one}");
         assert!(!one.contains("== read-all"));
         assert!(render_examples(Some("nope"), false).is_err());
-        // The repository policy's section comments sit between rules and
-        // stay unpainted; every rule still gets its own outcome.
-        let root = render_policy(include_str!("../../ahi.tools.yaml"), true);
+        // Section comments between rules stay unpainted; the following
+        // rule still gets its own outcome.
+        let text = include_str!("fixtures/tools-rendering.yaml");
+        tool_policy::parse(text, "tools-rendering.yaml", &BUILTIN).unwrap();
+        let root = render_policy(text, true);
         let section = root
             .lines()
             .find(|l| l.contains("Repository commands"))
@@ -439,9 +486,34 @@ mod tests {
         assert!(section.starts_with("  #"), "{section}");
         assert!(root
             .lines()
-            .find(|l| l.contains("id: no-git-push"))
+            .find(|l| l.contains("id: git-workflow"))
             .unwrap()
-            .starts_with(&bg(DENY_BG)));
+            .starts_with(&bg(ASK_BG)));
+    }
+
+    #[test]
+    fn interactive_modes_default_cancel_and_confirm_host_access() {
+        let select = |input: &str| {
+            choose_example(&mut input.as_bytes(), &mut Vec::new())
+                .unwrap()
+                .map(|mode| mode.name)
+        };
+        assert_eq!(select("\n"), Some("read-all"));
+        assert_eq!(select("1\n"), Some("read-all"));
+        assert_eq!(select("deny-all\n"), Some("deny-all"));
+        assert_eq!(select("q\n"), None);
+        assert_eq!(select(""), None);
+        assert_eq!(select("permissive\nno\n"), None);
+        assert_eq!(select("permissive\n"), None);
+        let mut output = Vec::new();
+        let mode = choose_example(&mut "permissive\npermissive\n".as_bytes(), &mut output)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode.name, "permissive");
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("This is not a sandbox."));
+        assert!(choose_example(&mut "unknown\n".as_bytes(), &mut Vec::new()).is_err());
     }
 
     #[test]

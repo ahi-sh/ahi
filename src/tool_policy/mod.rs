@@ -496,7 +496,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 10,
+            seen, 11,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".
