@@ -185,6 +185,19 @@ The adapters have disposable fixture coverage against hc 0.1.21's schema and the
 
 ### ahi precommit run
 
+Text output is streamed to stdout: an immediate `ahi precommit: starting checks`
+line, a `Starting:` line before each selected hook is filtered or executed, and
+its completion line with `Passed`/`Failed` and an exit code (or `Skipped (not run)`).
+Builtin checks and policy refusals use runner-equivalent exit codes 0/1; local
+hook failures retain their actual exit code. Findings and captured hook output
+follow that hook immediately, without waiting for later hooks. Local subprocess
+output remains captured, not streamed byte by byte; `--verbose` still controls
+output from passing hooks. A final summary counts passed, failed, and skipped
+checks and reports ahi's exit code. Progress is flushed even through pipes, uses
+no cursor control, and applies to the deprecated `ahi run` alias too.
+`--format json` and `--format sarif` emit only their final structured document,
+without progress banners. Errors and deprecation warnings remain on stderr.
+
 Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings.
 
 Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi precommit install` and `ahi precommit uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when an `ahi.hooks.yaml` rule approves that hook id and the exact `entry` string. The entry is split without a shell. A missing rule prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.

@@ -77,7 +77,24 @@ pub struct RunRequest<'a> {
     pub verbose: bool,
 }
 
+/// Hook lifecycle notifications. A start precedes filtering/execution; a finish
+/// includes skipped and rejected hooks as well as checks that actually ran.
+pub enum Progress<'a> {
+    Started { id: &'a str, name: &'a str },
+    Finished(&'a HookReport),
+}
+
+/// Run without presentation or progress output (for library consumers).
 pub fn run(request: &RunRequest<'_>) -> Result<Report> {
+    run_with_progress(request, |_| Ok(()))
+}
+
+/// Run with synchronous lifecycle notifications. Observer errors stop execution
+/// before any later hook runs; the runner itself never writes to a terminal.
+pub fn run_with_progress(
+    request: &RunRequest<'_>,
+    mut progress: impl FnMut(Progress<'_>) -> Result<()>,
+) -> Result<Report> {
     if !crate::precommit::config::STAGES.contains(&request.stage) {
         return Err(Error::new(format!(
             "hook stage `{}` is not a pre-commit stage",
@@ -117,22 +134,30 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
             if !hook.stages.iter().any(|stage| stage == request.stage) {
                 continue;
             }
+            progress(Progress::Started {
+                id: &hook.id,
+                name: &hook.name,
+            })?;
             if request.skip.contains(&hook.id)
                 || (!hook.alias.is_empty() && request.skip.contains(&hook.alias))
             {
-                hooks.push(skipped(hook, "skipped by SKIP"));
+                record(skipped(hook, "skipped by SKIP"), &mut hooks, &mut progress)?;
                 continue;
             }
             if hook.entry.split_whitespace().any(|part| part == "hazmat")
                 && hook.entry.contains("pre-commit")
             {
-                hooks.push(failed(
-                    hook,
-                    vec![Finding::bare(format!(
-                        "hook `{}` uses pre-commit hazmat, which ahi does not implement",
-                        hook.id
-                    ))],
-                ));
+                record(
+                    failed(
+                        hook,
+                        vec![Finding::bare(format!(
+                            "hook `{}` uses pre-commit hazmat, which ahi does not implement",
+                            hook.id
+                        ))],
+                    ),
+                    &mut hooks,
+                    &mut progress,
+                )?;
                 if should_stop(request, hook) {
                     stop = true;
                 }
@@ -147,7 +172,7 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
                         names: env_names.clone(),
                     });
                 }
-                hooks.push(outcome.report);
+                record(outcome.report, &mut hooks, &mut progress)?;
                 if outcome.failed && should_stop(request, hook) {
                     stop = true;
                 }
@@ -155,25 +180,33 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
             }
             if hook.kind != HookOriginKind::Builtin {
                 let message = unsupported_message(hook, &policy);
-                hooks.push(failed(hook, vec![Finding::bare(message)]));
+                record(
+                    failed(hook, vec![Finding::bare(message)]),
+                    &mut hooks,
+                    &mut progress,
+                )?;
                 if should_stop(request, hook) {
                     stop = true;
                 }
                 continue;
             }
             let Some(check) = builtin_by_id(&hook.id) else {
-                hooks.push(failed(
-                    hook,
-                    vec![Finding::bare(format!(
-                        "builtin hook `{}` is not implemented",
-                        hook.id
-                    ))],
-                ));
+                record(
+                    failed(
+                        hook,
+                        vec![Finding::bare(format!(
+                            "builtin hook `{}` is not implemented",
+                            hook.id
+                        ))],
+                    ),
+                    &mut hooks,
+                    &mut progress,
+                )?;
                 continue;
             };
             let report = run_builtin(request, hook, check, &names, &git_files.modes, &unstaged)?;
             let failed_hook = report.outcome == Outcome::Failed;
-            hooks.push(report);
+            record(report, &mut hooks, &mut progress)?;
             if failed_hook && should_stop(request, hook) {
                 stop = true;
             }
@@ -208,6 +241,16 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
         local_hooks,
         local_env,
     })
+}
+
+fn record(
+    report: HookReport,
+    hooks: &mut Vec<HookReport>,
+    progress: &mut impl FnMut(Progress<'_>) -> Result<()>,
+) -> Result<()> {
+    progress(Progress::Finished(&report))?;
+    hooks.push(report);
+    Ok(())
 }
 
 struct LocalStatus {
