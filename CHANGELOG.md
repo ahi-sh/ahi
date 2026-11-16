@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.18.1 (2026-11-16)
+
+### Fixed
+
+- `ahi precommit run` text output now announces startup immediately, flushes per-hook start and completion status to stdout, includes exit codes (or an explicit not-run skip), and ends with an overall summary. Findings and captured hook output appear as each hook finishes rather than after the full run. JSON/SARIF documents, authorization, fail-fast behavior, and process exit status are unchanged. Fixes #94.
+
 ## 0.18.0 (2026-11-16)
 
 ### Added

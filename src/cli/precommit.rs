@@ -5,11 +5,11 @@ use crate::precommit::audit::AuditEvent;
 use crate::precommit::checks::{all_checks, builtin_by_id};
 use crate::precommit::config::discover_config;
 use crate::precommit::git::repo_root;
-use crate::precommit::output::render;
+use crate::precommit::output::{render, render_hook_progress, render_progress_summary};
 use crate::precommit::runner::{self, Selection};
 use crate::precommit::{config, migrate, policy};
 use crate::VERSION;
-use std::{collections::BTreeSet, env, process::ExitCode};
+use std::{collections::BTreeSet, env, io::Write, process::ExitCode};
 
 #[derive(clap::Args)]
 pub(super) struct RunArgs {
@@ -51,7 +51,7 @@ pub(super) struct RunArgs {
     #[arg(long, value_name = "PATH", help_heading = "File selection")]
     commit_msg_filename: Option<String>,
 
-    /// Output format.
+    /// Output format. Text streams progress to stdout; JSON/SARIF emit only the final document.
     #[arg(long, default_value = "text", value_name = "FORMAT", value_parser = ["text", "json", "sarif"], help_heading = "Output")]
     format: String,
     /// Show the output of passing local hooks too. Failures always show output.
@@ -161,6 +161,13 @@ pub(super) fn run_precommit(cli: &Cli, args: &RunArgs) -> ExitCode {
         eprintln!("error: Specify both --from-ref and --to-ref.");
         return ExitCode::from(1);
     }
+    let live = args.format == "text";
+    if live {
+        if let Err(err) = write_run_output("ahi precommit: starting checks\n") {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    }
     let cwd = match env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => {
@@ -217,7 +224,7 @@ pub(super) fn run_precommit(cli: &Cli, args: &RunArgs) -> ExitCode {
             }
         }
     }
-    let report = match runner::run(&runner::RunRequest {
+    let request = runner::RunRequest {
         root: &root,
         config: &config,
         selection,
@@ -229,21 +236,37 @@ pub(super) fn run_precommit(cli: &Cli, args: &RunArgs) -> ExitCode {
         fix: args.fix,
         stage_fixes,
         verbose: args.verbose,
+    };
+    let report = match runner::run_with_progress(&request, |event| {
+        if !live {
+            return Ok(());
+        }
+        let text = match event {
+            runner::Progress::Started { id, name } => format!("Starting: {name} ({id})\n"),
+            runner::Progress::Finished(hook) => render_hook_progress(hook),
+        };
+        write_run_output(&text)
     }) {
         Ok(report) => report,
         Err(err) => {
+            if live {
+                let _ = write_run_output("ahi precommit: aborted (exit code: 1)\n");
+            }
             eprintln!("error: {err}");
             return ExitCode::from(1);
         }
     };
-    let rendered = match render(&report, &args.format) {
+    let rendered = match if live {
+        Ok(render_progress_summary(&report))
+    } else {
+        render(&report, &args.format)
+    } {
         Ok(text) => text,
         Err(err) => {
             eprintln!("error: {err}");
             return ExitCode::from(2);
         }
     };
-    print!("{rendered}");
     {
         let ids: Vec<String> = report.hooks.iter().map(|hook| hook.id.clone()).collect();
         let findings = report.hooks.iter().map(|hook| hook.findings.len()).sum();
@@ -279,11 +302,24 @@ pub(super) fn run_precommit(cli: &Cli, args: &RunArgs) -> ExitCode {
             eprintln!("warning: audit log not written: {err}");
         }
     }
+    if let Err(err) = write_run_output(&rendered) {
+        eprintln!("error: {err}");
+        return ExitCode::from(1);
+    }
     if report.result == runner::Outcome::Failed {
         ExitCode::from(1)
     } else {
         ExitCode::from(0)
     }
+}
+
+/// Flush each progress event even when stdout is a pipe (Git hooks and CI).
+fn write_run_output(text: &str) -> crate::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|err| crate::Error::new(format!("cannot write precommit output: {err}")))
 }
 
 pub(super) fn list_checks(format: &str) -> ExitCode {
