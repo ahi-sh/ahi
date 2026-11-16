@@ -27,7 +27,7 @@ path = "src/main.rs"
 ahi-durable = { path = "crates/ahi-durable", version = "=0.1.0" }
 clap = { version = "=4.6.7", features = ["derive"] }
 crossterm = "=0.29.0"
-flate2 = "=1.1.10"
+flate2 = "=1.1.11"
 getrandom = "=0.4.3"
 quick-xml = "=0.42.0"
 # 0.30.0 is the release that no longer depends on the unmaintained paste crate.
@@ -44,10 +44,10 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 tar = "=0.4.46"
-toml = "=1.2.0"
+toml = "=1.2.1"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.3"
-ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
 yaml-rust2 = "=0.13.0"
 
 # In-repo Win32 clipboard; with ahi-unix, the only unsafe code in the workspace.
