@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Publish the new `ahi-durable` dependency before ahi, and include it in the immutable published-member content guard.
 - Delegation requires an explicit `AHI_DELEGATE_VIA` connector speaking ahi's session protocol. Removed the invalid `hc connect --worker {worker}` default and hc-specific startup error. `hc connect` speaks hc's native protocol, not ahi's; existing valid explicit connectors are unchanged. See `MIGRATING.md`.
 
 - Precommit commands now use `ahi precommit run`, `list-checks`, `explain`, `migrate`, `install`, and `uninstall`. Existing top-level runner commands and `ahi hooks install/uninstall` remain temporary aliases with migration warnings on stderr. They retain the canonical commands' arguments, stdout, and exit status. Install/uninstall remain unimplemented. See [MIGRATING.md](MIGRATING.md) for the minimum support window and migration steps.
