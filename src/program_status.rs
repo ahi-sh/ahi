@@ -1,11 +1,11 @@
 //! The Program Status Protocol (OSC 7501): one escape sequence by which a
 //! program tells the terminal multiplexer that holds it what it is doing.
 //!
-//! herdr-core stores what a program reports, verbatim, and shows it in its
-//! sidebar; it never guesses from screen text. ahi reports the moments a
-//! coordinator cares about: a turn is running, a tool call waits on a
-//! person, a turn finished or failed. Nothing is read back, so this is a
-//! write-only format string with no dependency and no negotiation.
+//! Backend-neutral advisory reporting: a turn is running, a tool call waits
+//! on a person, or a turn finished or failed. Rex and hc document this protocol;
+//! receipt by either is not negotiated or verified here. Reports are neither
+//! authorization nor process-exit evidence. Nothing is read back, so this is
+//! a write-only encoder, separate from terminal-host control and ahi sessions.
 //!
 //! The sequence is written only when stdout is a terminal. A terminal that
 //! does not know OSC 7501 ignores it, as terminals ignore any unknown OSC.

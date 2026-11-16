@@ -1,4 +1,5 @@
 mod precommit;
+mod terminal_host;
 mod tool_policy;
 
 use std::env;
@@ -63,6 +64,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Control an external Rex or hc terminal host (not ahi's TUI or session protocol).
+    TerminalHost(terminal_host::Options),
     /// Run precommit checks, inspect configuration, and manage Git hook integration.
     Precommit {
         #[command(subcommand)]
@@ -146,7 +149,7 @@ enum Command {
     /// 4 credential, 5 policy file, 6 cancelled or timed out, 7 session, 8
     /// result file not written.
     Exec(ExecArgs),
-    /// Serve sessions on a Unix socket for `ahi exec`, `ahi tui`, and herdr-core; `stop` ends it.
+    /// Serve ahi's session protocol on a Unix socket for front ends and explicit connectors; `stop` ends it.
     ///
     /// One process per user per host owns the session store and runs every
     /// turn. The socket is $XDG_RUNTIME_DIR/ahi/serve.sock (or
@@ -448,6 +451,7 @@ pub fn run() -> ExitCode {
     });
     precommit::warn_deprecated(&command);
     match &command {
+        Command::TerminalHost(options) => ExitCode::from(terminal_host::run(options)),
         Command::Precommit { command } => precommit::dispatch(&cli, command),
         Command::Run(args) => precommit::run_precommit(&cli, args),
         Command::ListChecks(args) => precommit::list_checks(&args.format),

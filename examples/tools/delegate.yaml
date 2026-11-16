@@ -1,8 +1,9 @@
 # Reads anywhere; tasks may be handed to the workers labeled rust-ci and docs,
 # the first after a prompt; the worker labeled prod is denied. A label names
-# a worker in herdr-core's registry, never a host: `delegate` reaches it
-# through the command in AHI_DELEGATE_VIA (default `hc connect --worker
-# {worker}`), and this file cannot say where it is.
+# an operator-routed worker, never a host: `delegate` requires an explicit
+# AHI_DELEGATE_VIA connector speaking ahi's session protocol (for example,
+# `ssh -- {worker} ahi connect`). There is no default; hc connect speaks a
+# different protocol. This policy file cannot configure the connector.
 version: 1
 default: deny
 rules:

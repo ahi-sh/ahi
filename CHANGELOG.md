@@ -2,7 +2,16 @@
 
 ## Unreleased
 
+## 0.18.0 (2026-11-16)
+
+### Added
+
+- `terminal_host::{rex,hc}` interfaces with external terminal multiplexers, separately from the TUI, session protocol, and OSC 7501 reporting. The operator-only `ahi terminal-host` command supports explicit target selection, persistent terminal creation, inspection, bounded snapshots, input/keys, interruption, and termination, with JSON results and side-effect-free `--dry-run`. Rex is primary; hc's different input/lifetime semantics are preserved. Calls are bounded and never retried or failed over. Fixture contracts pass; live backend interoperability remains unverified.
+- README glossary defining ahi's primitives and distinguishing terminal hosting, shell/UI clients, sessions, delegation, durability, and containment.
+
 ### Changed
+
+- Delegation requires an explicit `AHI_DELEGATE_VIA` connector speaking ahi's session protocol. Removed the invalid `hc connect --worker {worker}` default and hc-specific startup error. `hc connect` speaks hc's native protocol, not ahi's; existing valid explicit connectors are unchanged. See `MIGRATING.md`.
 
 - Precommit commands now use `ahi precommit run`, `list-checks`, `explain`, `migrate`, `install`, and `uninstall`. Existing top-level runner commands and `ahi hooks install/uninstall` remain temporary aliases with migration warnings on stderr. They retain the canonical commands' arguments, stdout, and exit status. Install/uninstall remain unimplemented. See [MIGRATING.md](MIGRATING.md) for the minimum support window and migration steps.
 - Model-callable implementations now live in `src/tools/`, one module per tool name. Tool authorization and policy templates live in `src/tool_policy/`; operator policy commands live in `src/cli/tool_policy.rs`. The pre-commit runner moves from `hooks` to `precommit`. Rust implementation paths change without compatibility re-exports; tool names and permission semantics are unchanged.

@@ -7,7 +7,7 @@ This describes a target layout, not an approved bulk migration.
 
 The first implementation slice establishes `tools`, `tool_policy`, `cli::tool_policy`, and `precommit`, adds the canonical `ahi precommit` CLI with temporary deprecated aliases, and stores typed tool-omission reasons with legacy-string read compatibility. Tool implementations have one file per tool name; common lexical argument preparation and schema construction remain centralized in `tools::mod` for now. CLI entry wiring has moved out of `main.rs`, with precommit-specific handling in `cli::precommit`.
 
-The rest of this tree is a proposal. In particular, runtime/provider extraction, the host module, execution/containment restructuring, TUI consolidation, and session-store extraction are not implemented by this slice. Existing shared environment, rule-identifier, and audit helpers still reside under `precommit` and have non-precommit callers; the follow-up boundary work must assign those helpers a shared owner rather than duplicate them. See [MIGRATING.md](../MIGRATING.md) for public-command and stored-record compatibility.
+The next slice implements `terminal_host::{rex,hc}` and an operator-only `ahi terminal-host` CLI, and removes delegation's invalid implicit hc connector. The adapters are tested with disposable native-CLI fixtures; live backend interoperability is not yet verified. Runtime/provider extraction, execution/containment restructuring, TUI consolidation, and session-store extraction remain proposals. Existing shared environment, rule-identifier, and audit helpers still reside under `precommit` and have non-precommit callers; the follow-up boundary work must assign those helpers a shared owner rather than duplicate them. See [MIGRATING.md](../MIGRATING.md) for public-command and stored-record compatibility.
 
 ## Design decisions
 
@@ -15,13 +15,13 @@ The rest of this tree is a proposal. In particular, runtime/provider extraction,
 - Keep the existing `ahi-durable`, `ahi-widgets`, `ahi-unix`, and `ahi-win32` crates. Do not introduce a generic `ahi-core` or a crate for every subsystem.
 - No plugin system, general workflow framework, or new coordinator/node binaries.
 - Use temporary deprecated CLI aliases with actionable migration guidance when moving commands into the `precommit` namespace. Do not silently break existing automation or installed Git shims.
-- Keep terminal multiplexing and external orchestration in Rex or Herdr-core. Ahi owns its integration with that host, not the multiplexer.
+- `terminal_host` is the interface to external terminal multiplexers: Rex is primary, and hc is a supported alternative. External servers own terminal lifetime. This is not a TUI backend, UI-client manager, or agent orchestrator.
 - Separate the agent runtime from terminal chat presentation.
 - Name model-callable capabilities `tools`, their authorization subsystem `tool_policy`, and the operator-facing policy commands `cli::tool_policy`.
 - Name the pre-commit-compatible runner `precommit`, not the ambiguous `hooks`. Git hooks are entry points that invoke that runner.
 - Separate behavior-preserving moves from changes to public commands, persistent formats, authorization, recovery, and containment.
 
-The tools and precommit naming and temporary CLI deprecation policy are agreed. Other names and ownership boundaries below are proposals for review. Files identify responsibilities; a small module can remain a single `.rs` file until subdivision is useful. Do not create empty scaffolding merely to match this tree.
+The tools, precommit, and terminal_host naming and temporary CLI deprecation policy are agreed. Other names and ownership boundaries below are proposals for review. Files identify responsibilities; a small module can remain a single `.rs` file until subdivision is useful. Do not create empty scaffolding merely to match this tree.
 
 ## Workspace
 
@@ -79,6 +79,7 @@ src/
 │   ├── session.rs                     # Session list/show/import/export commands
 │   ├── precommit.rs                   # Precommit operator commands
 │   ├── tool_policy.rs                 # Inspect/create tool policy; not execution
+│   ├── terminal_host.rs               # Operator adapter for native terminal hosting
 │   ├── dev.rs                         # Development environment commands
 │   └── update.rs                      # Update command adapter
 │
@@ -157,10 +158,12 @@ src/
 │   ├── lifecycle.rs                   # Start, discover, stop, shutdown
 │   └── transport.rs                   # Listener and server connection handling
 │
-├── host/                              # External terminal/coordinator integration
-│   ├── mod.rs
-│   ├── status.rs                      # Program-status reporting, currently OSC 7501
-│   └── workers.rs                     # Named-worker connection configuration
+├── terminal_host/                     # Interface to external terminal multiplexers
+│   ├── mod.rs                         # Targets, handles, operations, observed results
+│   ├── rex.rs                         # Concrete Rex CLI/API mapping
+│   ├── hc.rs                          # Concrete hc JSON-RPC mapping
+│   └── transport.rs                   # Bounded native CLI calls, no retry/failover
+├── program_status.rs                  # Backend-neutral advisory OSC 7501 reporting
 │
 ├── execution/                         # Execution mechanics, not authorization
 │   ├── mod.rs
@@ -270,13 +273,30 @@ The store receives its location from the application. It does not discover globa
 
 Session extraction does not choose a new database or introduce automatic replay, recovery, or restored approval grants. Those require separate format and behavior decisions.
 
-### External host
+### External terminal hosts
 
-`host::status` reports state. `host::workers` describes how to reach an authorized worker label. They are independent capabilities: a terminal may support status without delegation, and a headless coordinator may support workers without a terminal.
+`terminal_host` requests and observes execution in external terminals. The TUI presents ahi; the terminal host provides the terminal in which ahi, a shell, or another program runs. Rex and hc do not have identical APIs, and neither is an ahi session-protocol connector.
 
-The delegation tool keeps its tool semantics and speaks the session API through `session::client`. The client must not depend on server startup. Host integration does not own pane layout, host registries, or scheduling.
+Three boundaries stay separate:
 
-Rex's protocol compatibility is not yet verified. Herdr-core worker connection questions remain tracked in issue #75. Do not create speculative provider-specific adapters until their contracts are known.
+1. **Terminal control:** `terminal_host::{rex,hc}` starts programs, inspects process evidence, captures bounded snapshots, sends input/keys, interrupts, and requests termination. Handles include the backend and execution namespace; native terminal IDs are distinct from ahi session IDs. Native Windows and WSL require separately selected targets. Local hc handles must not be moved to another machine's core.
+2. **Structured agent communication:** delegation uses ahi's session API through an explicitly configured connector such as `ssh {worker} ahi connect`. `hc connect` carries hc JSON-RPC, not ahi's methods. Removing the nonexistent `hc connect --worker` default resolves the invalid assumption in #75; automatic label discovery remains unimplemented. The service client still lives under `service`; its proposed move is separate work.
+3. **Advisory reporting:** `program_status` emits OSC 7501 without backend-specific adapters or negotiation. Reports do not authorize actions or prove process completion. Live receipt by either backend remains to be checked separately.
+
+The implemented operator command defaults to Rex; hc requires `--backend hc`. Every call explicitly selects a server/core and session. There is no availability fallback or target configuration file in this slice. Calls do not retry, including after uncertain creation or partial submission. `--dry-run` validates and prints native requests without launching a process. Model tools and their authorization remain unchanged; terminal hosting is not exposed to the model.
+
+| Responsibility | Rex mapping | hc mapping |
+| --- | --- | --- |
+| Start | `session.new_window`, one direct terminal block, no focus request, retain after completion | `terminal.run`, literal absolute executable argv, no parent/notifications, no keep/restart, retain record |
+| Inspect | Native terminal `process`; no child and no exit is pending, not exited | `terminal.get`; lost-holder evidence remains unknown |
+| Capture | CLI `capture --format=text`, screen and scrollback; completeness unknown | `terminal.read`, screen snapshot with native completeness metadata |
+| Text / submit | CLI `send` with literal stdin; submit then sends Enter as a separate acknowledged call | `terminal.send` includes Enter and draft protection; raw text is explicitly unsupported |
+| Keys / interrupt | Named keys; interrupt sends Ctrl+C without claiming exit | `terminal.keys`; `terminal.interrupt` chooses its stop key and reports an observation |
+| Terminate | `block.close` for exactly one block, never session-wide `kill` | `terminal.kill` ends the program but retains its terminal record |
+
+A Rex terminal needs a containing window; creating that resource is not a pane-layout or UI-client feature. The module does not attach graphical clients, arrange panes, request focus, install servers, manage host registries, or schedule agents. The hc CLI retains its own native core-start behavior when actually invoked; ahi does not add server lifecycle commands. Connector timeout cleanup is not containment of remote programs.
+
+Contract sources: hc 0.1.21's installed `hc schema`; Rex's [CLI](https://www.superlogical.com/rex/docs/reference/cli) and [API](https://www.superlogical.com/rex/docs/reference/api) references, with native terminal payload shapes also inspected in the existing local Rex integration. Tests use synthetic responses matching those shapes, not live captures. Run `cargo test --locked --lib terminal_host` and `cargo test --locked --test terminal_host` to replay them. Live Rex beta/schema acceptance and hc checks on supported execution environments are remaining acceptance work, requiring explicit service access authorization.
 
 ### Execution and development environments
 
@@ -326,7 +346,7 @@ ahi precommit migrate                 → cli::precommit
 6. Tool execution has no model-accessible path around authorization and enforcement.
 7. Skills, model output, and tool results cannot create authority.
 8. The session client does not depend on server startup or the server implementation.
-9. External host integration does not grow into an embedded coordinator.
+9. Terminal-host control, ahi session transport, and advisory program status remain separate; none grows into an embedded coordinator.
 10. A new crate requires a demonstrated boundary, not naming symmetry.
 
 ## Migration assessment
@@ -342,8 +362,9 @@ ahi precommit migrate                 → cli::precommit
 | `src/hooks/` | `src/precommit/` |
 | Precommit dispatch and command logic in `main.rs` | `src/cli/precommit.rs` |
 | `src/chat/` presentation and interaction | `src/tui/chat/` |
-| `src/program_status.rs` | `src/host/status.rs` |
-| Worker connection defaults inside delegation | `src/host/workers.rs` |
+| `src/program_status.rs` | Remains backend-neutral; no terminal-host dependency |
+| Implicit worker connector inside delegation | Removed; explicit ahi-protocol connector required |
+| External terminal control | Implemented in `src/terminal_host/`, operator CLI in `src/cli/terminal_host.rs` |
 | Persistent types/store in `src/session/` | `crates/ahi-durable/` |
 | Session recorder and runtime conversion | `src/session/` |
 | Service wire/client code | `src/session/protocol.rs`, `client.rs`, `transport.rs` |
@@ -358,7 +379,8 @@ Sequence approved moves in small units, migrate callers directly, and verify eac
 ## Open decisions before implementation
 
 - Confirm the runtime's internal model/tool contracts and ownership of shared request/event types; avoid cycles between adapters and runtime implementations.
-- Decide whether ahi needs host operations beyond reporting status and reaching workers, such as requesting terminal creation or focus.
+- Verify the native adapters against authorized live Rex/hc installations. Do not equate passing synthetic contracts with live compatibility.
+- Consider target configuration or pre-operation availability selection only if needed; never fail over an operation already started. Focus, UI-client management, and orchestration remain out of scope.
 - Decide whether the next development-environment milestone is reproducibility, enforced containment, or both.
 - Assign shared environment construction, identifier validation, and execution-audit helpers to their actual owners; their current reuse from `precommit` is not the desired end-state layering.
 - Define which persistent types and storage operations move into `ahi-durable` in the next extraction, without introducing new recovery semantics.

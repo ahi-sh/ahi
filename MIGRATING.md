@@ -23,11 +23,44 @@ Tool names and authorization semantics remain unchanged.
 The broader structure is still a direction, not a claim of completion. Separating
 the agent runtime from providers and the TUI, moving session storage into
 `ahi-durable`, and defining execution and containment boundaries remain follow-up
-work. Terminal multiplexing and external orchestration belong to Rex or
-Herdr-core; ahi will expose a small integration boundary rather than implement
-its own multiplexer. The migration steps below cover the changes implemented
+work. The new `terminal_host` module interfaces with external terminal
+multiplexers: Rex is primary and hc is an explicit alternative. It does not own
+ahi's TUI, external UI clients, or agent orchestration. Native adapters and an
+operator CLI are implemented with fixture coverage, not a claim of verified
+live interoperability. The migration steps below cover the changes implemented
 now; the [module structure proposal](docs/MODULE_STRUCTURE.md) describes the
 remaining work.
+
+## Terminal hosting and delegation
+
+`ahi terminal-host` is a new operator-only command; it does not replace `ahi tui`,
+`ahi --session`, `ahi serve`, or `ahi connect`. Its `--host-session` identifies a
+native Rex session or hc core namespace, never a saved ahi conversation.
+See the [README glossary and command guide](README.md#ahi-terminal-host) for
+explicit target selection, native behavior differences, limits, exit codes,
+and side-effect-free `--dry-run` examples. No backend installation, live service
+access, terminal creation, or OSC 7501 interoperability check was part of the
+fixture verification. Existing session files and policy grants are unchanged.
+
+**Delegation now requires `AHI_DELEGATE_VIA`.** The removed default,
+`hc connect --worker {worker}`, was not a working contract: hc 0.1.21 has no
+`--worker` option, and `hc connect` carries hc's protocol rather than ahi's.
+Changing that flag to `--session` would not fix the protocol mismatch.
+
+Configure a connector that speaks ahi's session protocol, for example:
+
+```sh
+export AHI_DELEGATE_VIA='ssh -- {worker} ahi connect'
+ahi doctor
+```
+
+This example deliberately maps worker labels to operator-managed SSH aliases.
+If labels are not SSH aliases, provide an explicit routing wrapper instead.
+The template is split into argv without a shell, then `{worker}` is substituted.
+Unset or blank configuration fails before starting a connector; existing valid
+explicit connectors continue to work. This changes the invalid delegation
+default, not tool authorization or the meaning of a worker's result. No label
+registry or automatic transport bridge has been introduced.
 
 ## Precommit commands
 
@@ -59,9 +92,9 @@ Aliases remain supported through at least two subsequent minor releases after
 the first release containing this change. Removing them requires a separate
 breaking-change release and an explicit removal-version announcement in an
 earlier release's notes. There is no date-triggered or version-triggered runtime
-expiry. Record the introduction and planned removal versions when those
-releases are scheduled; this change does not create a release or choose its
-version.
+expiry. These aliases are introduced in **0.18.0** and remain supported through
+at least **0.20.x**. No removal version has been scheduled; removal requires
+the separate announcement and breaking-change release described above.
 
 ### Update an existing repository
 
