@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `$` opens a cursor-local skill completion popup anywhere in the TUI draft. Names match case-insensitive substrings; arrows select, Enter inserts without sending, and Escape dismisses. Inline and multiline references preserve surrounding text and remain subject to tool-policy approval.
+
+### Changed
+
+- Repository `.agents/skills` definitions now take precedence over operator `~/.agents/skills` definitions of the same name. `ahi doctor` reports shadowed operator definitions.
+
 ## 0.21.0 (2026-11-17)
 
 ### Added

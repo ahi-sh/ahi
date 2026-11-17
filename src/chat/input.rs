@@ -105,6 +105,41 @@ impl InputEditor {
         }
     }
 
+    /// The `$` token under the cursor, independent of its position in the draft.
+    fn skill_range(&self) -> Option<std::ops::Range<usize>> {
+        let text = &self.lines[self.line];
+        let cursor = byte_index(text, self.column);
+        let start = text[..cursor].rfind('$')?;
+        if !text[start + 1..cursor]
+            .chars()
+            .all(super::skill_menu::name_char)
+        {
+            return None;
+        }
+        let end = cursor
+            + text[cursor..]
+                .chars()
+                .take_while(|c| super::skill_menu::name_char(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        Some(start..end)
+    }
+
+    pub(crate) fn skill_query(&self) -> Option<String> {
+        let range = self.skill_range()?;
+        let cursor = byte_index(&self.lines[self.line], self.column);
+        Some(self.lines[self.line][range.start + 1..cursor].to_string())
+    }
+
+    pub(crate) fn complete_skill(&mut self, name: &str) {
+        let Some(range) = self.skill_range() else {
+            return;
+        };
+        let prefix_columns = self.lines[self.line][..range.start].chars().count();
+        self.lines[self.line].replace_range(range, &format!("${name}"));
+        self.column = prefix_columns + name.chars().count() + 1;
+    }
+
     pub(crate) fn contents(&self) -> String {
         self.lines.join("\n")
     }

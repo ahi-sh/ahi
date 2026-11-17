@@ -335,6 +335,52 @@ def main() -> None:
             session.close()
             (state / "selection").unlink(missing_ok=True)
 
+        # Real cursor-local skill completion; never submit to the configured provider.
+        skill_state = state / "skill-picker"
+        skill_state.mkdir()
+        (skill_state / "models.json").write_text(body)
+        (skill_state / "catalogs").mkdir()
+        (skill_state / "catalogs/openai.json").write_text(json.dumps(["first", "second"]))
+        home = skill_state / "home"
+        home.mkdir()
+        for root, description in [(skill_state, "repo"), (home, "operator")]:
+            for name in ["review-one", "review-two"]:
+                directory = root / ".agents/skills" / name
+                directory.mkdir(parents=True)
+                (directory / "SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: {description}\n---\n{description}\n")
+        session = Session(skill_state, cwd=skill_state, columns=100, rows=30,
+                          environment={"HOME": str(home)})
+        try:
+            session.expect("Models · Enter use model")
+            session.send("j\r")
+            session.expect("Skill: review-one (repo, not approved)")
+            session.send("$")
+            session.expect("Skills ·")
+            session.expect("$review-one")
+            session.send("TWO\r")
+            session.expect("$review-two")
+            session.absent("Skills ·")
+            session.send("\x03")  # Clear draft without exiting.
+            session.send("\x1b[200~before $rev after\x1b[201~")
+            session.send("\x1b[D" * 6)
+            session.expect("Skills ·")
+            session.send("\x1b[B\r")
+            session.expect("before $review-two after")
+            session.absent("Skills ·")
+            session.capture("inline-skill-completion")
+            session.send("\x1b[D")
+            session.expect("Skills ·")
+            session.send("\x1b")
+            session.absent("Skills ·")
+            session.send("\r")
+            session.expect('no ahi.tools.yaml rule approves the skill "review-two"')
+            session.expect("before $review-two after")
+            session.send("\x03/quit\r")
+            session.finish()
+        finally:
+            session.close()
+
         def expect_ids(session: Session, expected: list[str]) -> None:
             end = time.monotonic() + 10
             while time.monotonic() < end:
