@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.20.0 (2026-11-16)
+
+### Changed
+
+- `read_file` and `search_files` share `Workspace::open_read`: relative-path validation, exact path spelling, ahi-directory exclusions, regular-file validation, and metadata from the same open handle. Search now applies the same path checks as direct reads. Each named tool module retains its own content processing and limits; shared workspace, walk, glob, and ignore implementations live under `src/tools/helpers/`.
+- On macOS and Linux, the shared read API opens descendants relative to an owned workspace directory descriptor with no-follow checks on each component. Other platforms retain pathname opening. This is consistent file-opening behavior, not a sandbox or a performance claim; enumeration, ignore-file loading, writes, and skill loading are unchanged.
+- Publish `ahi-unix` 0.4.0 with the descriptor-relative directory API before ahi; the main crate pins that version. No registry dependencies were added.
+
 ## 0.19.0 (2026-11-16)
 
 ### Added

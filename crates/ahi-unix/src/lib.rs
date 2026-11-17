@@ -1,7 +1,7 @@
 //! The POSIX calls `ahi` needs and `std` does not expose: a signal handler
 //! that records a termination signal, `kill` aimed at a whole process group,
-//! `flock` for one writer per file, and the credentials of a Unix socket's
-//! peer.
+//! `flock` for one writer per file, the credentials of a Unix socket's
+//! peer, and descriptor-relative file opening on macOS and Linux.
 //!
 //! This in-repo crate exists so `ahi` itself can keep `unsafe_code = "forbid"`:
 //! it declares each libc function it calls and has no dependencies, the same
@@ -14,6 +14,9 @@
 //! disposition for that signal, so a second copy of it ends the process the
 //! way it always did. Nothing is allocated, locked, or printed in the
 //! handler. The program polls [`received`] from its own loop.
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod directory;
 
 use std::sync::atomic::{AtomicI32, Ordering};
 

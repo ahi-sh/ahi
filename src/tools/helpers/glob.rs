@@ -10,14 +10,14 @@
 use regex::Regex;
 
 #[derive(Debug, Clone)]
-pub(super) struct Glob {
+pub(in crate::tools) struct Glob {
     regex: Regex,
     anchored: bool,
 }
 
 impl Glob {
     /// `None` when the pattern is empty, longer than 256 bytes, or malformed.
-    pub(super) fn new(pattern: &str) -> Option<Self> {
+    pub(in crate::tools) fn new(pattern: &str) -> Option<Self> {
         if pattern.is_empty() || pattern.len() > 256 {
             return None;
         }
@@ -29,7 +29,7 @@ impl Glob {
 
     /// Match a `/`-separated relative path. Unanchored patterns test the
     /// final component only.
-    pub(super) fn matches(&self, relative: &str) -> bool {
+    pub(in crate::tools) fn matches(&self, relative: &str) -> bool {
         if self.anchored {
             self.regex.is_match(relative)
         } else {

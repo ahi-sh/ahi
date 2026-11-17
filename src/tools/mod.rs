@@ -12,8 +12,7 @@
 pub(crate) mod delegate;
 mod edit_file;
 mod find_files;
-mod glob;
-mod ignore;
+mod helpers;
 mod list_dir;
 mod load_skill;
 
@@ -21,16 +20,15 @@ pub(crate) use load_skill::SkillReport;
 mod read_file;
 mod run_command;
 mod search_files;
-mod walk;
-mod workspace;
 mod write_file;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use helpers::glob;
+pub(super) use helpers::Workspace;
 pub(crate) use run_command::{render as render_argv, CommandReport};
 use std::sync::atomic::AtomicBool;
-pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
 /// A parsed model tool call. Parsing does not authorize execution.
@@ -775,8 +773,7 @@ pub(super) fn execute(
             })
         }
         Arguments::Read { offset, limit } => {
-            let path = workspace.resolve(&call.path)?;
-            let content = read_file::run(&path, *offset, *limit)?;
+            let content = read_file::run(workspace, &call.path, *offset, *limit)?;
             Ok(Executed {
                 detail: Some(ToolDetail::Read {
                     offset: *offset,
@@ -1683,6 +1680,7 @@ mod tests {
 mod timing {
     //! `cargo test --lib tools::timing -- --ignored --nocapture` prints how
     //! long a walk and a search of this repository take.
+    use super::helpers::walk;
     use super::*;
     use std::path::PathBuf;
     use std::time::Instant;
@@ -1713,7 +1711,11 @@ mod timing {
             let mut path = PathBuf::new();
             for relative in entries.files() {
                 buffer.clear();
-                walk::absolute(&workspace, relative, &mut path);
+                path.clear();
+                path.push(workspace.root());
+                for part in relative.split('/').filter(|part| !part.is_empty()) {
+                    path.push(part);
+                }
                 if let Ok(mut file) = std::fs::File::open(&path) {
                     use std::io::Read;
                     let _ = file.read_to_end(&mut buffer);

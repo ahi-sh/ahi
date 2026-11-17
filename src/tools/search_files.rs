@@ -2,23 +2,23 @@
 //! text files under a directory. Output is `path:line:text`, files in sorted
 //! order, lines ascending, bounded by match count and bytes.
 //!
-//! Files are scanned in parallel. Each file costs three system calls (open,
-//! fstat, one read) and the regex runs once over the whole buffer; line
+//! Files are scanned in parallel. On macOS/Linux candidates are opened
+//! descriptor-relatively without following symlinks. The regex runs over the buffer; line
 //! numbers come from counting newlines between hits. Each thread renders its
 //! hits straight into one buffer per file, so merging is a concatenation in
 //! file order and the output never depends on how the work was split.
 
-use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use regex::bytes::{Regex, RegexBuilder};
 
-use super::glob::Glob;
-use super::walk;
-use super::workspace::Workspace;
+use super::helpers::{glob::Glob, walk, Workspace};
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests;
 
 pub(super) const DEFAULT_LIMIT: usize = 100;
 pub(super) const MAX_LIMIT: usize = 500;
@@ -73,8 +73,8 @@ pub(super) fn run(
     };
     let limit = query.limit.clamp(1, MAX_LIMIT);
     let tree = walk::walk(workspace, directory, relative)?;
-    // Candidate files in sorted order. The walk never followed a symbolic
-    // link and pruned ahi's directories.
+    // Candidate names in sorted order. Enumeration filters observed symlinks
+    // and ahi's directories; opening must still handle later replacements.
     let files: Vec<&str> = tree
         .files()
         .filter(|path| match &glob {
@@ -194,12 +194,11 @@ enum FileResult {
     Hits(Hits),
 }
 
-/// Per-thread scanner: the path and file buffers are reused across files.
+/// Per-thread scanner: the file buffer is reused across files.
 struct Scanner<'a> {
     workspace: &'a Workspace,
     regex: &'a Regex,
     budget: &'a AtomicU64,
-    path: PathBuf,
     buffer: Vec<u8>,
 }
 
@@ -209,24 +208,16 @@ impl<'a> Scanner<'a> {
             workspace,
             regex,
             budget,
-            path: PathBuf::new(),
             buffer: Vec::new(),
         }
     }
 
     fn scan(&mut self, relative: &str) -> FileResult {
-        walk::absolute(self.workspace, relative, &mut self.path);
-        let Ok(mut file) = File::open(&self.path) else {
+        let Ok(opened) = self.workspace.open_read(relative) else {
             return FileResult::Skipped;
         };
-        // fstat on the open descriptor: no second path lookup.
-        let Ok(metadata) = file.metadata() else {
-            return FileResult::Skipped;
-        };
-        if !metadata.is_file() {
-            return FileResult::Skipped;
-        }
-        let len = metadata.len();
+        let mut file = opened.file;
+        let len = opened.size;
         if len > MAX_FILE_BYTES {
             return FileResult::Skipped;
         }
