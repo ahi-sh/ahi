@@ -1,7 +1,7 @@
 //! The POSIX calls `ahi` needs and `std` does not expose: a signal handler
 //! that records a termination signal, `kill` aimed at a whole process group,
-//! `flock` for one writer per file, and the credentials of a Unix socket's
-//! peer.
+//! `flock` for one writer per file, the credentials of a Unix socket's
+//! peer, and descriptor-relative file opening on macOS and Linux.
 //!
 //! This in-repo crate exists so `ahi` itself can keep `unsafe_code = "forbid"`:
 //! it declares each libc function it calls and has no dependencies, the same

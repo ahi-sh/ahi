@@ -12,8 +12,7 @@
 pub(crate) mod delegate;
 mod edit_file;
 mod find_files;
-mod glob;
-mod ignore;
+mod helpers;
 mod list_dir;
 mod load_skill;
 
@@ -21,16 +20,15 @@ pub(crate) use load_skill::SkillReport;
 mod read_file;
 mod run_command;
 mod search_files;
-mod walk;
-mod workspace;
 mod write_file;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use helpers::glob;
+pub(super) use helpers::Workspace;
 pub(crate) use run_command::{render as render_argv, CommandReport};
 use std::sync::atomic::AtomicBool;
-pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
 /// A parsed model tool call. Parsing does not authorize execution.
@@ -1682,6 +1680,7 @@ mod tests {
 mod timing {
     //! `cargo test --lib tools::timing -- --ignored --nocapture` prints how
     //! long a walk and a search of this repository take.
+    use super::helpers::walk;
     use super::*;
     use std::path::PathBuf;
     use std::time::Instant;

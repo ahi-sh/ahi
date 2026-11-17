@@ -4,7 +4,7 @@
 
 use std::io::{BufRead, BufReader};
 
-use super::workspace::Workspace;
+use super::helpers::Workspace;
 
 pub(super) const MAX_BYTES: usize = 64 * 1024;
 /// Files beyond this are read only through `offset`/`limit` windows that

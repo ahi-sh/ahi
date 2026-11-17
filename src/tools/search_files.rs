@@ -15,9 +15,7 @@ use std::thread;
 
 use regex::bytes::{Regex, RegexBuilder};
 
-use super::glob::Glob;
-use super::walk;
-use super::workspace::Workspace;
+use super::helpers::{glob::Glob, walk, Workspace};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;

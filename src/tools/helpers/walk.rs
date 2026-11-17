@@ -19,7 +19,7 @@ use super::ignore::{IgnoreFile, IgnoreStack};
 use super::workspace::Workspace;
 
 /// Entries examined (files and directories) before the walk gives up.
-pub(super) const MAX_SCANNED: usize = 200_000;
+pub(in crate::tools) const MAX_SCANNED: usize = 200_000;
 /// Arena bytes a single walk may hold (well above `MAX_SCANNED` paths of
 /// ordinary length); the span word reserves 40 bits for the offset.
 const MAX_ARENA: usize = 1 << 30;
@@ -45,22 +45,22 @@ fn span(offset: usize, len: usize, is_dir: bool, is_symlink: bool) -> u64 {
 /// The result of one walk. Paths are `/`-separated and relative to the
 /// workspace root, in ascending byte order.
 #[derive(Debug, Default)]
-pub(super) struct Tree {
+pub(in crate::tools) struct Tree {
     arena: String,
     spans: Vec<u64>,
 }
 
 /// One entry viewed through the arena; nothing is copied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Entry<'a> {
-    pub(super) relative: &'a str,
-    pub(super) is_dir: bool,
-    pub(super) is_symlink: bool,
+pub(in crate::tools) struct Entry<'a> {
+    pub(in crate::tools) relative: &'a str,
+    pub(in crate::tools) is_dir: bool,
+    pub(in crate::tools) is_symlink: bool,
 }
 
 impl Tree {
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
+    pub(in crate::tools) fn len(&self) -> usize {
         self.spans.len()
     }
 
@@ -75,12 +75,12 @@ impl Tree {
         }
     }
 
-    pub(super) fn entries(&self) -> impl Iterator<Item = Entry<'_>> + '_ {
+    pub(in crate::tools) fn entries(&self) -> impl Iterator<Item = Entry<'_>> + '_ {
         self.spans.iter().map(|word| self.decode(*word))
     }
 
     /// Regular files only (not directories, not symbolic links).
-    pub(super) fn files(&self) -> impl Iterator<Item = &str> + '_ {
+    pub(in crate::tools) fn files(&self) -> impl Iterator<Item = &str> + '_ {
         self.spans
             .iter()
             .filter(|word| **word & (DIR_BIT | SYMLINK_BIT) == 0)
@@ -121,7 +121,7 @@ impl Tree {
 /// entered. `.gitignore` files above `directory` are not consulted: a search
 /// rooted in a subdirectory sees what that subdirectory's own ignore files
 /// say.
-pub(super) fn walk(
+pub(in crate::tools) fn walk(
     workspace: &Workspace,
     directory: &Path,
     relative: &str,

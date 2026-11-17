@@ -1,4 +1,4 @@
-# Issue #39: shared workspace read-opening API draft
+# Shared workspace read-opening API (issue #39)
 
 ## Goal and structure
 
@@ -17,7 +17,9 @@ The named tool modules remain intact:
   and its file/output limits.
 - `src/tools/search_files.rs` calls `open_read`, then owns matching, binary-file
   handling, budgets, and skip-on-open-error behavior.
-- `src/tools/workspace.rs` owns the common opening contract.
+- `src/tools/helpers/workspace.rs` owns the common opening contract. Shared
+  glob matching, ignore rules, and walking also live under `helpers/`, leaving
+  the top-level named modules for policy tools.
 - `crates/ahi-unix/src/directory.rs` owns the platform-specific descriptor API.
 
 No search-only opening API remains. Search now applies the same path-spelling and
@@ -47,7 +49,7 @@ opening behind the same shared checks. Platform guarantees are not identical.
 - Shared canonical path checks and component-wise opens may cost more than the
   previous search path. No performance improvement is claimed.
 
-## Verification and remaining gates
+## Verification and platform coverage
 
 Tests exercise ordinary reads and search output, non-regular-file refusal,
 excluded paths, file/ancestor replacement with symlinks, recovery after failed
@@ -55,10 +57,10 @@ opens, descriptor root anchoring, and invalid paths. Existing tool tests cover
 pagination, UTF-8, search matching, and budgets. Direct descriptor tests ensure
 symlink refusal is not tested solely through the prior canonical-path check.
 
-Local execution is on macOS. Linux ABI constants/behavior need Linux execution;
-Windows fallback needs its normal CI coverage. Descriptor-leak/FIFO checks and
-representative overhead measurements remain useful before merge.
-
-This is an unpublished draft. Before release, bump the changed ahi-unix crate and
-update the root dependency pin/lockfile. The published-member immutability gate
-must not be bypassed by publishing altered contents as 0.3.1.
+The repository's CI runs the workspace tests on Linux and Windows; macOS checks
+run locally. The no-follow implementation is exercised on macOS/Linux, while
+Windows retains pathname opening. Isolated, timeout-bounded tests verify that
+FIFO opens do not block and that successful and failed descendant opens release
+their descriptors. No benchmark-based performance claim is made.
+Representative overhead measurements and broader filesystem-operation reuse are
+follow-up work, not guarantees of this API.

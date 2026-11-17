@@ -28,6 +28,9 @@ mod flags {
     pub const NONBLOCK: i32 = 0x4;
 }
 
+#[cfg(test)]
+mod tests;
+
 extern "C" {
     fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
 }

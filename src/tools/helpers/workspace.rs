@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 
 /// A regular file and its size observed on the same open handle.
-pub(super) struct OpenedRead {
-    pub(super) file: std::fs::File,
-    pub(super) size: u64,
+pub(in crate::tools) struct OpenedRead {
+    pub(in crate::tools) file: std::fs::File,
+    pub(in crate::tools) size: u64,
 }
 
 pub(crate) struct Workspace {
@@ -44,7 +44,7 @@ impl Workspace {
     /// Metadata comes from the opened handle, not a separate pathname lookup.
     /// macOS/Linux additionally refuse symlinks during component-wise opens;
     /// other platforms retain pathname opening. Neither is a sandbox.
-    pub(super) fn open_read(
+    pub(in crate::tools) fn open_read(
         &self,
         relative: &str,
     ) -> std::result::Result<OpenedRead, &'static str> {
@@ -62,7 +62,18 @@ impl Workspace {
             let _ = path;
             self.read_root.open_file(Path::new(relative))
         };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Permit opening directories so the shared handle-based metadata
+            // check below can report "not a regular file" on Windows too.
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let file = std::fs::File::open(path);
         let file = file.map_err(|_| "cannot read file")?;
         let metadata = file.metadata().map_err(|_| "cannot read file metadata")?;
@@ -82,7 +93,7 @@ impl Workspace {
     /// Whether a canonical-or-lexical absolute path lies in one of ahi's own
     /// directories. Used by the walk to prune without canonicalizing every
     /// entry; `resolve` remains the check before any read.
-    pub(super) fn is_excluded(&self, absolute: &Path) -> bool {
+    pub(in crate::tools) fn is_excluded(&self, absolute: &Path) -> bool {
         self.excluded.iter().any(|dir| absolute.starts_with(dir))
     }
 
@@ -90,7 +101,7 @@ impl Workspace {
     /// resolve like any read path. Returns the on-disk path and whether a
     /// regular file is already there; a symbolic link or directory at the
     /// path is refused, so nothing is ever written through a link.
-    pub(super) fn resolve_for_write(
+    pub(in crate::tools) fn resolve_for_write(
         &self,
         normalized: &str,
     ) -> std::result::Result<(PathBuf, bool), &'static str> {
@@ -127,7 +138,10 @@ impl Workspace {
     /// This validates a pathname, not an open handle. File readers use
     /// `open_read`; operations needing a path keep their own opening semantics.
     /// A sandbox, not these checks, contains a hostile process.
-    pub(super) fn resolve(&self, normalized: &str) -> std::result::Result<PathBuf, &'static str> {
+    pub(in crate::tools) fn resolve(
+        &self,
+        normalized: &str,
+    ) -> std::result::Result<PathBuf, &'static str> {
         // Push components one at a time: a Windows verbatim (`\\?\`) root
         // keeps a joined `/` literally, which would never match canonically.
         let mut joined = self.root.clone();

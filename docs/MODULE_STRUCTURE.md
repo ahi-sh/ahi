@@ -113,7 +113,13 @@ src/
 │   ├── edit_file.rs
 │   ├── run_command.rs
 │   ├── delegate.rs
-│   └── load_skill.rs
+│   ├── load_skill.rs
+│   └── helpers/                       # Shared workspace/file operations, not policy tools
+│       ├── mod.rs
+│       ├── workspace.rs               # Path rules and shared read-opening API
+│       ├── walk.rs
+│       ├── glob.rs
+│       └── ignore.rs
 │
 ├── tool_policy/                       # Authorization for model-requested actions
 │   ├── mod.rs
