@@ -1574,7 +1574,7 @@ fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
             (
                 "c3".into(),
                 1,
-                "error: path is protected: ahi policy files, hook configuration, .gitignore, .git, and .ahi/skills are never written by tools".into()
+                "error: path is protected: ahi policy files, hook configuration, .gitignore, .git, .agents/skills, and .ahi/skills are never written by tools".into()
             ),
             (
                 "c4".into(),
@@ -2447,7 +2447,7 @@ const SKILL_RULES: &str = "version: 1\nrules:\n\
 /// `release`, and `deploy`; `ghost` is approved but installed nowhere.
 fn skill_fixture(url: &str, actions: &str) -> ToolFixture {
     let fixture = ToolFixture::new(url, actions, json!({"id": "vendor/model"}));
-    let skills = fixture.workspace.join(".ahi/skills");
+    let skills = fixture.workspace.join(".agents/skills");
     for (name, front, body) in [
         (
             "rust-review",

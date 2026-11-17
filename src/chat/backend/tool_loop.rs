@@ -125,7 +125,7 @@ impl ToolRuntime {
         // Skills are enumerated once per turn from the turn's canonical
         // working directory (never a session header's `cwd`) and the
         // operator root; only approved names that validate are offered.
-        let catalog = crate::skills::enumerate(workspace.root(), Some(&state.config));
+        let catalog = crate::skills::enumerate(workspace.root(), std::env::home_dir().as_deref());
         let approved = policy.approved_skills();
         let skills: Vec<crate::skills::Skill> = catalog
             .skills

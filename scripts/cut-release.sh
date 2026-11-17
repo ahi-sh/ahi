@@ -200,7 +200,14 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-cargo package --workspace --allow-dirty
+# Package in a fresh target directory: reused package archives can contain
+# older contents for an unchanged member version and fail verification even
+# when the published-member check and workspace build both pass.
+(
+  package_target="$(mktemp -d "${TMPDIR:-/tmp}/ahi-release-package.XXXXXX")"
+  trap 'rm -rf "$package_target"' EXIT
+  CARGO_TARGET_DIR="$package_target" cargo package --workspace --allow-dirty
+)
 
 if [[ "$dry_run" -eq 1 ]]; then
   echo "Dry run succeeded for $package_name $tag."

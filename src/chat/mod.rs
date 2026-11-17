@@ -272,6 +272,18 @@ impl ChatScreen {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".to_string());
         let tools = self.workspace_root.join("ahi.tools.yaml").is_file();
+        let policy = match &self.actions_file {
+            Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
+            None => crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN),
+        };
+        let approved = policy
+            .ok()
+            .flatten()
+            .map(|p| p.approved_skills())
+            .unwrap_or_default();
+        let catalog =
+            crate::skills::enumerate(&self.workspace_root, std::env::home_dir().as_deref());
+        let skills = header::skills_text(&catalog, &approved);
         let text = header::text(
             120,
             &self.selection.model,
@@ -280,6 +292,7 @@ impl ChatScreen {
             &directory,
             tools,
         );
+        let text = header::with_skills(text, &skills);
         self.push_notice(text);
     }
 

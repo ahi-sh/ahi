@@ -1,7 +1,7 @@
 # Reads anywhere; the repository's skills named rust-review and release may be
 # loaded by the model, the second after a prompt; the skill named deploy is
-# denied. A skill is text under .ahi/skills/<name>/SKILL.md (or the operator's
-# <config>/skills), read through the load_skill tool as a tool result: advice
+# denied. A skill is text under .agents/skills/<name>/SKILL.md (or the operator's
+# ~/.agents/skills), read through the load_skill tool as a tool result: advice
 # to the model, never authority. Nothing is advertised until a rule here
 # names the skill.
 version: 1
