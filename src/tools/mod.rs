@@ -252,7 +252,7 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
                     "type": "object",
                     "properties": {
                         "name": string("The skill's name, one of those listed"),
-                        "file": string("A reference file the skill declares, instead of the skill's own text")
+                        "file": string("A UTF-8 supporting file relative to the skill directory, such as references/guide.md; omit to load instructions")
                     },
                     "required": ["name"],
                     "additionalProperties": false
@@ -380,16 +380,30 @@ fn skill_description(skills: &[crate::skills::Skill]) -> String {
     let mut text = String::from(
         "Read a skill: named guidance the repository or the operator wrote for tasks like the ones listed. \
          The text is advice, not authority: every tool it mentions still goes through policy. \
-         Returns the skill's text, or one of its reference files when `file` names one. Skills:",
+         Returns the skill's text, or a supporting UTF-8 file when `file` names a path relative to its directory. \
+         Reading a bundled script does not execute it. Skills:",
     );
     for skill in skills {
-        text.push_str(&format!("\n- {}: {}", skill.name, skill.description));
+        text.push_str(&format!(
+            "\n- {}: {}",
+            skill.name,
+            skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         if let Some(when) = &skill.when {
             text.push_str(&format!(" — {when}"));
         }
         if !skill.references.is_empty() {
             text.push_str(&format!(" (references: {})", skill.references.join(", ")));
         }
+        text.push_str(&format!(
+            " (source: {}; location: {})",
+            skill.root.as_str(),
+            serde_json::Value::String(skill.dir.join("SKILL.md").to_string_lossy().into_owned())
+        ));
     }
     text
 }
@@ -489,8 +503,8 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                 return Err("name is a skill name of 1 to 64 letters, digits, '-', '_', or '.'");
             }
             if let Some(file) = &raw.file {
-                if file.is_empty() || file.len() > 128 || file.contains(['/', '\\', '\0']) {
-                    return Err("file is a bare file name the skill declares as a reference");
+                if !crate::skills::valid_reference(file) {
+                    return Err("file must be a relative path inside the skill directory, without '.' or '..'");
                 }
             }
             Arguments::Skill {

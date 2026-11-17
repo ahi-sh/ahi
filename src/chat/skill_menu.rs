@@ -6,41 +6,6 @@ use ratatui_core::{
     text::Line,
 };
 
-pub(super) fn name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
-}
-
-/// A bare dollar or dollar amount stays literal; named references are explicit.
-pub(super) fn expand(text: &str, approved: &[String]) -> Result<String, String> {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('$') {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start + 1..];
-        let len = tail
-            .chars()
-            .take_while(|c| name_char(*c))
-            .map(char::len_utf8)
-            .sum::<usize>();
-        let name = &tail[..len];
-        if name.is_empty() || name.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            out.push('$');
-            rest = tail;
-            continue;
-        }
-        if !approved.iter().any(|entry| entry == name) {
-            return Err(format!(
-                "no {} rule approves the skill \"{name}\"; the draft was kept",
-                crate::tool_policy::FILE_NAME
-            ));
-        }
-        out.push_str(&format!("Use the skill \"{name}\"."));
-        rest = &tail[len..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,23 +61,6 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(visible.contains("No matching skills"));
-    }
-
-    #[test]
-    fn invocation_expands_multiple_inline_names_and_keeps_literal_dollars() {
-        let approved = vec!["review".into(), "test".into()];
-        assert_eq!(
-            expand("先$review then\n$test please", &approved).unwrap(),
-            "先Use the skill \"review\". then\nUse the skill \"test\". please"
-        );
-        assert_eq!(
-            expand("cost $20.50 and $", &approved).unwrap(),
-            "cost $20.50 and $"
-        );
-        assert_eq!(
-            expand("before $missing after", &approved).unwrap_err(),
-            "no ahi.tools.yaml rule approves the skill \"missing\"; the draft was kept"
-        );
     }
 }
 

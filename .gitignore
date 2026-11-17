@@ -24,7 +24,8 @@ rustc-ice-*.txt
 #.idea/
 
 
-# Keep local internal notes private; track the reviewed architecture proposal.
+# Keep local internal notes private; track reviewed architecture and runtime docs.
 docs/*
 !docs/MODULE_STRUCTURE.md
+!docs/SKILLS.md
 

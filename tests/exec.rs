@@ -1159,6 +1159,119 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
 }
 
 #[test]
+fn headless_explicit_skill_loads_before_inference_and_reads_nested_support() {
+    let (url, gateway) = loopback(tool_round(
+        &[(
+            "nested",
+            "load_skill",
+            serde_json::json!({"name": "review", "file": "references/guide.md"}),
+        )],
+        "review complete",
+    ));
+    let dir = fixture(&url);
+    let home = dir.join("home");
+    for (root, body) in [
+        (dir.join("work"), "REPOSITORY INSTRUCTIONS\n"),
+        (home.clone(), "OPERATOR MUST BE SHADOWED\n"),
+    ] {
+        let skill = root.join(".agents/skills/review");
+        fs::create_dir_all(skill.join("references")).unwrap();
+        fs::write(skill.join("SKILL.md"), format!("---\nname: review\ndescription: Review changes\nlicense: MIT\nmetadata: {{author: fixture}}\nallowed-tools: 'Bash(*)'\ndisable-model-invocation: true\n---\n{body}")).unwrap();
+        fs::write(skill.join("references/guide.md"), "NESTED GUIDE\n").unwrap();
+    }
+    let policy = dir.join("ops/skills.yaml");
+    fs::write(&policy, "version: 1\nrules:\n- {id: review, action: skill, match: {skill: review}, effect: approve}\n").unwrap();
+    let prompt = dir.join("ops/prompt.txt");
+    fs::write(&prompt, "Before $review and\n$review after").unwrap();
+    let result = dir.join("ops/result.json");
+    let output = ahi(&dir)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .args([
+            "exec",
+            "--standalone",
+            "--model",
+            "local/vendor/model",
+            "--headless",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .arg("--result-file")
+        .arg(&result)
+        .arg("--tools")
+        .arg(&policy)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(result).unwrap()).unwrap();
+    assert_eq!(doc["text"], "review complete");
+    assert_eq!(doc["tools"]["skills"], 2);
+    assert_eq!(doc["ledger"][0]["root"], "repo");
+    assert_eq!(doc["ledger"][1]["file"], "references/guide.md");
+    let requests = gateway.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first: serde_json::Value =
+        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        first["messages"][0]["content"],
+        "Before $review and\n$review after"
+    );
+    assert!(requests[0].contains("REPOSITORY INSTRUCTIONS"));
+    assert!(!requests[0].contains("OPERATOR MUST BE SHADOWED"));
+    assert!(!requests[0].contains("Bash(*)"));
+    assert_eq!(first["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(first["tools"][0]["function"]["name"], "load_skill");
+    assert!(requests[1].contains("NESTED GUIDE"));
+    let audit = fs::read_to_string(dir.join("state/audit.log")).unwrap();
+    assert_eq!(audit.lines().count(), 2);
+    assert!(!audit.contains("REPOSITORY INSTRUCTIONS"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn headless_explicit_skill_requiring_approval_stops_before_inference() {
+    let (url, gateway) = loopback(vec![]);
+    let dir = fixture(&url);
+    let skill = dir.join("work/.agents/skills/review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: Review\n---\nPRIVATE INSTRUCTIONS\n",
+    )
+    .unwrap();
+    let policy = dir.join("ops/skills.yaml");
+    fs::write(&policy, "version: 1\nrules:\n- {id: review, action: skill, match: {skill: review}, effect: approve, ask: true}\n").unwrap();
+    let prompt = dir.join("ops/prompt.txt");
+    let result = dir.join("ops/result.json");
+    fs::write(&prompt, "Please $review now").unwrap();
+    let output = exec(
+        &dir,
+        &[
+            "--headless",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--result-file",
+            result.to_str().unwrap(),
+            "--tools",
+            policy.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code(&output), 5, "{}", err(&output));
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(result).unwrap()).unwrap();
+    assert_eq!(doc["tools"]["ask_denied"], 1);
+    assert_eq!(doc["error"]["kind"], "policy");
+    assert!(doc["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no model request was sent"));
+    assert!(!out(&output).contains("PRIVATE INSTRUCTIONS"));
+    assert!(gateway.join().unwrap().is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     let (url, gateway) = loopback(tool_round(
         &[(

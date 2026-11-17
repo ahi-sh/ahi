@@ -60,7 +60,11 @@ pub(crate) fn skills_text(catalog: &crate::skills::Catalog, approved: &[String])
     let mut lines = vec!["Skills (loaded on demand):".to_string()];
     for skill in &catalog.skills {
         let status = if approved.contains(&skill.name) {
-            "available"
+            if skill.disable_model_invocation {
+                "manual only"
+            } else {
+                "available"
+            }
         } else {
             "not approved"
         };

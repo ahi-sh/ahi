@@ -2539,7 +2539,7 @@ fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() 
         (
             "c3".into(),
             1,
-            "error: the skill declares no reference of that name".into()
+            "error: the skill could not be read; `ahi doctor` says why".into()
         )
     );
     assert_eq!(
@@ -2547,7 +2547,8 @@ fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() 
         (
             "c4".into(),
             1,
-            "error: file is a bare file name the skill declares as a reference".into()
+            "error: file must be a relative path inside the skill directory, without '.' or '..'"
+                .into()
         )
     );
     assert_eq!(
@@ -2605,6 +2606,135 @@ fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() 
         !description.contains("Look twice"),
         "no body before a load: {description}"
     );
+}
+
+#[test]
+fn explicit_skill_is_loaded_once_before_the_first_model_request() {
+    let (url, server) = server_sequence(vec![text_stream("done")]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    let path = fixture
+        .workspace
+        .join(".agents/skills/rust-review/SKILL.md");
+    fs::write(&path, "---\nname: rust-review\ndescription: Private review\nlicense: MIT\nallowed-tools: 'Bash(*)'\ndisable-model-invocation: true\n---\nPrivate review instructions.\n").unwrap();
+    let mut input = request();
+    input.messages[0].text = "$not-a-current-request".into();
+    input.messages.last_mut().unwrap().text = "Before $rust-review and\n$rust-review after".into();
+    let (events, approvals) = collect_answering(&mut fixture.backend(), input, vec![]);
+    assert!(approvals.is_empty());
+    let loaded = results(&events);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].1, 0);
+    assert!(loaded[0].2.ends_with("Private review instructions.\n"));
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    let first = request_body(&requests[0]);
+    let messages = first["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|message| message["role"] == "user"
+        && message["content"] == "Before $rust-review and\n$rust-review after"));
+    assert!(messages.last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .ends_with("Private review instructions.\n"));
+    let description = first["tools"][1]["function"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("Private review"));
+    assert!(description.contains("source: repo; location:"));
+    assert!(!description.contains("Bash(*)"));
+    assert_eq!(advertised_tools(&first), ["read_file", "load_skill"]);
+}
+
+#[test]
+fn manual_only_skill_is_hidden_and_cannot_be_auto_loaded() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[("c1", "load_skill", json!({"name": "rust-review"}))]),
+        text_stream("done"),
+    ]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    fs::write(fixture.workspace.join(".agents/skills/rust-review/SKILL.md"),
+        "---\nname: rust-review\ndescription: Private review\ndisable-model-invocation: true\n---\nPrivate instructions.\n").unwrap();
+    let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
+    assert_eq!(
+        results(&events)[0],
+        (
+            "c1".into(),
+            126,
+            "denied: manual-only skill requires an explicit $name reference this turn".into()
+        )
+    );
+    let requests = server.join().unwrap();
+    let first = request_body(&requests[0]);
+    let description = first["tools"][1]["function"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(!description.contains("rust-review"));
+    assert!(description.contains("release"));
+    assert!(!requests[1].contains("Private instructions"));
+}
+
+#[test]
+fn explicit_skills_over_the_output_budget_are_not_sent_partially() {
+    let (url, server) = server_sequence(vec![]);
+    let names: Vec<_> = (0..9).map(|index| format!("large-{index}")).collect();
+    let mut policy = String::from("version: 1\nrules:\n");
+    for name in &names {
+        policy.push_str(&format!(
+            "- {{id: {name}, action: skill, match: {{skill: {name}}}, effect: approve}}\n"
+        ));
+    }
+    let fixture = ToolFixture::new(&url, &policy, json!({"id": "vendor/model"}));
+    for name in &names {
+        let directory = fixture.workspace.join(".agents/skills").join(name);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Large instructions\n---\n{}",
+                "x".repeat(32 * 1024 - 128)
+            ),
+        )
+        .unwrap();
+    }
+    let mut input = request();
+    input.messages.last_mut().unwrap().text = names
+        .iter()
+        .map(|name| format!("${name}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (events, approvals) = collect_answering(&mut fixture.backend(), input, vec![]);
+    assert!(approvals.is_empty());
+    assert!(matches!(
+        events.last(),
+        Some(ResponseEvent::Failed {
+            kind: ErrorKind::Policy,
+            ..
+        })
+    ));
+    assert!(server.join().unwrap().is_empty());
+}
+
+#[test]
+fn explicit_skill_approval_denial_prevents_inference() {
+    let (url, server) = server_sequence(vec![]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    let mut input = request();
+    input.messages.last_mut().unwrap().text = "Please $release now".into();
+    let (events, approvals) = collect_answering(
+        &mut fixture.backend(),
+        input,
+        vec![Some(vec![ToolDecision::Deny])],
+    );
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(results(&events)[0].1, 126);
+    assert!(matches!(
+        events.last(),
+        Some(ResponseEvent::Failed {
+            kind: ErrorKind::Policy,
+            ..
+        })
+    ));
+    assert!(server.join().unwrap().is_empty());
 }
 
 #[test]

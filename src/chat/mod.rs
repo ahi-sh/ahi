@@ -1149,9 +1149,8 @@ impl ChatScreen {
             }
             return Ok(ScreenAction::Continue);
         }
-        // `$name` asks the model to use a skill. The load is still the
-        // model's call under the rule; here only the name is checked, so a
-        // name no rule approves is refused at the input line, not sent.
+        // Keep invalid skill references in the draft. The shared backend
+        // performs the actual bounded loads and approvals before inference.
         let text = match self.skill_request(&text) {
             Ok(text) => text,
             Err(notice) => {
@@ -1178,10 +1177,11 @@ impl ChatScreen {
         Ok(ScreenAction::Continue)
     }
 
-    /// Expand `$name` references anywhere in the draft after policy approval.
-    /// Unapproved references keep the entire draft intact.
+    /// Preflight explicit references without rewriting the operator's text.
+    /// Loading is owned by the shared backend, not this screen.
     fn skill_request(&self, text: &str) -> std::result::Result<String, String> {
-        if !text.contains('$') {
+        let names = crate::skills::requested_names(text);
+        if names.is_empty() {
             return Ok(text.to_string());
         }
         let policy = match &self.actions_file {
@@ -1193,7 +1193,15 @@ impl ChatScreen {
             .flatten()
             .map(|policy| policy.approved_skills())
             .unwrap_or_default();
-        skill_menu::expand(text, &approved)
+        for name in names {
+            if !approved.contains(&name) {
+                return Err(format!(
+                    "no {} rule approves the skill \"{name}\"; the draft was kept",
+                    crate::tool_policy::FILE_NAME
+                ));
+            }
+        }
+        Ok(text.to_string())
     }
 
     /// Start a turn from the transcript as it stands. Screen-only rows stay
@@ -2609,7 +2617,7 @@ mod tests {
         assert_eq!(backend.requests.len(), 1);
         assert_eq!(
             backend.requests[0].messages.last().unwrap().text,
-            "Use the skill \"rust-review\". look at src"
+            "$rust-review look at src"
         );
         assert!(screen.input_text().is_empty());
         screen.set_input_text("$not a name!");
@@ -2626,10 +2634,7 @@ mod tests {
         )
         .unwrap();
         screen.actions_file = Some(elsewhere);
-        assert_eq!(
-            screen.skill_request("$release").unwrap(),
-            "Use the skill \"release\"."
-        );
+        assert_eq!(screen.skill_request("$release").unwrap(), "$release");
         assert!(screen
             .skill_request("$rust-review")
             .unwrap_err()

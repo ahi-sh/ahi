@@ -110,16 +110,26 @@ impl InputEditor {
         let text = &self.lines[self.line];
         let cursor = byte_index(text, self.column);
         let start = text[..cursor].rfind('$')?;
+        if text[..start]
+            .bytes()
+            .rev()
+            .take_while(|b| *b == b'\\')
+            .count()
+            % 2
+            == 1
+        {
+            return None;
+        }
         if !text[start + 1..cursor]
             .chars()
-            .all(super::skill_menu::name_char)
+            .all(crate::skills::name_char)
         {
             return None;
         }
         let end = cursor
             + text[cursor..]
                 .chars()
-                .take_while(|c| super::skill_menu::name_char(*c))
+                .take_while(|c| crate::skills::name_char(*c))
                 .map(char::len_utf8)
                 .sum::<usize>();
         Some(start..end)

@@ -73,8 +73,10 @@ pub(super) struct ToolRuntime {
     /// Every skill both roots hold, for `load_skill`; names the policy does
     /// not approve are refused by the rule, not by their absence here.
     catalog: crate::skills::Catalog,
-    /// The approved, valid skills the tool description lists.
+    /// Approved valid skills; schemas hide manual-only entries until selected.
     skills: Vec<crate::skills::Skill>,
+    /// Manual-only skills are available only after an explicit reference this turn.
+    explicit_skills: Vec<String>,
     gateway: String,
     destination: String,
     grants: SessionGrants,
@@ -148,6 +150,7 @@ impl ToolRuntime {
             advertised,
             catalog,
             skills,
+            explicit_skills: Vec::new(),
             gateway: gateway.to_string(),
             destination: destination.to_string(),
             grants,
@@ -157,7 +160,79 @@ impl ToolRuntime {
 
     /// Protocol-neutral schemas of the advertised builtins.
     pub(super) fn schemas(&self) -> Vec<tools::ToolSchema> {
-        tools::schemas(&self.advertised, &self.skills)
+        let skills: Vec<_> = self
+            .skills
+            .iter()
+            .filter(|skill| {
+                !skill.disable_model_invocation || self.explicit_skills.contains(&skill.name)
+            })
+            .cloned()
+            .collect();
+        let enabled: Vec<_> = self
+            .advertised
+            .iter()
+            .filter(|tool| tool.as_str() != tools::LOAD_SKILL || !skills.is_empty())
+            .cloned()
+            .collect();
+        tools::schemas(&enabled, &skills)
+    }
+
+    /// Explicit user requests are real, audited local loads before inference,
+    /// not a request that the model might choose to ignore. Use the same approval
+    /// channel, output budget, recording events, and replay as model tool calls.
+    pub(super) fn load_explicit(
+        &mut self,
+        names: Vec<String>,
+        messages: &mut Vec<ChatMessage>,
+        sender: &Sender<ResponseEvent>,
+    ) -> Result<()> {
+        if names.len() > crate::skills::MAX_SKILLS {
+            return Err(Error::policy(
+                "too many explicit skill references in one turn",
+            ));
+        }
+        self.explicit_skills = names;
+        let batch = crate::session::run_id();
+        let calls: Vec<_> = self
+            .explicit_skills
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ToolCall {
+                id: format!("skill_{batch}_{index}"),
+                name: tools::LOAD_SKILL.to_string(),
+                arguments: serde_json::Map::from_iter([(
+                    "name".into(),
+                    serde_json::Value::String(name.clone()),
+                )]),
+            })
+            .collect();
+        emit(
+            sender,
+            ResponseEvent::ToolCallsRequested {
+                calls: calls.clone(),
+                native: None,
+            },
+        )?;
+        let mut request = ChatMessage::new(TranscriptRole::Assistant, "");
+        request.tool = Some(ToolPayload::Calls {
+            calls: calls.clone(),
+            native: None,
+        });
+        messages.push(request);
+        let results = self.run_round(&calls, sender)?;
+        let failed = results
+            .iter()
+            .any(|message| message.role != (TranscriptRole::Tool { exit_code: EXIT_OK }));
+        messages.extend(results);
+        if failed {
+            return Err(Error::policy(
+                "an explicitly requested skill could not be loaded; no model request was sent",
+            ));
+        }
+        if self.output_bytes > MAX_TURN_OUTPUT_BYTES {
+            return Err(Error::policy("explicit skill instructions exceed the turn output budget; no model request was sent"));
+        }
+        Ok(())
     }
 
     /// Decide and run one batch, emitting `ToolResult` then `ToolCallReturned`
@@ -227,6 +302,21 @@ impl ToolRuntime {
     }
 
     fn plan(&self, prepared: PreparedCall) -> Plan {
+        if prepared.tool == tools::LOAD_SKILL
+            && self
+                .catalog
+                .get(prepared.target())
+                .is_some_and(|skill| skill.disable_model_invocation)
+            && !self
+                .explicit_skills
+                .iter()
+                .any(|name| name == prepared.target())
+        {
+            return Plan::Done(Box::new(denied(
+                &prepared,
+                "manual-only skill requires an explicit $name reference this turn",
+            )));
+        }
         let verdict = if prepared.tool == tools::LOAD_SKILL {
             self.policy.evaluate_skill(prepared.target())
         } else {
