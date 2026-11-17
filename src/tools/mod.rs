@@ -1713,7 +1713,11 @@ mod timing {
             let mut path = PathBuf::new();
             for relative in entries.files() {
                 buffer.clear();
-                walk::absolute(&workspace, relative, &mut path);
+                path.clear();
+                path.push(workspace.root());
+                for part in relative.split('/').filter(|part| !part.is_empty()) {
+                    path.push(part);
+                }
                 if let Ok(mut file) = std::fs::File::open(&path) {
                     use std::io::Read;
                     let _ = file.read_to_end(&mut buffer);

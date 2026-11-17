@@ -116,17 +116,6 @@ impl Tree {
     }
 }
 
-/// Build the on-disk path of an entry into `buffer` by pushing components
-/// onto the canonical workspace root. No symbolic link is followed because
-/// the walk never descended through one.
-pub(super) fn absolute(workspace: &Workspace, relative: &str, buffer: &mut PathBuf) {
-    buffer.clear();
-    buffer.push(workspace.root());
-    for part in relative.split('/').filter(|part| !part.is_empty()) {
-        buffer.push(part);
-    }
-}
-
 /// Every non-ignored entry below `directory` (a resolved workspace path
 /// whose relative form is `relative`). Symbolic links are reported but never
 /// entered. `.gitignore` files above `directory` are not consulted: a search

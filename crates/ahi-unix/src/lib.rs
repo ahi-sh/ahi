@@ -15,6 +15,9 @@
 //! way it always did. Nothing is allocated, locked, or printed in the
 //! handler. The program polls [`received`] from its own loop.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod directory;
+
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// A termination signal this crate can watch.

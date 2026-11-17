@@ -6,6 +6,8 @@ use crate::error::{Error, Result};
 
 pub(crate) struct Workspace {
     root: PathBuf,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    read_root: ahi_unix::directory::Directory,
     /// ahi's own state (credentials, `models.json`, catalogs). Never readable,
     /// even when it lies inside the working directory.
     excluded: Vec<PathBuf>,
@@ -21,7 +23,39 @@ impl Workspace {
             .into_iter()
             .filter_map(|dir| dir.canonicalize().ok())
             .collect();
-        Ok(Self { root, excluded })
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let read_root = ahi_unix::directory::Directory::open(&root)
+            .map_err(|_| Error::new("cannot open the working directory for tools"))?;
+        Ok(Self {
+            root,
+            excluded,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            read_root,
+        })
+    }
+
+    /// Search candidates are untrusted names even after enumeration. On
+    /// macOS/Linux, reopen through the anchored descriptor without following
+    /// any symlink. Other platforms retain the existing pathname behavior.
+    pub(super) fn open_search_file(&self, relative: &str) -> std::io::Result<std::fs::File> {
+        let mut path = self.root.clone();
+        for part in relative.split('/').filter(|part| !part.is_empty()) {
+            path.push(part);
+        }
+        if self.is_excluded(&path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "path is inside ahi's own directories",
+            ));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.read_root.open_file(Path::new(relative))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            std::fs::File::open(path)
+        }
     }
 
     pub(crate) fn root(&self) -> &Path {
