@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Both roots are enumerated, never fetched. A name in both is the
-//! operator's. A skill over a cap, with a bad frontmatter, behind a symbolic
+//! repository's. A skill over a cap, with a bad frontmatter, behind a symbolic
 //! link, or whose directory name differs from its `name` is rejected with a
 //! reason: not advertised, not loadable, listed by `ahi doctor`. The text a
 //! skill carries has the authority of a file read with `read_file`: none.
@@ -73,7 +73,7 @@ pub(crate) struct Rejected {
     pub(crate) reason: String,
 }
 
-/// Everything both roots hold, valid and refused, operator shadowing repo.
+/// Everything both roots hold, valid and refused, repo shadowing operator.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
     pub(crate) skills: Vec<Skill>,
@@ -149,14 +149,14 @@ pub(crate) fn enumerate(workdir: &Path, home: Option<&Path>) -> Catalog {
         &mut repo,
         &mut catalog.rejected,
     );
-    // The operator's name wins; the repository cannot shadow it.
-    for (name, skill) in repo {
-        match operator.entry(name) {
+    // The nearest workspace definition wins over the operator default.
+    for (name, skill) in operator {
+        match repo.entry(name) {
             std::collections::btree_map::Entry::Occupied(taken) => {
                 catalog.rejected.push(Rejected {
                     name: taken.key().clone(),
-                    root: Root::Repo,
-                    reason: "an operator skill of the same name shadows it".into(),
+                    root: Root::Operator,
+                    reason: "a repository skill of the same name shadows it".into(),
                 });
             }
             std::collections::btree_map::Entry::Vacant(slot) => {
@@ -164,7 +164,7 @@ pub(crate) fn enumerate(workdir: &Path, home: Option<&Path>) -> Catalog {
             }
         }
     }
-    catalog.skills = operator.into_values().collect();
+    catalog.skills = repo.into_values().collect();
     catalog
 }
 
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn both_roots_are_enumerated_and_the_operator_shadows_the_repo() {
+    fn both_roots_are_enumerated_and_the_repo_shadows_the_operator() {
         let base = crate::fixture_directory::create_unique_fixture_directory("skills");
         let work = base.join("work");
         let config = base.join("config");
@@ -484,7 +484,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [("release", Root::Operator), ("rust-review", Root::Repo)]
+            [("release", Root::Repo), ("rust-review", Root::Repo)]
         );
         assert_eq!(catalog.rejected.len(), 1, "{:?}", catalog.rejected);
         assert!(catalog.rejected[0].reason.contains("shadows"));
@@ -501,12 +501,12 @@ mod tests {
             .contains("declares no reference"));
         assert_eq!(
             read(catalog.get("release").unwrap(), None).unwrap(),
-            "operator release\n"
+            "repo release\n"
         );
         let lines = catalog.doctor_lines();
-        assert_eq!(lines[0], "skills (repo): rust-review");
-        assert_eq!(lines[1], "skills (operator): release");
-        assert!(lines[2].starts_with("skill rejected (repo): release:"));
+        assert_eq!(lines[0], "skills (repo): release, rust-review");
+        assert_eq!(lines[1], "skills (operator): none");
+        assert!(lines[2].starts_with("skill rejected (operator): release:"));
         // No roots at all is no skills and no complaint.
         let empty = enumerate(&base.join("nowhere"), None);
         assert_eq!(empty, Catalog::default());

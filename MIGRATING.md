@@ -8,8 +8,9 @@ resolved by the OS (typically `%USERPROFILE%` on Windows); ahi's XDG and
 Move repository skills from `.ahi/skills` to `.agents/skills`, and operator
 skills from `<ahi config>/skills` to `~/.agents/skills`. Old locations are no
 longer loaded. `ahi doctor` reports a deprecated repository directory if present.
-No files are moved automatically. Operator skills retain precedence over
-repository skills of the same name. Existing tool-policy approvals and symlink
+No files are moved automatically. Repository skills take precedence over
+operator skills of the same name (changed after 0.21.0, which preferred operator
+skills). `ahi doctor` reports the shadowed operator definition. Existing tool-policy approvals and symlink
 restrictions remain unchanged; this does not introduce a new skill allow/deny
 list or implement `AGENTS.md` instruction loading.
 

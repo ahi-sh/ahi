@@ -17,6 +17,7 @@ mod open;
 mod preferences;
 mod scroll_navigation;
 mod selection;
+mod skill_menu;
 mod status;
 pub(crate) mod thinking;
 pub(crate) mod transcript;
@@ -101,6 +102,7 @@ struct ChatScreen {
     scroll_navigation: scroll_navigation::ScrollNavigation,
     mouse_capture: bool,
     settings_menu: CommandMenu,
+    skill_menu: skill_menu::SkillMenu,
     text_selection: selection::Selection,
     copy_receiver: Option<Receiver<bool>>,
     pending_copy: Option<String>,
@@ -238,6 +240,7 @@ impl ChatScreen {
             scroll_navigation: scroll_navigation::ScrollNavigation::default(),
             mouse_capture: true,
             settings_menu: CommandMenu::default(),
+            skill_menu: skill_menu::SkillMenu::default(),
             text_selection: selection::Selection::default(),
             copy_receiver: None,
             pending_copy: None,
@@ -283,6 +286,11 @@ impl ChatScreen {
             .unwrap_or_default();
         let catalog =
             crate::skills::enumerate(&self.workspace_root, std::env::home_dir().as_deref());
+        self.skill_menu.names = catalog
+            .skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
         let skills = header::skills_text(&catalog, &approved);
         let text = header::text(
             120,
@@ -432,6 +440,9 @@ impl ChatScreen {
             return Ok(ScreenAction::Continue);
         }
         if let Event::Mouse(mouse) = event {
+            if !self.skill_menu.dismissed && self.input.skill_query().is_some() {
+                return Ok(ScreenAction::Continue);
+            }
             if !self.settings_menu.dismissed
                 && !CommandMenu::matching(&self.input.contents(), CommandContext::Chat).is_empty()
             {
@@ -519,6 +530,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             Event::Paste(text) => {
+                self.skill_menu.reset();
                 self.settings_menu.reset();
                 self.input.insert_paste(&text);
                 Ok(ScreenAction::Continue)
@@ -532,6 +544,34 @@ impl ChatScreen {
         action: KeyAction,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
+        if !self.skill_menu.dismissed {
+            if let Some(query) = self.input.skill_query() {
+                let names = self.skill_menu.matching(&query);
+                let count = names.len();
+                match action {
+                    KeyAction::Cancel => {
+                        self.skill_menu.dismissed = true;
+                        return Ok(ScreenAction::Continue);
+                    }
+                    KeyAction::Edit(input::EditorKey::Up | input::EditorKey::Down) if count > 0 => {
+                        let delta = if action == KeyAction::Edit(input::EditorKey::Up) {
+                            count - 1
+                        } else {
+                            1
+                        };
+                        self.skill_menu.selected = (self.skill_menu.selected + delta) % count;
+                        return Ok(ScreenAction::Continue);
+                    }
+                    KeyAction::Submit if count > 0 => {
+                        let name = names[self.skill_menu.selected.min(count - 1)].to_string();
+                        self.input.complete_skill(&name);
+                        self.skill_menu.dismissed = true;
+                        return Ok(ScreenAction::Continue);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let text = self.input.contents();
         if action == KeyAction::Submit
             && !text.contains('\n')
@@ -651,6 +691,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Edit(key) => {
+                self.skill_menu.reset();
                 self.settings_menu.reset();
                 self.input.apply(key, self.transcript_width);
                 Ok(ScreenAction::Continue)
@@ -1088,6 +1129,9 @@ impl ChatScreen {
             CommandContext::Chat,
             &settings_status,
         );
+        if let Some(query) = self.input.skill_query() {
+            self.skill_menu.draw(frame, chunks[0], &query);
+        }
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
@@ -1123,6 +1167,7 @@ impl ChatScreen {
             return Ok(ScreenAction::Continue);
         }
         self.input.clear();
+        self.skill_menu.reset();
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim(), backend);
@@ -1133,19 +1178,11 @@ impl ChatScreen {
         Ok(ScreenAction::Continue)
     }
 
-    /// `$name rest` becomes `Use the skill "name".` over `rest`, when a
-    /// rule approves `name`; anything else starting with `$` is refused with
-    /// the reason and the draft is kept.
+    /// Expand `$name` references anywhere in the draft after policy approval.
+    /// Unapproved references keep the entire draft intact.
     fn skill_request(&self, text: &str) -> std::result::Result<String, String> {
-        let Some(rest) = text.trim_start().strip_prefix('$') else {
+        if !text.contains('$') {
             return Ok(text.to_string());
-        };
-        let (name, remainder) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        if !crate::precommit::policy::valid_rule_id(name) {
-            return Err(
-                "`$` names a skill: 1 to 64 letters, digits, '-', '_', or '.'; the draft was kept"
-                    .to_string(),
-            );
         }
         let policy = match &self.actions_file {
             Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
@@ -1156,18 +1193,7 @@ impl ChatScreen {
             .flatten()
             .map(|policy| policy.approved_skills())
             .unwrap_or_default();
-        if !approved.iter().any(|approved| approved == name) {
-            return Err(format!(
-                "no {} rule approves the skill \"{name}\"; the draft was kept",
-                crate::tool_policy::FILE_NAME
-            ));
-        }
-        let remainder = remainder.trim();
-        Ok(if remainder.is_empty() {
-            format!("Use the skill \"{name}\".")
-        } else {
-            format!("Use the skill \"{name}\".\n{remainder}")
-        })
+        skill_menu::expand(text, &approved)
     }
 
     /// Start a turn from the transcript as it stands. Screen-only rows stay
@@ -2583,7 +2609,7 @@ mod tests {
         assert_eq!(backend.requests.len(), 1);
         assert_eq!(
             backend.requests[0].messages.last().unwrap().text,
-            "Use the skill \"rust-review\".\nlook at src"
+            "Use the skill \"rust-review\". look at src"
         );
         assert!(screen.input_text().is_empty());
         screen.set_input_text("$not a name!");
@@ -2610,6 +2636,49 @@ mod tests {
             .contains("no ahi.tools.yaml rule approves"));
         assert_eq!(screen.skill_request("plain text").unwrap(), "plain text");
         let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn skill_picker_inserts_at_cursor_without_sending_and_escape_keeps_draft() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("skill-picker");
+        let mut screen = screen_in(&state);
+        let work = state.join("work");
+        for name in ["review-one", "review-two"] {
+            let dir = work.join(".agents/skills").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Review code\n---\nReview.\n"),
+            )
+            .unwrap();
+        }
+        screen.workspace_root = work;
+        screen.push_header();
+        screen.set_input_text("before $rev after");
+        for _ in 0..6 {
+            screen.input.apply(input::EditorKey::Left, 80);
+        }
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen
+            .apply_action(KeyAction::Edit(input::EditorKey::Down), &mut backend)
+            .unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "before $review-two after");
+        assert!(backend.requests.is_empty());
+        screen
+            .apply_action(KeyAction::Edit(input::EditorKey::Left), &mut backend)
+            .unwrap();
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert!(screen.skill_menu.dismissed);
+        assert_eq!(screen.input_text(), "before $review-two after");
+        assert_eq!(screen.skill_menu.matching("ONE"), ["review-one"]);
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
