@@ -712,12 +712,8 @@ fn doctor(
             for line in crate::cli::tool_policy::doctor_lines(&cwd) {
                 println!("{line}");
             }
-            // Skills: the working directory's `.ahi/skills` and the
-            // operator's `<config>/skills`, valid and refused with reasons.
-            let config = Directories::resolve(state, cache)
-                .ok()
-                .map(|dirs| dirs.config);
-            for line in crate::skills::doctor_lines(&cwd, config.as_deref()) {
+            // Shared skills are independent of ahi's configuration/state overrides.
+            for line in crate::skills::doctor_lines(&cwd, std::env::home_dir().as_deref()) {
                 println!("{line}");
             }
         }

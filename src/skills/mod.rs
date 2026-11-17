@@ -3,8 +3,8 @@
 //! directory named after it, under one of two roots:
 //!
 //! ```text
-//! <workdir>/.ahi/skills/<name>/SKILL.md    repo skills, the repository's text
-//! <config>/skills/<name>/SKILL.md          operator skills, outside every workdir
+//! <workdir>/.agents/skills/<name>/SKILL.md repo skills, the repository's text
+//! <home>/.agents/skills/<name>/SKILL.md    operator skills, outside every workdir
 //! ```
 //!
 //! Both roots are enumerated, never fetched. A name in both is the
@@ -12,7 +12,7 @@
 //! link, or whose directory name differs from its `name` is rejected with a
 //! reason: not advertised, not loadable, listed by `ahi doctor`. The text a
 //! skill carries has the authority of a file read with `read_file`: none.
-//! `.ahi/skills` is protected from the model's writes so a model cannot
+//! `.agents/skills` is protected from the model's writes so a model cannot
 //! author a skill it later loads.
 
 use std::collections::BTreeMap;
@@ -30,9 +30,9 @@ pub(crate) const MAX_REFERENCES: usize = 16;
 /// `description` and `when` at most this long.
 const MAX_LINE_BYTES: usize = 256;
 /// The repo root, relative to the working directory.
-pub(crate) const REPO_ROOT: &str = ".ahi/skills";
-/// The operator root, relative to the config directory.
-pub(crate) const OPERATOR_ROOT: &str = "skills";
+pub(crate) const REPO_ROOT: &str = ".agents/skills";
+/// The operator root, relative to the OS-resolved home directory.
+pub(crate) const OPERATOR_ROOT: &str = ".agents/skills";
 const SKILL_FILE: &str = "SKILL.md";
 
 /// Which root answered for a skill.
@@ -119,18 +119,24 @@ impl Catalog {
 }
 
 /// `ahi doctor`: the skills both roots hold, valid and refused.
-pub fn doctor_lines(workdir: &Path, config: Option<&Path>) -> Vec<String> {
-    enumerate(workdir, config).doctor_lines()
+pub fn doctor_lines(workdir: &Path, home: Option<&Path>) -> Vec<String> {
+    let mut lines = enumerate(workdir, home).doctor_lines();
+    if workdir.join(".ahi/skills").exists() {
+        lines.push(
+            "skills: .ahi/skills is deprecated and ignored; move skills to .agents/skills".into(),
+        );
+    }
+    lines
 }
 
 /// Enumerate the repo root under `workdir` and, when given, the operator
-/// root under `config`. Either root may be absent, which is no skills.
-pub(crate) fn enumerate(workdir: &Path, config: Option<&Path>) -> Catalog {
+/// root under `home`. Either root may be absent, which is no skills.
+pub(crate) fn enumerate(workdir: &Path, home: Option<&Path>) -> Catalog {
     let mut catalog = Catalog::default();
     let mut operator: BTreeMap<String, Skill> = BTreeMap::new();
-    if let Some(config) = config {
+    if let Some(home) = home {
         scan_root(
-            &config.join(OPERATOR_ROOT),
+            &home.join(OPERATOR_ROOT),
             Root::Operator,
             &mut operator,
             &mut catalog.rejected,
@@ -208,7 +214,7 @@ fn scan_root(
     rejected: &mut Vec<Rejected>,
 ) {
     // The root and everything above it inside the checkout must be real
-    // directories: a symbolic link at `.ahi` or at `skills` would point the
+    // directories: a symbolic link at `.agents` or at `skills` would point the
     // whole root elsewhere.
     match no_link_chain(root) {
         Ok(false) => return,
@@ -337,7 +343,7 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
 }
 
 /// `Ok(true)` when `root` is a directory reached through no symbolic link
-/// from its grandparent down (`.ahi`, then `skills`); `Ok(false)` when it
+/// from its grandparent down (`.agents`, then `skills`); `Ok(false)` when it
 /// does not exist.
 fn no_link_chain(root: &Path) -> Result<bool, String> {
     let mut checked = Vec::new();
@@ -420,10 +426,15 @@ fn one_line(field: &str, value: &str) -> Result<(), String> {
 }
 
 /// Whether a normalized workspace-relative path may never be written by a
-/// tool because it would author or replace a skill: `.ahi` itself and
-/// everything under `.ahi/skills`.
+/// tool because it would author or replace a skill: the root directories and
+/// everything under `.agents/skills` and the retired `.ahi/skills`.
 pub(crate) fn protected_write(path: &str) -> bool {
-    path == ".ahi" || path == REPO_ROOT || path.starts_with(".ahi/skills/")
+    path == ".agents"
+        || path == REPO_ROOT
+        || path.starts_with(".agents/skills/")
+        || path == ".ahi"
+        || path == ".ahi/skills"
+        || path.starts_with(".ahi/skills/")
 }
 
 #[cfg(test)]
@@ -624,22 +635,22 @@ mod tests {
     fn a_linked_skills_root_is_refused_whole() {
         let base = crate::fixture_directory::create_unique_fixture_directory("skills-root");
         let work = base.join("work");
-        fs::create_dir_all(work.join(".ahi")).unwrap();
+        fs::create_dir_all(work.join(".agents")).unwrap();
         fs::create_dir_all(base.join("outside/x")).unwrap();
         fs::write(
             base.join("outside/x/SKILL.md"),
             "---\nname: x\ndescription: x\n---\n",
         )
         .unwrap();
-        std::os::unix::fs::symlink(base.join("outside"), work.join(".ahi/skills")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), work.join(".agents/skills")).unwrap();
         let catalog = enumerate(&work, None);
         assert!(catalog.skills.is_empty());
         assert_eq!(catalog.rejected.len(), 1);
         assert!(catalog.rejected[0].reason.contains("symbolic link"));
-        // The same when `.ahi` itself is the link.
+        // The same when `.agents` itself is the link.
         let work2 = base.join("work2");
         fs::create_dir_all(&work2).unwrap();
-        std::os::unix::fs::symlink(base.join("outside"), work2.join(".ahi")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), work2.join(".agents")).unwrap();
         let catalog = enumerate(&work2, None);
         assert!(catalog.skills.is_empty());
         assert!(catalog.rejected[0].reason.contains("symbolic link"));
@@ -647,7 +658,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_repo_skills_are_ignored_with_migration_guidance() {
+        let base = crate::fixture_directory::create_unique_fixture_directory("legacy-skills");
+        fs::create_dir_all(base.join(".ahi/skills/old")).unwrap();
+        fs::write(
+            base.join(".ahi/skills/old/SKILL.md"),
+            "---\nname: old\ndescription: legacy\n---\n",
+        )
+        .unwrap();
+        assert!(enumerate(&base, None).skills.is_empty());
+        assert_eq!(
+            doctor_lines(&base, None).last().unwrap(),
+            "skills: .ahi/skills is deprecated and ignored; move skills to .agents/skills"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn the_skills_root_is_protected_from_writes() {
+        assert!(protected_write(".agents"));
+        assert!(protected_write(".agents/skills"));
+        assert!(protected_write(".agents/skills/x/SKILL.md"));
+        assert!(!protected_write(".agents/other.txt"));
         assert!(protected_write(".ahi"));
         assert!(protected_write(".ahi/skills"));
         assert!(protected_write(".ahi/skills/x/SKILL.md"));

@@ -1169,7 +1169,7 @@ fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
         "reviewed",
     ));
     let dir = fixture(&url);
-    let skill = dir.join("work/.ahi/skills/rust-review");
+    let skill = dir.join("work/.agents/skills/rust-review");
     fs::create_dir_all(&skill).unwrap();
     fs::write(
         skill.join("SKILL.md"),

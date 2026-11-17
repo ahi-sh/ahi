@@ -581,7 +581,7 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                 return Err("a file path is required");
             }
             if protected(&path) {
-                return Err("path is protected: ahi policy files, hook configuration, .gitignore, .git, and .ahi/skills are never written by tools");
+                return Err("path is protected: ahi policy files, hook configuration, .gitignore, .git, .agents/skills, and .ahi/skills are never written by tools");
             }
             only(no_paging && no_search)?;
             if tool == EDIT_FILE {

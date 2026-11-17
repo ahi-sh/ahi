@@ -59,7 +59,16 @@ pub(crate) fn paragraphs(message: &ChatMessage, options: &Options, width: usize)
                         styled.push(mark, theme::heading());
                         styled.push(&line[mark.len()..], theme::dim());
                     }
-                    _ => styled.push(line, theme::dim()),
+                    _ => {
+                        if crate::chat::header::SETUP_LINES.contains(&line)
+                            || line.starts_with("Skills")
+                            || line.starts_with("Skill: ")
+                        {
+                            let pad = width.saturating_sub(line.width()) / 2;
+                            styled.push(&" ".repeat(pad), Style::default());
+                        }
+                        styled.push(line, theme::dim());
+                    }
                 }
                 annotate_links(&mut styled, options, false);
                 styled
@@ -1182,6 +1191,19 @@ mod tests {
             format!("{}done in 12s · 14:02", " ".repeat(11))
         );
         assert_eq!(out[0].spans.last().unwrap().style, theme::dim());
+    }
+
+    #[test]
+    fn startup_setup_is_centered_at_the_render_width() {
+        let text = crate::chat::header::text(120, "m", "g", "medium", "ahi", false);
+        let message = ChatMessage::new(TranscriptRole::Notice, text);
+        for width in [40, 80, 120] {
+            let out = paragraphs(&message, &options(), width);
+            let wizard = &out[6].text;
+            let expected = "Wizard: ahi tools init --interactive --write";
+            assert_eq!(wizard.trim_start(), expected);
+            assert_eq!(wizard.len() - expected.len(), width.saturating_sub(43) / 2);
+        }
     }
 
     #[test]
