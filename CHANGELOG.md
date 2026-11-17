@@ -13,6 +13,10 @@
 - Discover repository skills in `.agents/skills` and operator skills in `~/.agents/skills`, using the OS-resolved home directory independently of ahi configuration/state overrides. Operator skills retain precedence. Tool-policy approvals and symlink restrictions remain unchanged.
 - Stop loading `.ahi/skills` and `<ahi config>/skills`. `ahi doctor` reports the deprecated repository path; see `MIGRATING.md` for manual migration instructions. No files are moved automatically, and this does not add `AGENTS.md` instruction loading.
 
+### Fixed
+
+- Release package verification uses a fresh temporary target directory so stale local member archives cannot contaminate the release gate.
+
 ## 0.20.0 (2026-11-16)
 
 ### Changed
