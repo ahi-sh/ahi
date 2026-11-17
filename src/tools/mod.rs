@@ -775,8 +775,7 @@ pub(super) fn execute(
             })
         }
         Arguments::Read { offset, limit } => {
-            let path = workspace.resolve(&call.path)?;
-            let content = read_file::run(&path, *offset, *limit)?;
+            let content = read_file::run(workspace, &call.path, *offset, *limit)?;
             Ok(Executed {
                 detail: Some(ToolDetail::Read {
                     offset: *offset,

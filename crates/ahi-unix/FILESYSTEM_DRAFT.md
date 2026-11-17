@@ -1,53 +1,64 @@
-# Issue #39: bounded search-open hardening draft
+# Issue #39: shared workspace read-opening API draft
 
-## Implemented scope
+## Goal and structure
 
-On macOS and Linux, `Workspace` opens a directory descriptor at initialization.
-`search_files` opens each candidate through that descriptor, one component at a
-time, with `openat` and `O_NOFOLLOW`; ancestors also require `O_DIRECTORY`.
-The final open uses `O_NONBLOCK` so a substituted FIFO does not block before
-regular-file validation. `O_CLOEXEC` prevents descriptor inheritance on exec.
-Owned `std::fs::File` values close descriptors and provide metadata/read APIs.
-There are no new registry dependencies, handwritten stat layouts, custom
-readdir implementation, or unsafe blocks in the main crate.
+Give builtin file readers one consistent opening operation, rather than separate
+path validation, opening, and metadata logic per tool. This is a code/API
+improvement, not a security boundary. Sandboxes remain the containment mechanism.
 
-The root is a trusted bootstrap boundary: canonicalization and opening that root
-are not an atomic operation. After it is opened, replacement of the root pathname
-does not redirect reads. Excluded ahi directories are checked lexically before
-candidate opening, as well as being pruned during enumeration.
+`Workspace::open_read` owns relative-path validation, existing exact-spelling and
+symlink rules, ahi-directory exclusions, platform opening, and regular-file
+validation. It returns `OpenedRead`: an owned file and its size observed from the
+same handle. A file can still change after this snapshot.
 
-## Exact guarantee and remaining gaps
+The named tool modules remain intact:
 
-Candidate file content is not read through a substituted symlink, whether the
-symlink replaces the final file or an ancestor. This is not complete filesystem
-containment and is not a sandbox.
+- `src/tools/read_file.rs` calls `open_read`, then owns UTF-8 handling, pagination,
+  and its file/output limits.
+- `src/tools/search_files.rs` calls `open_read`, then owns matching, binary-file
+  handling, budgets, and skip-on-open-error behavior.
+- `src/tools/workspace.rs` owns the common opening contract.
+- `crates/ahi-unix/src/directory.rs` owns the platform-specific descriptor API.
 
-- The tree walker and `.gitignore` loading still use pathname APIs. This change
-  does not secure enumeration or prevent disclosure of names from raced walks.
-- `read_file`, skill loading, editing, writing, and listing are unchanged.
-- Windows and other platforms retain the existing pathname-based search opens;
-  no equivalent hardening is claimed there.
-- Root bootstrap races, hard links, mounts, and renaming already-open directories
-  are not addressed. In particular, path-based exclusions are not inode-based
-  access controls and do not survive adversarial moves of protected content.
-- Arbitrary shell execution remains outside builtin file-tool protections.
-- Deep paths require more opens than before. No performance improvement is
-  claimed; directory handle reuse/custom iteration is deferred.
+No search-only opening API remains. Search now applies the same path-spelling and
+exclusion checks as direct reads, rather than relying solely on enumeration.
 
-## Verification and next review gates
+## Platform implementation
 
-Deterministic tests enumerate a candidate, replace the file or an ancestor with
-an outside symlink, and invoke the real scanner. They verify refusal, normal
-matching output, exclusion checks, recovery after failed opens, root-handle
-anchoring, and rejection of traversal/absolute/NUL paths.
+On macOS and Linux, Workspace opens a directory descriptor at initialization.
+Descendant opens use `openat`, one component at a time, with `O_NOFOLLOW`;
+ancestors also require `O_DIRECTORY`. The final open uses `O_NONBLOCK` so a FIFO
+replacement does not block before regular-file validation. `O_CLOEXEC` prevents
+descriptor inheritance on exec. Owned standard File values close descriptors;
+Workspace obtains metadata from that handle before either tool reads it.
 
-Local execution is on macOS. Linux flag values and behavior still require Linux
-execution; Windows fallback requires its normal CI build/test coverage. Before
-merge, review platform ABI constants, descriptor lifetime/close-on-exec, and add
-bounded FIFO/descriptor-leak checks. Benchmark only to assess regression, not to
-justify a speedup claim.
+There are no new registry dependencies, handwritten stat layouts, custom readdir
+implementation, or unsafe blocks in the main crate. Other platforms use pathname
+opening behind the same shared checks. Platform guarantees are not identical.
 
-This is an unpublished draft. The changed `ahi-unix` crate must receive a new
-version and the root dependency pin/lockfile must follow before release; the
-published-member immutability gate is intentionally not satisfied by reusing
-0.3.1. Do not publish this tree as-is.
+## Deliberate limits
+
+- Directory traversal and `.gitignore` loading retain their pathname APIs.
+- Editing, writing, listing, and skill loading are not migrated: their operations
+  and allowed roots differ from these two file readers.
+- Root bootstrap races, hard links, mounts, and renames of already-open
+  directories are not addressed. Path exclusions are not inode access controls.
+- Shell execution remains outside builtin file-tool rules.
+- Shared canonical path checks and component-wise opens may cost more than the
+  previous search path. No performance improvement is claimed.
+
+## Verification and remaining gates
+
+Tests exercise ordinary reads and search output, non-regular-file refusal,
+excluded paths, file/ancestor replacement with symlinks, recovery after failed
+opens, descriptor root anchoring, and invalid paths. Existing tool tests cover
+pagination, UTF-8, search matching, and budgets. Direct descriptor tests ensure
+symlink refusal is not tested solely through the prior canonical-path check.
+
+Local execution is on macOS. Linux ABI constants/behavior need Linux execution;
+Windows fallback needs its normal CI coverage. Descriptor-leak/FIFO checks and
+representative overhead measurements remain useful before merge.
+
+This is an unpublished draft. Before release, bump the changed ahi-unix crate and
+update the root dependency pin/lockfile. The published-member immutability gate
+must not be bypassed by publishing altered contents as 0.3.1.

@@ -1,8 +1,14 @@
-//! Containment of tool paths to the working directory.
+//! Shared workspace path rules and file-opening operations, not a sandbox.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+
+/// A regular file and its size observed on the same open handle.
+pub(super) struct OpenedRead {
+    pub(super) file: std::fs::File,
+    pub(super) size: u64,
+}
 
 pub(crate) struct Workspace {
     root: PathBuf,
@@ -34,28 +40,39 @@ impl Workspace {
         })
     }
 
-    /// Search candidates are untrusted names even after enumeration. On
-    /// macOS/Linux, reopen through the anchored descriptor without following
-    /// any symlink. Other platforms retain the existing pathname behavior.
-    pub(super) fn open_search_file(&self, relative: &str) -> std::io::Result<std::fs::File> {
-        let mut path = self.root.clone();
-        for part in relative.split('/').filter(|part| !part.is_empty()) {
-            path.push(part);
+    /// Apply the shared path rules and open a regular file for reading.
+    /// Metadata comes from the opened handle, not a separate pathname lookup.
+    /// macOS/Linux additionally refuse symlinks during component-wise opens;
+    /// other platforms retain pathname opening. Neither is a sandbox.
+    pub(super) fn open_read(
+        &self,
+        relative: &str,
+    ) -> std::result::Result<OpenedRead, &'static str> {
+        if relative.is_empty()
+            || Path::new(relative)
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || relative.contains('\0')
+        {
+            return Err("a relative file path is required");
         }
-        if self.is_excluded(&path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "path is inside ahi's own directories",
-            ));
-        }
+        let path = self.resolve(relative)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
+        let file = {
+            let _ = path;
             self.read_root.open_file(Path::new(relative))
-        }
+        };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            std::fs::File::open(path)
+        let file = std::fs::File::open(path);
+        let file = file.map_err(|_| "cannot read file")?;
+        let metadata = file.metadata().map_err(|_| "cannot read file metadata")?;
+        if !metadata.is_file() {
+            return Err("not a regular file");
         }
+        Ok(OpenedRead {
+            file,
+            size: metadata.len(),
+        })
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -107,8 +124,9 @@ impl Workspace {
     /// lexical join, so no symbolic link is followed, inside or outside, and a
     /// differently cased spelling of a real path (which `realpath` corrects on
     /// case-insensitive filesystems) is refused rather than matched by policy.
-    /// The remaining window between this check and the read is accepted for
-    /// read-only tools; a sandbox, not this check, contains a hostile process.
+    /// This validates a pathname, not an open handle. File readers use
+    /// `open_read`; operations needing a path keep their own opening semantics.
+    /// A sandbox, not these checks, contains a hostile process.
     pub(super) fn resolve(&self, normalized: &str) -> std::result::Result<PathBuf, &'static str> {
         // Push components one at a time: a Windows verbatim (`\\?\`) root
         // keeps a joined `/` literally, which would never match canonically.

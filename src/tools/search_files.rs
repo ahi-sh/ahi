@@ -215,17 +215,11 @@ impl<'a> Scanner<'a> {
     }
 
     fn scan(&mut self, relative: &str) -> FileResult {
-        let Ok(mut file) = self.workspace.open_search_file(relative) else {
+        let Ok(opened) = self.workspace.open_read(relative) else {
             return FileResult::Skipped;
         };
-        // fstat on the open descriptor: no second path lookup.
-        let Ok(metadata) = file.metadata() else {
-            return FileResult::Skipped;
-        };
-        if !metadata.is_file() {
-            return FileResult::Skipped;
-        }
-        let len = metadata.len();
+        let mut file = opened.file;
+        let len = opened.size;
         if len > MAX_FILE_BYTES {
             return FileResult::Skipped;
         }

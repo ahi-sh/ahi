@@ -16,6 +16,7 @@ fn discovered_names_cannot_be_replaced_by_file_or_ancestor_symlinks() {
         &crate::directories::Directories::single_root(root.join("state")),
     )
     .unwrap();
+    let directory = ahi_unix::directory::Directory::open(workspace.root()).unwrap();
     let tree = walk::walk(&workspace, workspace.root(), "").unwrap();
     let candidate = tree
         .files()
@@ -28,14 +29,30 @@ fn discovered_names_cannot_be_replaced_by_file_or_ancestor_symlinks() {
         FileResult::Hits(hits) => assert_eq!(hits.rendered, "nested/data.txt:1:needle inside"),
         _ => panic!("ordinary descendant must be readable"),
     }
-    // Deterministic replacement after enumeration, before the scanner opens.
+    assert_eq!(
+        crate::tools::read_file::run(&workspace, candidate, None, None),
+        Ok("needle inside\n".into())
+    );
+    assert_eq!(
+        crate::tools::read_file::run(&workspace, "nested", None, None),
+        Err("not a regular file")
+    );
+    assert_eq!(
+        crate::tools::read_file::run(&workspace, "state/secret.txt", None, None),
+        Err("path is inside ahi's own directories, which tools cannot read")
+    );
+    // Deterministic replacement after enumeration, before the tools open.
     fs::remove_file(root.join(candidate)).unwrap();
     symlink(outside.join("data.txt"), root.join(candidate)).unwrap();
+    assert!(directory.open_file(Path::new(candidate)).is_err());
     assert!(matches!(scanner.scan(candidate), FileResult::Skipped));
+    assert!(crate::tools::read_file::run(&workspace, candidate, None, None).is_err());
     fs::remove_file(root.join(candidate)).unwrap();
     fs::remove_dir(root.join("nested")).unwrap();
     symlink(&outside, root.join("nested")).unwrap();
+    assert!(directory.open_file(Path::new(candidate)).is_err());
     assert!(matches!(scanner.scan(candidate), FileResult::Skipped));
+    assert!(crate::tools::read_file::run(&workspace, candidate, None, None).is_err());
     assert!(matches!(
         scanner.scan("state/secret.txt"),
         FileResult::Skipped
@@ -47,6 +64,10 @@ fn discovered_names_cannot_be_replaced_by_file_or_ancestor_symlinks() {
         FileResult::Hits(hits) => assert_eq!(hits.rendered, "nested/data.txt:1:needle restored"),
         _ => panic!("failed opens must not poison subsequent reads"),
     }
+    assert_eq!(
+        crate::tools::read_file::run(&workspace, candidate, None, None),
+        Ok("needle restored\n".into())
+    );
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(outside).unwrap();
 }

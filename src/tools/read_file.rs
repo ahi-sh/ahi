@@ -2,9 +2,9 @@
 //! bytes; when it does not fit, the tail names the next `offset` so the model
 //! can continue without rereading.
 
-use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+
+use super::workspace::Workspace;
 
 pub(super) const MAX_BYTES: usize = 64 * 1024;
 /// Files beyond this are read only through `offset`/`limit` windows that
@@ -14,23 +14,20 @@ const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// `offset` is a 1-based first line; `limit` a number of lines. `None`
 /// means from the start, or to the end.
 pub(super) fn run(
-    path: &Path,
+    workspace: &Workspace,
+    relative: &str,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, &'static str> {
-    let metadata = path.metadata().map_err(|_| "cannot read file metadata")?;
-    if !metadata.is_file() {
-        return Err("not a regular file");
-    }
-    if metadata.len() > MAX_FILE_BYTES {
+    let opened = workspace.open_read(relative)?;
+    if opened.size > MAX_FILE_BYTES {
         return Err("file is larger than 64 MiB");
     }
     let first = offset.unwrap_or(1).max(1);
     let wanted = limit.unwrap_or(usize::MAX).max(1);
     let paged = offset.is_some() || limit.is_some();
 
-    let mut reader =
-        BufReader::with_capacity(64 * 1024, File::open(path).map_err(|_| "cannot read file")?);
+    let mut reader = BufReader::with_capacity(64 * 1024, opened.file);
     let mut body = String::new();
     let mut raw = Vec::new();
     let mut line_number = 0usize;

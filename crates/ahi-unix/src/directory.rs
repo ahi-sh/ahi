@@ -47,7 +47,9 @@ impl Directory {
             .map(Self)
     }
 
-    /// Open a regular descendant file, refusing symlinks at every component.
+    /// Open a descendant for reading, refusing symlinks at every component.
+    /// The caller must inspect metadata before reading; this can return a
+    /// directory or another non-regular file.
     /// Absolute paths, parent traversal, empty paths and NULs are rejected.
     /// Nonblocking open prevents a substituted FIFO from hanging before fstat.
     pub fn open_file(&self, relative: &Path) -> io::Result<File> {
@@ -92,12 +94,6 @@ impl Directory {
             // It is transferred exactly once to File, which closes it on drop.
             let file = unsafe { File::from_raw_fd(fd) };
             if last {
-                if !file.metadata()?.is_file() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "not a regular file",
-                    ));
-                }
                 return Ok(file);
             }
             parent = Some(file);
