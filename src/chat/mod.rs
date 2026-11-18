@@ -123,6 +123,7 @@ struct ChatScreen {
     location_receiver: Option<Receiver<(String, Option<location::GitStatus>)>>,
     /// The backend is between connection attempts: (next attempt, of).
     reconnecting: Option<(u8, u8)>,
+    command_running: bool,
     /// The last turn failed before the gateway was reached, so Enter on a
     /// blank input sends the same transcript again.
     resend_available: bool,
@@ -168,7 +169,10 @@ impl ChatScreen {
     /// last success.
     fn load_resumed(state_dir: &Directories, stored: session::Session) -> Self {
         let settings = stored.settings();
-        let messages = stored.active_messages(None);
+        let mut messages = stored.active_messages(None);
+        if let Some(partial) = stored.partial_notice() {
+            messages.push(ChatMessage::new(TranscriptRole::Notice, partial));
+        }
         let id = stored.id().to_string();
         let screen = Self::load_recording(
             state_dir,
@@ -187,7 +191,11 @@ impl ChatScreen {
             &format!("{}/{}", settings.gateway, settings.model),
             session::recorder::Recorder::new(false, "tui"),
         );
-        Self::resumed_from(screen, &settings, stored.active_messages(None), stored.id())
+        let mut messages = stored.active_messages(None);
+        if let Some(partial) = stored.partial_notice() {
+            messages.push(ChatMessage::new(TranscriptRole::Notice, partial));
+        }
+        Self::resumed_from(screen, &settings, messages, stored.id())
     }
 
     fn resumed_from(
@@ -257,6 +265,7 @@ impl ChatScreen {
             location_dirty: false,
             location_receiver: None,
             reconnecting: None,
+            command_running: false,
             resend_available: false,
             turn_skills: Vec::new(),
         };
@@ -763,6 +772,7 @@ impl ChatScreen {
 
     /// Per-frame work that is not driven by an event.
     fn tick(&mut self) {
+        self.recorder.checkpoint();
         if self.text_selection.edge(self.transcript_area).is_none() {
             self.auto_scroll_at = None;
             return;
@@ -1062,6 +1072,7 @@ impl ChatScreen {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             let verb = match self.reconnecting {
                 Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
+                None if self.command_running => "Running command".to_string(),
                 None => "Working".to_string(),
             };
             let clock = self
@@ -1249,6 +1260,7 @@ impl ChatScreen {
         self.meters.context_window = None;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
+        self.command_running = false;
         self.assistant_open = false;
         self.turn_started = Some(Instant::now());
         self.report_status(crate::program_status::State::Working, "");
@@ -1494,6 +1506,12 @@ impl ChatScreen {
                 self.meters.set_context_window(window);
                 false
             }
+            ResponseEvent::CommandStarted { call_id } => {
+                self.command_running = true;
+                self.recorder.command_started(call_id);
+                self.report_status(crate::program_status::State::Working, "running command");
+                false
+            }
             ResponseEvent::ToolCallReturned => {
                 // A tool may change HEAD even when it reports an error.
                 // Refresh once per drained batch, never on the rendering timer.
@@ -1510,6 +1528,7 @@ impl ChatScreen {
                 elapsed,
                 record,
             } => {
+                self.command_running = false;
                 let presentation = ahi_durable::ToolPresentation::new(detail, elapsed);
                 self.recorder.tool_result(
                     &call_id,
@@ -1600,6 +1619,40 @@ impl ChatScreen {
 
     fn push_alert(&mut self, text: String) {
         self.push_message(ChatMessage::new(TranscriptRole::Alert, text));
+    }
+
+    fn close_active_turn(&mut self, backend: &mut dyn CompletionBackend) -> Result<()> {
+        if !self.response_in_progress {
+            return Ok(());
+        }
+        backend.cancel_on_exit().map_err(Error::new)?;
+        self.approval = None;
+        if backend.session_id().is_none() {
+            // The standalone recorder owns this turn. Give a running command
+            // time to stop and record its result; never hang on a silent SSE read.
+            let deadline = Instant::now() + crate::service::CANCEL_GRACE;
+            if let Some(receiver) = self.receiver.take() {
+                while Instant::now() < deadline {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(ResponseEvent::Completed) => {
+                            self.recorder.end_turn();
+                            break;
+                        }
+                        Ok(ResponseEvent::Failed { .. }) | Err(_) => break,
+                        Ok(ResponseEvent::ToolApprovalRequested(_)) => {}
+                        Ok(event) => {
+                            self.apply_event(event);
+                        }
+                    }
+                }
+            }
+            self.recorder.cancel_turn();
+            if let Some(err) = self.recorder.failure() {
+                return Err(Error::new(err));
+            }
+        }
+        Ok(())
     }
 
     /// Esc during a response. The partial reply stays in the transcript and
@@ -1853,7 +1906,10 @@ fn interact_screen(
         cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
         let outcome = outcome?;
         match outcome {
-            SessionEnd::Exit => return Ok(screen.finish_session(backend)),
+            SessionEnd::Exit => {
+                screen.close_active_turn(backend)?;
+                return Ok(screen.finish_session(backend));
+            }
             SessionEnd::Login => {
                 let notice = match crate::tui::login::run(state_dir) {
                     Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),

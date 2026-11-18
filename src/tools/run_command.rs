@@ -94,6 +94,7 @@ pub(super) fn run(
     timeout_secs: u64,
     toolchain_env: &[String],
     cancel: &AtomicBool,
+    command_started: impl FnOnce(),
 ) -> Result<(String, CommandReport, CommandOutput), RunError> {
     let (program, args) = argv
         .split_first()
@@ -132,6 +133,7 @@ pub(super) fn run(
     let mut child = command
         .spawn()
         .map_err(|_| RunError::before("cannot start the program (not found or not executable)"))?;
+    command_started();
     let stdout = child
         .stdout
         .take()

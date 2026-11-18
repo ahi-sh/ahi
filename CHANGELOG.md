@@ -4,6 +4,8 @@
 
 ### Added
 
+- Streaming sessions checkpoint partial prose during generation. Quit cancels and closes the active turn, and resume shows interrupted prose without replaying it to the model. Commands record successful spawn separately from their result.
+- Opt-in policy selectors for operator skill reads and skill-relative commands; this checkout allows bundled scripts under both skill scopes without enumerating them.
 - Shared explicit skill loading for TUI, `exec`, headless, and session-service turns: a picker selection, `--skill SCOPE/NAME`, or the service's `skills` field loads approved instructions once before inference through the existing approval, audit, and replay path. The original prompt and its digest remain unchanged.
 - Portable frontmatter accepts informational metadata and extension fields, descriptions up to 1024 Unicode characters, and `disable-model-invocation` for manual-only skills. Model-facing routing metadata includes source and location without injecting whole metadata blocks.
 - `load_skill` can read nested supporting text inside the skill directory without a frontmatter reference list. Reads remain bounded, refuse traversal and symlinks, and never execute scripts or grant tool permissions.

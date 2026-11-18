@@ -11,6 +11,11 @@
 //! conversation.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+// Bound both time at risk and individual writes, without journaling tokens.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
+const CHECKPOINT_BYTES: usize = 8 * 1024;
 
 use serde_json::json;
 
@@ -31,10 +36,14 @@ pub(crate) struct Recorder {
     pending: Vec<Kind>,
     /// Assistant text since the last tool round.
     segment: String,
+    checkpointed: usize,
+    checkpoint_due: Option<Instant>,
     turn: Option<OpenTurn>,
     failed: Option<String>,
-    /// Entries written since `take_fresh`, for a fan-out to followers.
-    fresh: Vec<super::Entry>,
+    failure_reported: bool,
+    /// Next entry to publish to service subscribers. Standalone TUI sessions
+    /// do not need a second in-memory copy of the journal.
+    published: usize,
 }
 
 struct OpenTurn {
@@ -53,9 +62,12 @@ impl Recorder {
             parent: None,
             pending: Vec::new(),
             segment: String::new(),
+            checkpointed: 0,
+            checkpoint_due: None,
             turn: None,
             failed: None,
-            fresh: Vec::new(),
+            failure_reported: false,
+            published: 0,
         }
     }
 
@@ -63,15 +75,10 @@ impl Recorder {
     pub(crate) fn resumed(session: Session, origin: &'static str) -> Self {
         let parent = session.active_parent();
         Self {
-            enabled: true,
-            origin,
+            published: session.entries().len(),
             session: Some(session),
             parent,
-            pending: Vec::new(),
-            segment: String::new(),
-            turn: None,
-            failed: None,
-            fresh: Vec::new(),
+            ..Self::new(true, origin)
         }
     }
 
@@ -87,7 +94,12 @@ impl Recorder {
 
     /// Entries written since the last call, in write order.
     pub(crate) fn take_fresh(&mut self) -> Vec<super::Entry> {
-        std::mem::take(&mut self.fresh)
+        let Some(session) = &self.session else {
+            return Vec::new();
+        };
+        let fresh = session.entries()[self.published..].to_vec();
+        self.published = session.entries().len();
+        fresh
     }
 
     /// `/clear`: the next turn starts a new session.
@@ -98,12 +110,21 @@ impl Recorder {
         self.segment.clear();
         self.turn = None;
         self.failed = None;
-        self.fresh.clear();
+        self.failure_reported = false;
+        self.published = 0;
     }
 
     /// The first write failure, once. The screen shows it as an alert.
     pub(crate) fn take_failure(&mut self) -> Option<String> {
-        self.failed.take()
+        if self.failure_reported {
+            return None;
+        }
+        self.failure_reported = self.failed.is_some();
+        self.failed.clone()
+    }
+
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failed.as_deref()
     }
 
     /// The operator sent `prompt`: open the session when this is its first
@@ -149,6 +170,8 @@ impl Recorder {
         if !self.enabled || self.failed.is_some() || self.session.is_none() {
             return;
         }
+        self.checkpointed = 0;
+        self.checkpoint_due = None;
         self.segment.clear();
         self.turn = Some(OpenTurn {
             run_id,
@@ -163,8 +186,43 @@ impl Recorder {
     }
 
     pub(crate) fn text(&mut self, delta: &str) {
-        if self.turn.is_some() {
+        if self.turn.is_some() && !delta.is_empty() {
             self.segment.push_str(delta);
+            self.checkpoint_due
+                .get_or_insert_with(|| Instant::now() + CHECKPOINT_INTERVAL);
+            self.checkpoint();
+        }
+    }
+
+    pub(crate) fn checkpoint(&mut self) {
+        if self.turn.is_none() || self.failed.is_some() {
+            return;
+        }
+        while self.checkpointed < self.segment.len() {
+            let pending = &self.segment[self.checkpointed..];
+            if pending.len() < CHECKPOINT_BYTES
+                && !self.checkpoint_due.is_some_and(|at| Instant::now() >= at)
+            {
+                break;
+            }
+            let mut end = CHECKPOINT_BYTES.min(pending.len());
+            while !pending.is_char_boundary(end) {
+                end -= 1;
+            }
+            let delta = pending[..end].to_owned();
+            self.record(Kind::TextCheckpoint { delta });
+            self.checkpointed += end;
+            self.checkpoint_due = (self.checkpointed < self.segment.len())
+                .then(|| Instant::now() + CHECKPOINT_INTERVAL);
+            if self.failed.is_some() {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn command_started(&mut self, call_id: String) {
+        if self.turn.is_some() {
+            self.record(Kind::CommandStarted { call_id });
         }
     }
 
@@ -174,6 +232,8 @@ impl Recorder {
             return;
         }
         let text = std::mem::take(&mut self.segment);
+        self.checkpointed = 0;
+        self.checkpoint_due = None;
         self.record(Kind::Message(StoredMessage {
             role: Role::Assistant,
             text,
@@ -334,7 +394,6 @@ impl Recorder {
         match session.append(self.parent, kinds) {
             Ok(entries) => {
                 self.parent = entries.last().map(|entry| entry.seq);
-                self.fresh.extend_from_slice(entries);
             }
             Err(err) => self.failed = Some(err.to_string()),
         }
@@ -364,9 +423,36 @@ mod tests {
                 Kind::ModelChange { model, .. } => format!("model:{model}"),
                 Kind::ThinkingChange { level } => format!("thinking:{level}"),
                 Kind::SkillLoad { name, .. } => format!("skill:{name}"),
+                Kind::TextCheckpoint { delta } => format!("checkpoint:{delta}"),
+                Kind::CommandStarted { call_id } => format!("started:{call_id}"),
                 Kind::Unknown(value) => format!("unknown:{}", value["type"]),
             })
             .collect()
+    }
+
+    #[test]
+    fn checkpoint_bytes_cross_unicode_without_duplicating_the_final_message() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("checkpoint");
+        let state = Directories::single_root(dir.join("state"));
+        let store = Store::new(&state);
+        let mut recorder = Recorder::new(true, "tui");
+        recorder.begin_turn(&store, &dir, &selection("m"), "off", "write");
+        let prefix = "x".repeat(CHECKPOINT_BYTES - 1);
+        recorder.text(&format!("{prefix}界"));
+        let id = recorder.session_id().unwrap().to_string();
+        let pending = store.open(&id).unwrap();
+        assert!(pending.partial_notice().unwrap().ends_with(&prefix));
+        assert!(pending.active_messages(None).is_empty());
+        recorder.text(" final-marker");
+        recorder.end_turn();
+        let session = store.open(&id).unwrap();
+        let messages = session.active_messages(None);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].text, format!("{prefix}界 final-marker"));
+        assert!(session.partial_notice().is_none());
+        let shown = crate::session::commands::show(&state, &id, false, None).unwrap();
+        assert_eq!(shown.matches(&prefix).count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

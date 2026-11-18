@@ -763,7 +763,11 @@ impl Turn {
                 .min(Duration::from_millis(250));
             match receiver.recv_timeout(wait) {
                 Ok(event) => self.handle(event, &mut ledger, &mut text, &mut usage, &mut outcome),
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    let mut live = lock(&self.live);
+                    live.recorder.checkpoint();
+                    live.fan_out_fresh(&self.session);
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     outcome = Some(Err((
                         ErrorKind::Other,
@@ -827,6 +831,9 @@ impl Turn {
         // The record holds the document without the text, which is the
         // assistant message before the turn line.
         live.recorder.finish_turn(status, doc.clone());
+        if let Some(error) = live.recorder.failure() {
+            doc["recording_error"] = json!(error);
+        }
         live.fan_out_fresh(&self.session);
         if status == Status::Ok {
             let mut answer = text;
@@ -858,6 +865,7 @@ impl Turn {
         match event {
             ResponseEvent::TextDelta(delta) => {
                 live.recorder.text(&delta);
+                live.fan_out_fresh(&self.session);
                 if text.len() < TEXT_CAP {
                     text.push_str(&delta);
                 }
@@ -866,6 +874,10 @@ impl Turn {
                     run_id: self.run_id.clone(),
                     delta,
                 });
+            }
+            ResponseEvent::CommandStarted { call_id } => {
+                live.recorder.command_started(call_id);
+                live.fan_out_fresh(&self.session);
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
                 ledger.requested(calls.len());

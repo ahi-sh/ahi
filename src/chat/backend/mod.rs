@@ -59,6 +59,9 @@ pub(crate) struct ChatRequest {
 #[derive(Debug, PartialEq)]
 pub(crate) enum ResponseEvent {
     TextDelta(String),
+    CommandStarted {
+        call_id: String,
+    },
     /// Validated requests only. This event never grants execution authority.
     /// `native` is the provider's own output the screen stores for replay.
     ToolCallsRequested {
@@ -123,6 +126,11 @@ pub(crate) trait CompletionBackend {
     /// proceeds, and the connection is dropped at the next read. The screen
     /// drops the receiver as well, so the turn's final event goes nowhere.
     fn cancel(&mut self) {}
+    /// Graceful quit: a remote turn owner must confirm its terminal record.
+    fn cancel_on_exit(&mut self) -> Result<(), String> {
+        self.cancel();
+        Ok(())
+    }
     /// `/clear`: the conversation starts over; a backend that keeps a
     /// session for it starts a new one at the next turn.
     fn reset(&mut self) {}

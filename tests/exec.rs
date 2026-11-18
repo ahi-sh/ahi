@@ -1244,6 +1244,38 @@ fn skill_command_wildcards_execute_only_real_bundled_scripts() {
     assert!(replies[2].contains("not a regular, non-symlink file"));
     assert!(replies[3].contains("relative file below scripts/"));
     assert!(replies[4].contains("denied"));
+    let file = fs::read_dir(dir.join("state/sessions"))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+        .unwrap();
+    let entries: Vec<serde_json::Value> = fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started: Vec<_> = entries
+        .iter()
+        .filter(|e| e["type"] == "command_started")
+        .map(|e| e["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        started,
+        ["r", "o"],
+        "denied and unspawnable targets must not report a start"
+    );
+    for id in started {
+        let start = entries
+            .iter()
+            .position(|e| e["type"] == "command_started" && e["call_id"] == id)
+            .unwrap();
+        let end = entries
+            .iter()
+            .position(|e| e["result"]["call_id"] == id)
+            .unwrap();
+        assert!(start < end);
+    }
     fs::remove_dir_all(dir).unwrap();
 }
 

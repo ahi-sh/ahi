@@ -448,6 +448,49 @@ impl Session {
         path
     }
 
+    /// Display-only tail of the newest unfinished or cancelled turn. Never
+    /// promote a partial turn to the successful branch used for inference.
+    pub(crate) fn partial_notice(&self) -> Option<String> {
+        let last = self.entries.last()?;
+        let label = match &last.kind {
+            Kind::Turn(turn) if turn.status == Status::Ok => return None,
+            Kind::Turn(turn) => turn.status.as_str(),
+            _ => "unfinished (possibly interrupted)",
+        };
+        let mut chunks = Vec::new();
+        let mut cursor = if matches!(last.kind, Kind::Turn(_)) {
+            last.parent
+        } else {
+            Some(last.seq)
+        };
+        while let Some(seq) = cursor {
+            let entry = &self.entries[seq as usize - 1];
+            match &entry.kind {
+                Kind::TextCheckpoint { delta } => chunks.push(delta.as_str()),
+                Kind::Message(message) => {
+                    if chunks.is_empty()
+                        && message.role == super::Role::Assistant
+                        && message.tool.is_none()
+                    {
+                        chunks.push(&message.text);
+                    }
+                    break;
+                }
+                Kind::Turn(_) => break,
+                _ => {}
+            }
+            cursor = entry.parent;
+        }
+        if chunks.is_empty() {
+            return None;
+        }
+        chunks.reverse();
+        Some(format!(
+            "Last turn {label} — partial reply (not sent on resume):\n{}",
+            chunks.concat()
+        ))
+    }
+
     /// The conversation a new turn continues: every message on the active
     /// path, as transcript messages for `protocol`.
     pub(crate) fn active_messages(&self, protocol: Option<Protocol>) -> Vec<ChatMessage> {

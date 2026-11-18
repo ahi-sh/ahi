@@ -736,6 +736,7 @@ pub(super) fn execute(
     skills: &crate::skills::Catalog,
     toolchain_env: &[String],
     cancel: &AtomicBool,
+    command_started: impl FnOnce(),
 ) -> Result<Executed, ToolFailure> {
     // Result rows are one per line; headers and continuation notes are not
     // matches, so counts are approximate for the screen header only.
@@ -778,8 +779,14 @@ pub(super) fn execute(
             } else {
                 argv
             };
-            let (content, report, output) =
-                run_command::run(command, &cwd, *timeout_secs, toolchain_env, cancel)?;
+            let (content, report, output) = run_command::run(
+                command,
+                &cwd,
+                *timeout_secs,
+                toolchain_env,
+                cancel,
+                command_started,
+            )?;
             Ok(Executed {
                 content,
                 detail: Some(ToolDetail::Command {
@@ -1065,6 +1072,7 @@ mod tests {
             &crate::skills::Catalog::default(),
             &[],
             &NEVER,
+            || {},
         )
         .map(|executed| executed.content)
         .map_err(|failure| failure.message)
@@ -1355,6 +1363,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
+                || {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1372,6 +1381,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
+                || {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1628,6 +1638,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &["AHI_TEST_TOOLCHAIN".to_string()],
                 &NEVER,
+                || {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1697,6 +1708,7 @@ mod tests {
             &crate::skills::Catalog::default(),
             &[],
             &cancel,
+            || {},
         )
         .err()
         .unwrap();

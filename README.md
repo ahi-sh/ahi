@@ -431,6 +431,24 @@ Each serialized tool detail is limited to 512 KiB to leave room for the bounded 
 Every chat is recorded as it happens into one file of JSON lines under the state directory, `sessions/<id>.jsonl`, created owner-only at the first turn: the operator's message before the request goes out, the model's reply and its tool calls before any tool runs, each tool result after, and one `turn` line per exchange saying how it ended (`ok`, `failed`, `cancelled`). `/model` and `/thinking` are recorded too. Nothing is rewritten: a failed or cancelled turn stays on disk as a branch, and the next turn hangs off the last turn that succeeded, so what the model sees again is the conversation that worked. `ahi tui --no-history` records nothing; `/clear` starts a new session at the next turn.
 
 - `ahi session list [--json]` reads each file line by line (never whole; `--json` rows carry `bytes`) and prints one line per session, newest first: id, start time, gateway and model, working directory, turn count, and the last turn's status and run id. Files this ahi cannot read are named on stderr and skipped.
+During generation, the UI receives text deltas immediately. The recorder appends
+UTF-8 `text_checkpoint` entries in batches (8 KiB or about half a second), not
+one entry per token. Tool calls and turn closure still finalize a single assistant
+message for replay. Checkpoints count toward the session size budget but are not
+replayed as messages. If the process dies mid-stream, `ahi session show` and the
+resumed TUI show the latest checkpointed prefix as unfinished, outside model
+history. This is process-interruption recovery, not a power-loss guarantee or a
+promise to recover text the provider never delivered.
+
+Quitting during a turn (Ctrl+C or Ctrl+D on a blank draft, or `/quit`) requests
+cancellation. Standalone chat flushes the partial answer; a service-backed chat
+waits a bounded time for the turn owner to confirm closure and reports an error
+if it cannot. Commands record a `command_started` entry after successful spawn;
+the tool result carries exit status and bounded output. Terminal redraws and
+spinner ticks are not recorded. Re-run the focused PTY check with
+`uv run --no-project scripts/smoke-model-picker.py --stream-recovery-only` after
+`cargo build`.
+
 - `ahi session show <id|path> [--json] [--branch <seq>]` prints the active path of a session in conversation order: operator lines, replies, the name and target of each tool call, the first line of each tool result, each skill the model read (`— skill <name> (<root>, <size>)`), and the turn lines. An entry type written by a newer ahi is kept in its place and shown as unknown, never treated as corruption. `--branch` follows another branch (a failed attempt) back to the root; `--json` prints the header and those entries as lines. A path shows a session file that is not in the store.
 - `ahi --session <id>` opens the terminal chat over a stored ahi session with its recorded model and thinking level and the active path's messages, and appends new turns to it. `ahi tui --session <id>` and `ahi tui --resume <id>` are equivalent entry points. Use the `tui` form for additional chat options such as `--standalone`, `--socket`, or `--via`. The top-level shortcut accepts global options such as `--state-dir` but cannot be combined with a subcommand. As with `ahi tui`, piped output lists providers instead of opening an interactive chat. Quitting a recorded chat with `/quit` or **Ctrl+D** prints its session ID and `ahi --session <id>` after restoring the terminal. Chats without a saved session do not print a resume command.
 - `ahi session export <id> --to <file>` copies the session file; the destination must not exist. `ahi session import <file>` copies a session file into the store, or extends the stored copy when the file carries new entries after the ones already stored, and refuses a file whose history differs. Across machines that is the whole protocol: the file moves by any means (`scp`, `rsync`, a multiplexer's file transfer) and `import` reads it.

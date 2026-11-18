@@ -36,6 +36,8 @@ def main() -> None:
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
                          help="stop after the scoped skill picker and bracketed paste checks")
+    focused.add_argument("--stream-recovery-only", action="store_true",
+                         help="verify live checkpoints and Ctrl+C recovery in both engines")
     focused.add_argument("--session-details-only", action="store_true",
                          help="verify rich tool details in resumed standalone and service-backed chats")
     args = parser.parse_args()
@@ -190,6 +192,90 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    if args.stream_recovery_only:
+        marker = "visible-stream-marker"
+        prose = "Fixture prose. " * 150 + marker
+        release = threading.Event()
+
+        class SlowStream(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                event = {"choices": [{"index": 0, "delta": {"content": prose}}]}
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                self.wfile.flush()
+                release.wait(30)  # quit while the gateway is still streaming
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowStream)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            for mode in ("standalone", "service", "crash"):
+                with tempfile.TemporaryDirectory(prefix="ahi-stream-", dir="/tmp") as temp:
+                    state = Path(temp)
+                    sid = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+                    store = state / "sessions"
+                    store.mkdir()
+                    path = store / f"{sid}.jsonl"
+                    header = dict(type="session", schema=1, id=sid, host="fixture", cwd=temp,
+                                  ahi_version="0.21.0", gateway="local", model="fixture", thinking="off",
+                                  started="2026-01-01T00:00:00Z")
+                    path.write_text(json.dumps(header) + "\n")
+                    (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                        "baseUrl": f"http://127.0.0.1:{server.server_port}/v1", "api": "openai-completions",
+                        "models": [{"id": "fixture"}],
+                    }}}))
+                    sock = str(state / "run/serve.sock")
+                    options = ("--socket", sock) if mode == "service" else ("--standalone",)
+                    command = ("tui", "--session", sid, *options)
+                    chat = Session(state, cwd=state, columns=120, rows=60, command=command)
+                    try:
+                        chat.expect("resumed session")
+                        chat.send("produce some prose\r")
+                        chat.expect(marker)
+                        deadline = time.monotonic() + 5
+                        while True:
+                            entries = [json.loads(line) for line in path.read_text().splitlines()]
+                            if any(marker in entry.get("delta", "") for entry in entries):
+                                break
+                            assert time.monotonic() < deadline, "visible prefix was not checkpointed"
+                            time.sleep(.05)
+                        assert not any(entry["type"] == "turn" for entry in entries)
+                        if mode != "crash":
+                            chat.send("\x03")
+                            chat.finish()
+                            entries = [json.loads(line) for line in path.read_text().splitlines()]
+                            assert entries[-1].get("status") == "cancelled", entries[-1]
+                            assert [e["text"] for e in entries if e.get("role") == "assistant"] == [prose]
+                    finally:
+                        chat.close()
+                        if mode == "service":
+                            subprocess.run([binary, "--state-dir", state, "serve", "--socket", sock, "stop"],
+                                           capture_output=True, timeout=10, check=True)
+                    shown = subprocess.check_output([binary, "--state-dir", state, "session", "show", sid], text=True)
+                    assert shown.count(marker) == 1 and prose in shown, shown
+                    reopened = Session(state, cwd=state, columns=120, rows=60,
+                                       command=("tui", "--session", sid, "--standalone"))
+                    try:
+                        reopened.expect(marker)
+                        assert reopened.screen().count(marker) == 1
+                        reopened.send("/quit\r")
+                        reopened.finish()
+                    finally:
+                        reopened.close()
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            worker.join()
+        print("PASS: visible checkpoints, standalone and service Ctrl+C, and interrupted standalone recovery")
+        return
 
     if args.session_details_only:
         with tempfile.TemporaryDirectory(prefix="ahi-rich-session-") as temp:

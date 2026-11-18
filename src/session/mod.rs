@@ -133,6 +133,14 @@ pub struct Entry {
 /// What an entry records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
+    /// Incremental recovery data, not another assistant message for replay.
+    TextCheckpoint {
+        delta: String,
+    },
+    /// Emitted after the OS has spawned a command, not when it is approved.
+    CommandStarted {
+        call_id: String,
+    },
     Message(StoredMessage),
     Turn(Turn),
     ModelChange {
@@ -312,6 +320,14 @@ impl Entry {
                     None => {}
                 }
             }
+            Kind::TextCheckpoint { delta } => {
+                object.insert("type".into(), json!("text_checkpoint"));
+                object.insert("delta".into(), json!(delta));
+            }
+            Kind::CommandStarted { call_id } => {
+                object.insert("type".into(), json!("command_started"));
+                object.insert("call_id".into(), json!(call_id));
+            }
             Kind::Turn(turn) => {
                 object.insert("type".into(), json!("turn"));
                 object.insert("run_id".into(), json!(turn.run_id));
@@ -436,6 +452,12 @@ impl Entry {
                     presentation,
                 })
             }
+            Some("text_checkpoint") => Kind::TextCheckpoint {
+                delta: text("delta").ok_or_else(|| corrupt("delta"))?,
+            },
+            Some("command_started") => Kind::CommandStarted {
+                call_id: text("call_id").ok_or_else(|| corrupt("call_id"))?,
+            },
             Some("turn") => Kind::Turn(Turn {
                 run_id: text("run_id").ok_or_else(|| corrupt("run_id"))?,
                 status: value["status"]

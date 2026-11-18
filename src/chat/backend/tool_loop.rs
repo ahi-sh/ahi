@@ -265,7 +265,11 @@ impl ToolRuntime {
                     denied(&prepared, "approval cancelled")
                 }
                 Plan::Ask(prepared, _) => denied(&prepared, "approval cancelled"),
-                Plan::Run(prepared, rule) => self.run(&prepared, &rule),
+                Plan::Run(prepared, rule) => self.run(&prepared, &rule, || {
+                    let _ = sender.send(ResponseEvent::CommandStarted {
+                        call_id: call.id.clone(),
+                    });
+                }),
             };
             self.account(&mut outcome);
             let mut message = ChatMessage::new(
@@ -475,7 +479,12 @@ impl ToolRuntime {
         Ok(false)
     }
 
-    fn run(&mut self, prepared: &PreparedCall, rule_id: &str) -> Outcome {
+    fn run(
+        &mut self,
+        prepared: &PreparedCall,
+        rule_id: &str,
+        command_started: impl FnOnce(),
+    ) -> Outcome {
         // A cancelled turn runs nothing more. The stream reader and the
         // round loop check the same flag, but a batch is several calls, and
         // the flag can be set between two of them.
@@ -516,6 +525,7 @@ impl ToolRuntime {
             &self.catalog,
             &toolchain_env,
             &self.turn.cancel,
+            command_started,
         );
         let elapsed = started.elapsed();
         match executed {
