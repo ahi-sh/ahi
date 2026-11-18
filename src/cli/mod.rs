@@ -148,7 +148,7 @@ enum Command {
     /// how the turn ended: 0 ok, 1 turn failed, 2 usage, 3 configuration,
     /// 4 credential, 5 policy file, 6 cancelled or timed out, 7 session, 8
     /// result file not written.
-    Exec(ExecArgs),
+    Exec(Box<ExecArgs>),
     /// Serve ahi's session protocol on a Unix socket for front ends and explicit connectors; `stop` ends it.
     ///
     /// One process per user per host owns the session store and runs every
