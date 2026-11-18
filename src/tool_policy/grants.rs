@@ -14,6 +14,8 @@ pub(crate) struct SessionGrant {
     pub(crate) gateway: String,
     pub(crate) destination: String,
     pub(crate) tool: String,
+    /// Skill scripts and arbitrary programs are distinct command targets.
+    pub(crate) skill_script: bool,
     pub(crate) prefix: String,
     /// For `run_command`, the approving rule's argv prefix: the grant is
     /// exactly as wide as the rule that asked, never the full command.

@@ -196,9 +196,14 @@ impl ServiceBackend {
         request: &ChatRequest,
         prompt: &str,
     ) -> Result<(String, String), String> {
+        if !request.skills.is_empty() {
+            crate::service::wire::require_skill_selection(&self.call("health", json!({}))?)
+                .map_err(|err| err.message)?;
+        }
         let session = self.prepare(request)?;
         let turn = TurnRequest {
             prompt: prompt.to_string(),
+            skills: request.skills.clone(),
             run_id: None,
             prompt_sha256: None,
             workdir: Some(self.workdir.clone()),
@@ -294,6 +299,50 @@ impl CompletionBackend for ServiceBackend {
                 }
             });
         }
+    }
+
+    fn cancel_on_exit(&mut self) -> Result<(), String> {
+        let (Some(session), Some(run_id)) = (self.session.clone(), self.running.take()) else {
+            return Ok(());
+        };
+        let params = json!({"session": session, "run_id": run_id});
+        let client = Arc::clone(&self.client);
+        let (reply, wait) = mpsc::channel();
+        // Bound even contention with the approval/subscription client lock.
+        thread::spawn(move || {
+            let result = (|| {
+                let mut client = client.lock().map_err(|_| "client poisoned".to_string())?;
+                match client.call_within("turn.cancel", params.clone(), QUICK_CALL) {
+                    Ok(_) => {}
+                    Err(err) if err.kind == "not_found" => {} // completion raced quit
+                    Err(err) => return Err(err.message),
+                }
+                let deadline = std::time::Instant::now()
+                    + crate::service::CANCEL_GRACE
+                    + Duration::from_secs(1);
+                while std::time::Instant::now() < deadline {
+                    let doc = client
+                        .call_within("turn.get", params.clone(), QUICK_CALL)
+                        .map_err(|err| err.message)?;
+                    if let Some(error) = doc["recording_error"].as_str() {
+                        return Err(format!("session was not saved: {error}"));
+                    }
+                    if matches!(
+                        doc["status"].as_str(),
+                        Some("cancelled" | "ok" | "failed" | "timeout")
+                    ) {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(40));
+                }
+                Err("service did not confirm turn closure".to_string())
+            })();
+            let _ = reply.send(result);
+        });
+        wait.recv_timeout(QUICK_CALL + crate::service::CANCEL_GRACE + Duration::from_secs(2))
+            .map_err(|_| {
+                format!("could not confirm closure of run {run_id} in session {session}")
+            })?
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -476,6 +525,9 @@ fn follow(
 /// result. Operator and plain assistant lines are already on screen.
 fn entry_event(entry: &Value) -> Option<Vec<ResponseEvent>> {
     let entry = crate::session::Entry::from_json(entry).ok()?;
+    if let Kind::CommandStarted { call_id } = entry.kind {
+        return Some(vec![ResponseEvent::CommandStarted { call_id }]);
+    }
     let Kind::Message(message) = entry.kind else {
         return None;
     };
@@ -577,6 +629,7 @@ mod tests {
 
     fn request(prompt: &str) -> ChatRequest {
         ChatRequest {
+            skills: Vec::new(),
             selection: super::super::parse_selection("local/vendor/model"),
             thinking: crate::chat::thinking::ThinkingLevel::Off,
             messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],

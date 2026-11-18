@@ -59,3 +59,13 @@ cut-release *args:
 # run the crate
 dev:
     cargo run
+
+# run the development TUI without connecting to or starting a daemon
+tui:
+    cargo run -- tui --standalone
+
+# run the development TUI with its own state and daemon socket (Unix)
+tui-dev:
+    dev_state="$HOME/.local/state/ahi-dev"; \
+        mkdir -p "$dev_state/run" && \
+        cargo run -- --state-dir "$dev_state" tui --socket "$dev_state/run/serve.sock"

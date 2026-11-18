@@ -7,13 +7,18 @@
 //! <home>/.agents/skills/<name>/SKILL.md    operator skills, outside every workdir
 //! ```
 //!
-//! Both roots are enumerated, never fetched. A name in both is the
-//! repository's. A skill over a cap, with a bad frontmatter, behind a symbolic
+//! Both roots are enumerated, never fetched. Same-named skills have distinct
+//! scoped IDs. A skill over a cap, with bad frontmatter, behind a symbolic
 //! link, or whose directory name differs from its `name` is rejected with a
 //! reason: not advertised, not loadable, listed by `ahi doctor`. The text a
 //! skill carries has the authority of a file read with `read_file`: none.
 //! `.agents/skills` is protected from the model's writes so a model cannot
 //! author a skill it later loads.
+
+mod files;
+mod invocation;
+pub(crate) use files::valid_reference;
+pub(crate) use invocation::{parse_id, query_char, valid_id};
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,7 +32,7 @@ pub(crate) const MAX_FILE_BYTES: u64 = 32 * 1024;
 pub(crate) const MAX_SKILLS: usize = 64;
 /// References a skill may declare.
 pub(crate) const MAX_REFERENCES: usize = 16;
-/// `description` and `when` at most this long.
+/// Legacy `when` hints at most this many bytes; descriptions allow 1024 characters.
 const MAX_LINE_BYTES: usize = 256;
 /// The repo root, relative to the working directory.
 pub(crate) const REPO_ROOT: &str = ".agents/skills";
@@ -58,6 +63,9 @@ pub(crate) struct Skill {
     pub(crate) description: String,
     pub(crate) when: Option<String>,
     pub(crate) references: Vec<String>,
+    pub(crate) disable_model_invocation: bool,
+    /// Informational frontmatter, never interpreted as permission or sent in bulk.
+    pub(crate) attributes: BTreeMap<String, serde_json::Value>,
     pub(crate) root: Root,
     /// The skill's directory, canonical.
     pub(crate) dir: PathBuf,
@@ -73,7 +81,13 @@ pub(crate) struct Rejected {
     pub(crate) reason: String,
 }
 
-/// Everything both roots hold, valid and refused, repo shadowing operator.
+impl Skill {
+    pub(crate) fn id(&self) -> String {
+        format!("{}/{}", self.root.as_str(), self.name)
+    }
+}
+
+/// Everything both roots hold, valid and refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
     pub(crate) skills: Vec<Skill>,
@@ -81,9 +95,12 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    /// The valid skill called `name`.
-    pub(crate) fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.iter().find(|skill| skill.name == name)
+    /// Resolve only a qualified identity, never a same-named substitute.
+    pub(crate) fn get(&self, id: &str) -> Option<&Skill> {
+        let (scope, name) = id.split_once('/')?;
+        self.skills
+            .iter()
+            .find(|skill| skill.root.as_str() == scope && skill.name == name)
     }
 
     /// `ahi doctor` lines: the valid names by root, then each refusal.
@@ -105,6 +122,28 @@ impl Catalog {
                     names.join(", ")
                 }
             ));
+        }
+        for skill in &self.skills {
+            if skill.disable_model_invocation {
+                lines.push(format!(
+                    "skill manual-only ({}): {}",
+                    skill.root.as_str(),
+                    skill.name
+                ));
+            }
+            if !skill.attributes.is_empty() {
+                lines.push(format!(
+                    "skill metadata ({}): {}: {}",
+                    skill.root.as_str(),
+                    skill.name,
+                    skill
+                        .attributes
+                        .keys()
+                        .map(|key| format!("{key:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
         for rejected in &self.rejected {
             lines.push(format!(
@@ -149,42 +188,40 @@ pub(crate) fn enumerate(workdir: &Path, home: Option<&Path>) -> Catalog {
         &mut repo,
         &mut catalog.rejected,
     );
-    // The nearest workspace definition wins over the operator default.
-    for (name, skill) in operator {
-        match repo.entry(name) {
-            std::collections::btree_map::Entry::Occupied(taken) => {
-                catalog.rejected.push(Rejected {
-                    name: taken.key().clone(),
-                    root: Root::Operator,
-                    reason: "a repository skill of the same name shadows it".into(),
-                });
-            }
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(skill);
-            }
-        }
-    }
-    catalog.skills = repo.into_values().collect();
+    catalog.skills = repo.into_values().chain(operator.into_values()).collect();
     catalog
 }
 
-/// Read a skill's body (`file` `None`) or one declared reference, with the
+/// An exact script path below a skill's scripts directory, never a selector.
+pub(crate) fn valid_script(script: &str) -> bool {
+    script.starts_with("scripts/") && !script.contains('*') && valid_reference(script)
+}
+
+/// Resolve the script again immediately before dispatch. These are pathname
+/// checks, not protection against concurrent replacement or a sandbox.
+pub(crate) fn script_path(skill: &Skill, script: &str) -> Result<PathBuf, &'static str> {
+    if !valid_script(script) {
+        return Err("script must be a relative file below scripts/");
+    }
+    if !skill
+        .dir
+        .parent()
+        .is_some_and(|root| no_link_chain(root).is_ok_and(|present| present))
+    {
+        return Err("the skill root is not a real directory");
+    }
+    files::checked_file(&skill.dir, script)
+        .map_err(|_| "the skill script is not a regular, non-symlink file")
+}
+
+/// Read a skill's body (`file` `None`) or a supporting relative file, with the
 /// same checks as at enumeration.
 pub(crate) fn read(skill: &Skill, file: Option<&str>) -> Result<String, String> {
-    let name = match file {
-        None => SKILL_FILE,
-        Some(file) => {
-            if !skill.references.iter().any(|declared| declared == file) {
-                return Err(format!(
-                    "skill {} declares no reference `{file}`",
-                    skill.name
-                ));
-            }
-            file
-        }
-    };
-    let path = skill.dir.join(name);
-    let text = read_bounded(&path)?;
+    let name = file.unwrap_or(SKILL_FILE);
+    if file == Some(SKILL_FILE) {
+        return Err("omit file to load the skill's instructions".into());
+    }
+    let text = files::read(&skill.dir, name)?;
     match file {
         None => Ok(frontmatter(&text)?.1.to_string()),
         Some(_) => Ok(text),
@@ -193,7 +230,6 @@ pub(crate) fn read(skill: &Skill, file: Option<&str>) -> Result<String, String> 
 
 /// The frontmatter of `SKILL.md`, between `---` fences at the very start.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Frontmatter {
     name: String,
     description: String,
@@ -201,10 +237,10 @@ struct Frontmatter {
     when: Option<String>,
     #[serde(default)]
     references: Option<Vec<String>>,
-    /// Informational; never compared, never fetched.
-    #[serde(default)]
-    #[allow(dead_code)]
-    version: Option<String>,
+    #[serde(default, rename = "disable-model-invocation")]
+    disable_model_invocation: bool,
+    #[serde(flatten)]
+    attributes: BTreeMap<String, serde_json::Value>,
 }
 
 fn scan_root(
@@ -288,8 +324,7 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
     if !metadata.is_dir() {
         return Err("not a directory".into());
     }
-    let path = dir.join(SKILL_FILE);
-    let text = read_bounded(&path)?;
+    let text = files::read(&dir, SKILL_FILE)?;
     let (front, _) = frontmatter(&text)?;
     let front: Frontmatter = crate::yaml_safe::typed(front, &format!("{name}/{SKILL_FILE}"))
         .map_err(|err| format!("frontmatter: {err}"))?;
@@ -299,7 +334,19 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
             front.name
         ));
     }
-    one_line("description", &front.description)?;
+    if front.description.trim().is_empty() {
+        return Err("description is empty".into());
+    }
+    if front.description.chars().count() > 1024 {
+        return Err("description is longer than 1024 characters".into());
+    }
+    if front
+        .description
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err("description contains control characters".into());
+    }
     if let Some(when) = &front.when {
         one_line("when", when)?;
     }
@@ -308,24 +355,16 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
         return Err(format!("more than {MAX_REFERENCES} references"));
     }
     for reference in &references {
-        let ok = !reference.is_empty()
-            && !reference.contains('/')
-            && !reference.contains('\\')
-            && !reference.starts_with('.')
-            && (reference.ends_with(".md") || reference.ends_with(".txt"))
-            && reference
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
-        if !ok {
+        if !valid_reference(reference) {
             return Err(format!(
-                "reference `{reference}` is not a bare .md or .txt file name"
+                "reference `{reference}` must be a relative path inside the skill directory"
             ));
         }
         if reference == SKILL_FILE {
             return Err("SKILL.md is the skill itself, not a reference".into());
         }
         // Exists, regular, not a link, within the cap: checked again at read.
-        read_bounded(&dir.join(reference))
+        files::read(&dir, reference)
             .map_err(|reason| format!("reference `{reference}`: {reason}"))?;
     }
     let dir = dir
@@ -336,6 +375,8 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
         description: front.description,
         when: front.when,
         references,
+        disable_model_invocation: front.disable_model_invocation,
+        attributes: front.attributes,
         root: which,
         dir,
         bytes: text.len() as u64,
@@ -368,31 +409,6 @@ fn no_link_chain(root: &Path) -> Result<bool, String> {
         }
     }
     Ok(exists)
-}
-
-/// A regular file, not a link, at most `MAX_FILE_BYTES`, valid UTF-8.
-fn read_bounded(path: &Path) -> Result<String, String> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| {
-        format!(
-            "{} is missing",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        )
-    })?;
-    let shown = path.file_name().unwrap_or_default().to_string_lossy();
-    if metadata.file_type().is_symlink() {
-        return Err(format!("{shown} is a symbolic link"));
-    }
-    if !metadata.is_file() {
-        return Err(format!("{shown} is not a regular file"));
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err(format!(
-            "{shown} is {} bytes; the cap is {MAX_FILE_BYTES}",
-            metadata.len()
-        ));
-    }
-    let bytes = fs::read(path).map_err(|err| format!("{shown}: cannot read: {err}"))?;
-    String::from_utf8(bytes).map_err(|_| format!("{shown} is not UTF-8"))
 }
 
 /// Split `SKILL.md` into its frontmatter YAML and the body after the
@@ -451,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn both_roots_are_enumerated_and_the_repo_shadows_the_operator() {
+    fn both_roots_keep_same_named_skills_independently_addressable() {
         let base = crate::fixture_directory::create_unique_fixture_directory("skills");
         let work = base.join("work");
         let config = base.join("config");
@@ -484,29 +500,36 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [("release", Root::Repo), ("rust-review", Root::Repo)]
+            [
+                ("release", Root::Repo),
+                ("rust-review", Root::Repo),
+                ("release", Root::Operator)
+            ]
         );
-        assert_eq!(catalog.rejected.len(), 1, "{:?}", catalog.rejected);
-        assert!(catalog.rejected[0].reason.contains("shadows"));
-        let review = catalog.get("rust-review").unwrap();
+        assert!(catalog.rejected.is_empty());
+        assert!(catalog.get("release").is_none());
+        let review = catalog.get("repo/rust-review").unwrap();
         assert_eq!(review.when.as_deref(), Some("before a PR"));
         assert_eq!(review.references, ["checklist.md"]);
         assert_eq!(read(review, None).unwrap(), "# Review\nLook twice.\n");
         assert_eq!(read(review, Some("checklist.md")).unwrap(), "- clippy\n");
         assert!(read(review, Some("SKILL.md"))
             .unwrap_err()
-            .contains("declares no reference"));
+            .contains("omit file"));
         assert!(read(review, Some("../x.md"))
             .unwrap_err()
-            .contains("declares no reference"));
+            .contains("relative path"));
         assert_eq!(
-            read(catalog.get("release").unwrap(), None).unwrap(),
+            read(catalog.get("repo/release").unwrap(), None).unwrap(),
             "repo release\n"
         );
         let lines = catalog.doctor_lines();
         assert_eq!(lines[0], "skills (repo): release, rust-review");
-        assert_eq!(lines[1], "skills (operator): none");
-        assert!(lines[2].starts_with("skill rejected (operator): release:"));
+        assert_eq!(lines[1], "skills (operator): release");
+        assert_eq!(
+            read(catalog.get("operator/release").unwrap(), None).unwrap(),
+            "operator release\n"
+        );
         // No roots at all is no skills and no complaint.
         let empty = enumerate(&base.join("nowhere"), None);
         assert_eq!(empty, Catalog::default());
@@ -532,7 +555,10 @@ mod tests {
         skill(
             &repo,
             "long-description",
-            &format!("name: long-description\ndescription: {}\n", "d".repeat(300)),
+            &format!(
+                "name: long-description\ndescription: {}\n",
+                "d".repeat(1025)
+            ),
             "",
         );
         skill(
@@ -592,7 +618,11 @@ mod tests {
         }
         let catalog = enumerate(&work, None);
         let names: Vec<&str> = catalog.skills.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["good"]);
+        assert_eq!(names, ["good", "unknown-key"]);
+        assert_eq!(
+            catalog.get("repo/unknown-key").unwrap().attributes["tools"],
+            serde_json::json!(["sh"])
+        );
         let reason = |name: &str| {
             catalog
                 .rejected
@@ -604,16 +634,11 @@ mod tests {
         };
         assert!(reason("wrong-name").contains("does not equal the directory name"));
         assert!(reason("no-fence").contains("frontmatter fence"));
-        assert!(
-            reason("unknown-key").contains("unknown field"),
-            "{}",
-            reason("unknown-key")
-        );
         assert!(reason("no-description").contains("description"));
         assert!(reason("long-description").contains("longer than"));
-        assert!(reason("bad-ref").contains("bare .md or .txt"));
+        assert!(reason("bad-ref").contains("relative path"));
         assert!(reason("missing-ref").contains("is missing"));
-        assert!(reason("exe-ref").contains("bare .md or .txt"));
+        assert!(reason("exe-ref").contains("is missing"));
         assert!(reason("big").contains("the cap is"));
         #[cfg(target_os = "linux")]
         {
@@ -654,6 +679,70 @@ mod tests {
         let catalog = enumerate(&work2, None);
         assert!(catalog.skills.is_empty());
         assert!(catalog.rejected[0].reason.contains("symbolic link"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn portable_metadata_and_nested_undeclared_supporting_files_load() {
+        let base = crate::fixture_directory::create_unique_fixture_directory("portable-skills");
+        let repo = base.join(REPO_ROOT);
+        let description = "界".repeat(1024);
+        skill(&repo, "portable", &format!("name: portable\ndescription: {description}\nlicense: MIT\ncompatibility: Requires Rust\nmetadata: {{author: example, version: '1'}}\nallowed-tools: 'Bash(*)'\ndisable-model-invocation: true\nx-extra: {{nested: [a, b]}}\n"), "Read references/nested/guide.md.\n");
+        let support = repo.join("portable/references/nested");
+        fs::create_dir_all(&support).unwrap();
+        fs::write(support.join("guide.md"), "Nested guidance.\n").unwrap();
+        let catalog = enumerate(&base, None);
+        let portable = catalog.get("repo/portable").unwrap();
+        assert_eq!(portable.description, description);
+        assert!(portable.disable_model_invocation);
+        assert_eq!(portable.attributes["license"], "MIT");
+        assert_eq!(portable.attributes["metadata"]["author"], "example");
+        assert_eq!(portable.attributes["allowed-tools"], "Bash(*)");
+        let diagnostics = catalog.doctor_lines().join("\n");
+        assert!(diagnostics.contains("skill manual-only (repo): portable"));
+        assert!(diagnostics.contains("\"metadata\""));
+        assert!(!diagnostics.contains("Bash(*)"));
+        assert_eq!(
+            read(portable, None).unwrap(),
+            "Read references/nested/guide.md.\n"
+        );
+        assert_eq!(
+            read(portable, Some("references/nested/guide.md")).unwrap(),
+            "Nested guidance.\n"
+        );
+        for path in [
+            "../secret",
+            "/etc/passwd",
+            "references/../SKILL.md",
+            "C:/secret",
+            "references\\guide.md",
+            "references//guide.md",
+            ".. /secret",
+            "references./guide.md",
+            "references/guide.md ",
+        ] {
+            assert!(
+                read(portable, Some(path))
+                    .unwrap_err()
+                    .contains("relative path"),
+                "{path}"
+            );
+        }
+        fs::write(
+            support.join("large.md"),
+            vec![b'x'; MAX_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(read(portable, Some("references/nested/large.md"))
+            .unwrap_err()
+            .contains("cap"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&support, repo.join("portable/linked")).unwrap();
+            assert!(read(portable, Some("linked/guide.md"))
+                .unwrap_err()
+                .contains("symbolic link"));
+        }
         fs::remove_dir_all(base).unwrap();
     }
 

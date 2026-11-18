@@ -93,8 +93,21 @@ pub fn show(state: &Directories, target: &str, json: bool, branch: Option<u64>) 
         "session {}  {}/{}  {}  started {}  host {}\n",
         header.id, header.gateway, header.model, header.cwd, header.started, header.host
     ));
+    let mut pending = String::new();
     for entry in path {
+        match &entry.kind {
+            Kind::TextCheckpoint { delta } => pending.push_str(delta),
+            Kind::Message(_) => pending.clear(),
+            _ => {}
+        }
         out.push_str(&render(entry));
+    }
+    if !pending.is_empty() {
+        out.push_str(&format!("\n[unfinished reply]\n{pending}\n"));
+    } else if branch.is_none() {
+        if let Some(partial) = session.partial_notice() {
+            out.push_str(&format!("\n{partial}\n"));
+        }
     }
     Ok(out)
 }
@@ -153,6 +166,8 @@ fn render(entry: &Entry) -> String {
             },
             size(*bytes)
         ),
+        Kind::TextCheckpoint { .. } => String::new(),
+        Kind::CommandStarted { call_id } => format!("  [command started {call_id}]\n"),
         Kind::Unknown(value) => format!(
             "— {} (an entry this ahi does not know)\n",
             value["type"].as_str().unwrap_or("?")

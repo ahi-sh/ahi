@@ -1158,13 +1158,282 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn skill_command_wildcards_execute_only_real_bundled_scripts() {
+    use serde_json::json;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let (url, gateway) = loopback(tool_round(
+        &[
+            (
+                "r",
+                "run_command",
+                json!({"skill":"repo/check", "script":"scripts/sub/check", "args":["two words"]}),
+            ),
+            (
+                "o",
+                "run_command",
+                json!({"skill":"operator/check", "script":"scripts/sub/check"}),
+            ),
+            (
+                "link",
+                "run_command",
+                json!({"skill":"repo/check", "script":"scripts/link"}),
+            ),
+            (
+                "escape",
+                "run_command",
+                json!({"skill":"repo/check", "script":"scripts/../../other"}),
+            ),
+            (
+                "raw",
+                "run_command",
+                json!({"argv":["sh", "-c", "echo should-not-run"]}),
+            ),
+        ],
+        "done",
+    ));
+    let dir = fixture(&url);
+    let home = dir.join("home");
+    for (root, marker) in [(dir.join("work"), "repo"), (home.clone(), "operator")] {
+        let skill = root.join(".agents/skills/check");
+        fs::create_dir_all(skill.join("scripts/sub")).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: check\ndescription: Fixture\n---\nInstructions",
+        )
+        .unwrap();
+        let script = skill.join("scripts/sub/check");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\n[ -d src ] || exit 9\nprintf 'ran-{marker}:%s' \"$1\"\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(script, skill.join("scripts/link")).unwrap();
+    }
+    let policy = dir.join("ops/scripts.yaml");
+    fs::write(&policy, "version: 1\nrules:\n- {id: r, action: skill_command, match: {skill: 'repo/*', script: 'scripts/**'}, effect: approve}\n- {id: o, action: skill_command, match: {skill: 'operator/*', script: 'scripts/**'}, effect: approve}\n").unwrap();
+    let output = ahi(&dir)
+        .env("HOME", &home)
+        .args([
+            "exec",
+            "--standalone",
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "run the checks",
+            "--tools",
+        ])
+        .arg(policy)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    let requests = gateway.join().unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+    let replies: Vec<_> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert!(replies[0].contains("ran-repo:two words"), "{replies:?}");
+    assert!(replies[1].contains("ran-operator:"));
+    assert!(replies[2].contains("not a regular, non-symlink file"));
+    assert!(replies[3].contains("relative file below scripts/"));
+    assert!(replies[4].contains("denied"));
+    let file = fs::read_dir(dir.join("state/sessions"))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+        .unwrap();
+    let entries: Vec<serde_json::Value> = fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started: Vec<_> = entries
+        .iter()
+        .filter(|e| e["type"] == "command_started")
+        .map(|e| e["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        started,
+        ["r", "o"],
+        "denied and unspawnable targets must not report a start"
+    );
+    for id in started {
+        let start = entries
+            .iter()
+            .position(|e| e["type"] == "command_started" && e["call_id"] == id)
+            .unwrap();
+        let end = entries
+            .iter()
+            .position(|e| e["result"]["call_id"] == id)
+            .unwrap();
+        assert!(start < end);
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn headless_explicit_skill_loads_before_inference_and_reads_nested_support() {
+    let (url, gateway) = loopback(tool_round(
+        &[(
+            "nested",
+            "load_skill",
+            serde_json::json!({"name": "operator/review", "file": "references/guide.md"}),
+        )],
+        "review complete",
+    ));
+    let dir = fixture(&url);
+    let home = dir.join("home");
+    for (root, body) in [
+        (dir.join("work"), "REPOSITORY INSTRUCTIONS\n"),
+        (home.clone(), "OPERATOR INSTRUCTIONS\n"),
+    ] {
+        let skill = root.join(".agents/skills/review");
+        fs::create_dir_all(skill.join("references")).unwrap();
+        fs::write(skill.join("SKILL.md"), format!("---\nname: review\ndescription: Review changes\nlicense: MIT\nmetadata: {{author: fixture}}\nallowed-tools: 'Bash(*)'\ndisable-model-invocation: true\n---\n{body}")).unwrap();
+        fs::write(skill.join("references/guide.md"), "NESTED GUIDE\n").unwrap();
+    }
+    let policy = dir.join("ops/skills.yaml");
+    fs::write(&policy, "version: 1\nrules:\n- {id: review, action: skill, match: {skill: 'operator/*'}, effect: approve}\n").unwrap();
+    let prompt = dir.join("ops/prompt.txt");
+    fs::write(&prompt, "Before $review and\n$review after").unwrap();
+    let result = dir.join("ops/result.json");
+    let output = ahi(&dir)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .args([
+            "exec",
+            "--standalone",
+            "--model",
+            "local/vendor/model",
+            "--headless",
+            "--run-id",
+            "scoped-review",
+            "--skill",
+            "operator/review",
+            "--skill",
+            "operator/review",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .arg("--result-file")
+        .arg(&result)
+        .arg("--tools")
+        .arg(&policy)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(result).unwrap()).unwrap();
+    assert_eq!(doc["text"], "review complete");
+    assert_eq!(doc["tools"]["skills"], 2);
+    assert_eq!(doc["ledger"][0]["root"], "operator");
+    assert_eq!(doc["ledger"][1]["file"], "references/guide.md");
+    let requests = gateway.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first: serde_json::Value =
+        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        first["messages"][0]["content"],
+        "Before $review and\n$review after"
+    );
+    assert!(requests[0].contains("OPERATOR INSTRUCTIONS"));
+    assert!(!requests[0].contains("REPOSITORY INSTRUCTIONS"));
+    assert!(!requests[0].contains("Bash(*)"));
+    assert_eq!(first["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(first["tools"][0]["function"]["name"], "load_skill");
+    assert!(requests[1].contains("NESTED GUIDE"));
+    let audit = fs::read_to_string(dir.join("state/audit.log")).unwrap();
+    assert_eq!(audit.lines().count(), 2);
+    assert!(!audit.contains("OPERATOR INSTRUCTIONS"));
+    assert_eq!(
+        doc["requested_skills"],
+        serde_json::json!(["operator/review", "operator/review"])
+    );
+    let replay = |scope| {
+        exec(
+            &dir,
+            &[
+                "--session",
+                doc["session"].as_str().unwrap(),
+                "--run-id",
+                "scoped-review",
+                "--skill",
+                scope,
+                "--skill",
+                scope,
+                "-p",
+                "Before $review and\n$review after",
+            ],
+        )
+    };
+    let same = replay("operator/review");
+    assert_eq!(code(&same), 0, "{}", err(&same));
+    assert_eq!(out(&same).trim(), "review complete");
+    let different = replay("repo/review");
+    assert_eq!(code(&different), 7, "{}", err(&different));
+    assert!(err(&different).contains("different skill selections"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn headless_explicit_skill_requiring_approval_stops_before_inference() {
+    let (url, gateway) = loopback(vec![]);
+    let dir = fixture(&url);
+    let skill = dir.join("work/.agents/skills/review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: Review\n---\nPRIVATE INSTRUCTIONS\n",
+    )
+    .unwrap();
+    let policy = dir.join("ops/skills.yaml");
+    fs::write(&policy, "version: 1\nrules:\n- {id: review, action: skill, match: {skill: repo/review}, effect: approve, ask: true}\n").unwrap();
+    let prompt = dir.join("ops/prompt.txt");
+    let result = dir.join("ops/result.json");
+    fs::write(&prompt, "Please $review now").unwrap();
+    let output = exec(
+        &dir,
+        &[
+            "--headless",
+            "--skill",
+            "repo/review",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--result-file",
+            result.to_str().unwrap(),
+            "--tools",
+            policy.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code(&output), 5, "{}", err(&output));
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(result).unwrap()).unwrap();
+    assert_eq!(doc["tools"]["ask_denied"], 1);
+    assert_eq!(doc["error"]["kind"], "policy");
+    assert!(doc["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no model request was sent"));
+    assert!(!out(&output).contains("PRIVATE INSTRUCTIONS"));
+    assert!(gateway.join().unwrap().is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     let (url, gateway) = loopback(tool_round(
         &[(
             "c1",
             "load_skill",
-            serde_json::json!({"name": "rust-review"}),
+            serde_json::json!({"name": "repo/rust-review"}),
         )],
         "reviewed",
     ));
@@ -1180,7 +1449,7 @@ fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     fs::write(
         &policy,
         "version: 1\nrules:\n\
-         - {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n",
+         - {id: review, action: skill, match: {skill: repo/rust-review}, effect: approve}\n",
     )
     .unwrap();
     let output = exec(
@@ -1204,7 +1473,7 @@ fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     assert_eq!(doc["effects"], "none");
     let record = &doc["ledger"][0];
     assert_eq!(record["tool"], "load_skill");
-    assert_eq!(record["name"], "rust-review");
+    assert_eq!(record["name"], "repo/rust-review");
     assert_eq!(record["root"], "repo");
     assert_eq!(record["bytes"], 21);
     assert_eq!(record["sha256"].as_str().unwrap().len(), 64);
@@ -1223,7 +1492,7 @@ fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     let audit = fs::read_to_string(dir.join("state/audit.log")).unwrap();
     let line: serde_json::Value = serde_json::from_str(audit.lines().next().unwrap()).unwrap();
     assert_eq!(line["tool"], "load_skill");
-    assert_eq!(line["name"], "rust-review");
+    assert_eq!(line["name"], "repo/rust-review");
     assert_eq!(line["root"], "repo");
     assert_eq!(line["run_id"], "skill-1");
     assert!(line.get("text").is_none());
@@ -1232,7 +1501,7 @@ fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
     let shown = ahi(&dir).args(["session", "show", id]).output().unwrap();
     assert_eq!(code(&shown), 0, "{}", err(&shown));
     assert!(
-        out(&shown).contains("— skill rust-review (repo, 21 bytes)"),
+        out(&shown).contains("— skill repo/rust-review (repo, 21 bytes)"),
         "{}",
         out(&shown)
     );

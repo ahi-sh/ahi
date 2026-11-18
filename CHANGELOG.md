@@ -4,11 +4,16 @@
 
 ### Added
 
-- `$` opens a cursor-local skill completion popup anywhere in the TUI draft. Names match case-insensitive substrings; arrows select, Enter inserts without sending, and Escape dismisses. Inline and multiline references preserve surrounding text and remain subject to tool-policy approval.
+- Streaming sessions checkpoint partial prose during generation. Quit cancels and closes the active turn, and resume shows interrupted prose without replaying it to the model. Commands record successful spawn separately from their result.
+- Opt-in policy selectors for operator skill reads and skill-relative commands; this checkout allows bundled scripts under both skill scopes without enumerating them.
+- Shared explicit skill loading for TUI, `exec`, headless, and session-service turns: a picker selection, `--skill SCOPE/NAME`, or the service's `skills` field loads approved instructions once before inference through the existing approval, audit, and replay path. The original prompt and its digest remain unchanged.
+- Portable frontmatter accepts informational metadata and extension fields, descriptions up to 1024 Unicode characters, and `disable-model-invocation` for manual-only skills. Model-facing routing metadata includes source and location without injecting whole metadata blocks.
+- `load_skill` can read nested supporting text inside the skill directory without a frontmatter reference list. Reads remain bounded, refuse traversal and symlinks, and never execute scripts or grant tool permissions.
+- `$` opens a cursor-local skill completion popup anywhere in the TUI draft. Search matches names and scoped IDs; Tab cycles Both/Repo/Operator, arrows select, Enter inserts without sending, and Escape leaves ordinary text. Paste never selects a skill.
 
 ### Changed
 
-- Repository `.agents/skills` definitions now take precedence over operator `~/.agents/skills` definitions of the same name. `ahi doctor` reports shadowed operator definitions.
+- Same-named repository and operator skills are separately selectable. Tool policy and `load_skill` require an exact `repo/name` or `operator/name` ID. Bare-name rules require migration.
 
 ## 0.21.0 (2026-11-17)
 

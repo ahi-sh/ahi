@@ -46,6 +46,7 @@ pub(crate) struct InputEditor {
     lines: Vec<String>,
     line: usize,
     column: usize,
+    skills: Vec<(std::ops::Range<usize>, String)>,
 }
 
 impl InputEditor {
@@ -54,6 +55,7 @@ impl InputEditor {
             lines: vec![String::new()],
             line: 0,
             column: 0,
+            skills: Vec::new(),
         }
     }
 
@@ -70,6 +72,7 @@ impl InputEditor {
             lines,
             line,
             column,
+            skills: Vec::new(),
         }
     }
 
@@ -90,18 +93,26 @@ impl InputEditor {
 
     /// Insert clipboard text as edits, never as submit keys.
     pub(crate) fn insert_paste(&mut self, text: &str) {
-        let mut characters = text.chars().peekable();
-        while let Some(character) = characters.next() {
-            match character {
-                '\r' => {
-                    if characters.peek() == Some(&'\n') {
-                        characters.next();
-                    }
-                    self.insert_newline();
-                }
-                '\n' => self.insert_newline(),
-                character => self.insert_char(character),
-            }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let byte = byte_index(&self.lines[self.line], self.column);
+        if text.is_empty() {
+            return;
+        }
+        self.track_line_edit(byte, 0, text.len());
+        let right = self.lines[self.line].split_off(byte);
+        let mut parts = text.split('\n');
+        let first = parts.next().unwrap_or_default();
+        self.lines[self.line].push_str(first);
+        self.column += first.chars().count();
+        let mut added: Vec<String> = parts.map(str::to_owned).collect();
+        if let Some(last) = added.last_mut() {
+            self.column = last.chars().count();
+            last.push_str(&right);
+            let count = added.len();
+            self.lines.splice(self.line + 1..self.line + 1, added);
+            self.line += count;
+        } else {
+            self.lines[self.line].push_str(&right);
         }
     }
 
@@ -110,25 +121,28 @@ impl InputEditor {
         let text = &self.lines[self.line];
         let cursor = byte_index(text, self.column);
         let start = text[..cursor].rfind('$')?;
-        if !text[start + 1..cursor]
-            .chars()
-            .all(super::skill_menu::name_char)
+        if text[..start]
+            .bytes()
+            .rev()
+            .take_while(|b| *b == b'\\')
+            .count()
+            % 2
+            == 1
         {
             return None;
         }
-        let end = cursor
-            + text[cursor..]
-                .chars()
-                .take_while(|c| super::skill_menu::name_char(*c))
-                .map(char::len_utf8)
-                .sum::<usize>();
-        Some(start..end)
+        if !text[start + 1..cursor]
+            .chars()
+            .all(crate::skills::query_char)
+        {
+            return None;
+        }
+        Some(start..cursor)
     }
 
     pub(crate) fn skill_query(&self) -> Option<String> {
         let range = self.skill_range()?;
-        let cursor = byte_index(&self.lines[self.line], self.column);
-        Some(self.lines[self.line][range.start + 1..cursor].to_string())
+        Some(self.lines[self.line][range.start + 1..range.end].to_string())
     }
 
     pub(crate) fn complete_skill(&mut self, name: &str) {
@@ -136,8 +150,46 @@ impl InputEditor {
             return;
         };
         let prefix_columns = self.lines[self.line][..range.start].chars().count();
+        let start = self.line_offset() + range.start;
+        let len = name.len() + 1;
+        self.track_edit(start, range.len(), len);
         self.lines[self.line].replace_range(range, &format!("${name}"));
         self.column = prefix_columns + name.chars().count() + 1;
+        self.skills.push((start..start + len, name.to_owned()));
+        self.skills.sort_by_key(|(span, _)| span.start);
+    }
+
+    pub(crate) fn selected_skills(&self) -> Vec<String> {
+        self.skills.iter().map(|(_, id)| id.clone()).collect()
+    }
+
+    fn line_offset(&self) -> usize {
+        self.lines[..self.line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum()
+    }
+
+    fn track_line_edit(&mut self, byte: usize, removed: usize, inserted: usize) {
+        if !self.skills.is_empty() {
+            self.track_edit(self.line_offset() + byte, removed, inserted);
+        }
+    }
+
+    // Edits within a reference remove selection intent, even if the operator
+    // later restores the text. Edits beside it move the intact reference.
+    fn track_edit(&mut self, start: usize, removed: usize, inserted: usize) {
+        self.skills.retain_mut(|(span, _)| {
+            if span.end <= start {
+                true
+            } else if span.start >= start + removed {
+                span.start = span.start - removed + inserted;
+                span.end = span.end - removed + inserted;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     pub(crate) fn contents(&self) -> String {
@@ -234,6 +286,7 @@ impl InputEditor {
     fn insert_char(&mut self, character: char) {
         let column = self.column.min(self.lines[self.line].chars().count());
         let byte = byte_index(&self.lines[self.line], column);
+        self.track_line_edit(byte, 0, character.len_utf8());
         self.lines[self.line].insert(byte, character);
         self.column = column + 1;
     }
@@ -241,6 +294,7 @@ impl InputEditor {
     fn insert_newline(&mut self) {
         let column = self.column.min(self.lines[self.line].chars().count());
         let byte = byte_index(&self.lines[self.line], column);
+        self.track_line_edit(byte, 0, 1);
         let right = self.lines[self.line].split_off(byte);
         self.lines.insert(self.line + 1, right);
         self.line += 1;
@@ -251,12 +305,16 @@ impl InputEditor {
         if self.column > 0 {
             let end = byte_index(&self.lines[self.line], self.column);
             let start = byte_index(&self.lines[self.line], self.column - 1);
+            self.track_line_edit(start, end - start, 0);
             self.lines[self.line].replace_range(start..end, "");
             self.column -= 1;
             return;
         }
         if self.line == 0 {
             return;
+        }
+        if !self.skills.is_empty() {
+            self.track_edit(self.line_offset() - 1, 1, 0);
         }
         let current = self.lines.remove(self.line);
         self.line -= 1;
@@ -269,10 +327,12 @@ impl InputEditor {
         if self.column < length {
             let start = byte_index(&self.lines[self.line], self.column);
             let end = byte_index(&self.lines[self.line], self.column + 1);
+            self.track_line_edit(start, end - start, 0);
             self.lines[self.line].replace_range(start..end, "");
             return;
         }
         if self.line + 1 < self.lines.len() {
+            self.track_line_edit(self.lines[self.line].len(), 1, 0);
             let next = self.lines.remove(self.line + 1);
             self.lines[self.line].push_str(&next);
         }

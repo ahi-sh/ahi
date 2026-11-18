@@ -1,9 +1,10 @@
 # Trusted-workspace mode: reads and writes need no prompts. Shell commands
 # have your host account's access, can reach outside this workspace, and can
 # bypass builtin file protections. This is not a sandbox. Only use this mode
-# for workspaces and model-driven actions you trust. Skills and delegation
-# still require explicit rules. Commands run through one of the shells below;
-# other executable prefixes remain denied.
+# for workspaces and model-driven actions you trust. This workspace opts in
+# to operator skill reads and to running scripts bundled with operator or repo
+# skills. Repo skill reads through load_skill and delegation remain denied.
+# Ordinary commands run through one of the shells below.
 version: 1
 default: deny
 rules:
@@ -26,6 +27,19 @@ rules:
   - id: edit-tree
     action: file_write
     match: {}
+    effect: approve
+  # Read operator skill instructions and bounded supporting files, not execute them.
+  - id: operator-skills
+    action: skill
+    match: {skill: "operator/*"}
+    effect: approve
+  - id: operator-skill-scripts
+    action: skill_command
+    match: {skill: "operator/*", script: "scripts/**"}
+    effect: approve
+  - id: repo-skill-scripts
+    action: skill_command
+    match: {skill: "repo/*", script: "scripts/**"}
     effect: approve
   - id: shell-sh
     action: command

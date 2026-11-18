@@ -21,14 +21,14 @@ rules:
     effect: approve
   - id: review-skill
     action: skill
-    match: {skill: rust-review}
+    match: {skill: repo/rust-review}
     effect: approve
   - id: release-skill
     action: skill
-    match: {skill: release}
+    match: {skill: repo/release}
     effect: approve
     ask: true
   - id: no-deploy-skill
     action: skill
-    match: {skill: deploy}
+    match: {skill: repo/deploy}
     effect: deny

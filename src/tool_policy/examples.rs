@@ -14,7 +14,7 @@ pub const DEFAULT_EXAMPLE: &str = "read-all";
 /// Shipped policies, in the order `ahi tools examples` prints them. The
 /// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
 /// the fail-closed walkthrough and is not offered here.
-pub const EXAMPLES: [Example; 10] = [
+pub const EXAMPLES: [Example; 11] = [
     Example {
         name: "read-all",
         text: include_str!("../../examples/tools/read-all.yaml"),
@@ -59,6 +59,11 @@ pub const EXAMPLES: [Example; 10] = [
         name: "skills",
         text: include_str!("../../examples/tools/skills.yaml"),
         summary: "read the whole working directory; the skills rust-review and release (after a prompt) may be loaded; deploy denied",
+    },
+    Example {
+        name: "operator-skills",
+        text: include_str!("../../examples/tools/operator-skills.yaml"),
+        summary: "explicit opt-in: load all current and future operator skills and their supporting text without prompts; no commands",
     },
     Example {
         name: "deny-all",

@@ -250,15 +250,22 @@ fn complete(
         )?,
         None => None,
     };
-    // `request` is consumed below; the destructure moves `messages` out.
-    let schemas = tools.as_ref().map(ToolRuntime::schemas);
     // The request's history is the turn's working transcript; tool exchanges
     // are appended to it, never copied.
     let ChatRequest {
         selection,
         thinking,
         mut messages,
+        skills: explicit,
     } = request;
+    if !explicit.is_empty() {
+        cancelled(cancel)?;
+        let runtime = tools.as_mut().ok_or_else(|| Error::policy(
+            "explicit skill loading is disabled: no installed skill is approved by the active tool policy"
+        ))?;
+        runtime.load_explicit(explicit, &mut messages, sender)?;
+    }
+    let schemas = tools.as_ref().map(ToolRuntime::schemas);
     let mut turn = || -> Result<()> {
         loop {
             let context = RequestContext::new(

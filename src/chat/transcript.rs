@@ -47,8 +47,8 @@ pub(crate) struct NativeReplay {
 /// The model-facing half of a tool exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolPayload {
-    /// Calls the assistant requested at the end of this assistant message,
-    /// with the native blocks the continuation must carry.
+    /// Calls requested by the assistant, or local loads requested explicitly
+    /// by the operator. Native blocks are present only for provider output.
     Calls {
         calls: Vec<ToolCall>,
         native: Option<NativeReplay>,
