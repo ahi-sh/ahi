@@ -8,11 +8,13 @@ resolved by the OS (typically `%USERPROFILE%` on Windows); ahi's XDG and
 Move repository skills from `.ahi/skills` to `.agents/skills`, and operator
 skills from `<ahi config>/skills` to `~/.agents/skills`. Old locations are no
 longer loaded. `ahi doctor` reports a deprecated repository directory if present.
-No files are moved automatically. Repository skills take precedence over
-operator skills of the same name (changed after 0.21.0, which preferred operator
-skills). `ahi doctor` reports the shadowed operator definition. Existing tool-policy approvals and symlink
-restrictions remain unchanged; this does not introduce a new skill allow/deny
-list or implement `AGENTS.md` instruction loading.
+No files are moved automatically. Both scopes now keep their own definitions
+when names collide. Update each existing `action: skill` rule from a bare
+`match.skill` to the source you reviewed, e.g. `repo/review` or `operator/review`.
+Bare names are rejected rather than authorizing either source by default. Update
+headless scripts to pass `--skill repo/review` instead of putting `$review` in the
+prompt. Ahi still rejects symlinked installs; place a real skill directory in a
+supported root and check discovery with `ahi doctor`.
 
 # Migrating to explicit primitive names
 

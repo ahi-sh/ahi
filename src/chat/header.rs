@@ -53,13 +53,21 @@ pub(crate) fn text(
     )
 }
 
-pub(crate) fn skills_text(catalog: &crate::skills::Catalog, approved: &[String]) -> String {
+pub(crate) fn skills_text(
+    catalog: &crate::skills::Catalog,
+    policy: Option<&crate::tool_policy::ActionPolicy>,
+) -> String {
     if catalog.skills.is_empty() {
         return "Skills: none discovered".into();
     }
     let mut lines = vec!["Skills (loaded on demand):".to_string()];
     for skill in &catalog.skills {
-        let status = if approved.contains(&skill.name) {
+        let status = if policy.is_some_and(|policy| {
+            !matches!(
+                policy.evaluate_skill(&skill.id()),
+                crate::tool_policy::Verdict::Deny { .. }
+            )
+        }) {
             if skill.disable_model_invocation {
                 "manual only"
             } else {
@@ -68,11 +76,7 @@ pub(crate) fn skills_text(catalog: &crate::skills::Catalog, approved: &[String])
         } else {
             "not approved"
         };
-        lines.push(format!(
-            "Skill: {} ({}, {status})",
-            skill.name,
-            skill.root.as_str()
-        ));
+        lines.push(format!("Skill: {} ({status})", skill.id()));
     }
     lines.join("\n")
 }
@@ -94,7 +98,7 @@ mod tests {
 
     #[test]
     fn skills_precede_setup_and_remain_when_tools_are_configured() {
-        let skills = skills_text(&crate::skills::Catalog::default(), &[]);
+        let skills = skills_text(&crate::skills::Catalog::default(), None);
         assert_eq!(skills, "Skills: none discovered");
         for configured in [false, true] {
             let header = with_skills(text(100, "m", "g", "off", "repo", configured), &skills);

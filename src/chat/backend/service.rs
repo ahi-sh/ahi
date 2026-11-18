@@ -196,9 +196,14 @@ impl ServiceBackend {
         request: &ChatRequest,
         prompt: &str,
     ) -> Result<(String, String), String> {
+        if !request.skills.is_empty() {
+            crate::service::wire::require_skill_selection(&self.call("health", json!({}))?)
+                .map_err(|err| err.message)?;
+        }
         let session = self.prepare(request)?;
         let turn = TurnRequest {
             prompt: prompt.to_string(),
+            skills: request.skills.clone(),
             run_id: None,
             prompt_sha256: None,
             workdir: Some(self.workdir.clone()),
@@ -577,6 +582,7 @@ mod tests {
 
     fn request(prompt: &str) -> ChatRequest {
         ChatRequest {
+            skills: Vec::new(),
             selection: super::super::parse_selection("local/vendor/model"),
             thinking: crate::chat::thinking::ThinkingLevel::Off,
             messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],

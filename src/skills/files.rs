@@ -1,7 +1,7 @@
 //! Bounded, skill-relative text reads. These checks are not a sandbox.
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::MAX_FILE_BYTES;
 
@@ -16,7 +16,7 @@ pub(crate) fn valid_reference(path: &str) -> bool {
         && !path.chars().any(char::is_control)
 }
 
-pub(super) fn read(root: &Path, relative: &str) -> Result<String, String> {
+pub(super) fn checked_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
     if !valid_reference(relative) {
         return Err(
             "file must be a relative path inside the skill directory, without '.' or '..'".into(),
@@ -37,11 +37,16 @@ pub(super) fn read(root: &Path, relative: &str) -> Result<String, String> {
     if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         return Err(format!("{relative} is not a regular file"));
     }
+    Ok(path)
+}
+
+pub(super) fn read(root: &Path, relative: &str) -> Result<String, String> {
+    let _path = checked_file(root, relative)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let file = ahi_unix::directory::Directory::open(root)
         .and_then(|directory| directory.open_file(Path::new(relative)));
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let file = fs::File::open(&path);
+    let file = fs::File::open(&_path);
     let file = file.map_err(|err| format!("{relative}: cannot read: {err}"))?;
     let metadata = file
         .metadata()

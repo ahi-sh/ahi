@@ -34,7 +34,7 @@ impl ActionPolicy {
         self.rules.iter().find(|rule| rule.id == id)
     }
 
-    /// Skill names at least one rule could approve, in rule order.
+    /// Skill selectors at least one rule could approve, in rule order.
     pub(crate) fn approved_skills(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for rule in &self.rules {
@@ -58,17 +58,27 @@ impl ActionPolicy {
                 .iter()
                 .filter(|rule| rule.action == ActionKind::Skill)
         };
-        let named = |rule: &ToolRule| rule.argv.as_ref().and_then(|argv| argv.first().cloned());
-        if let Some(rule) = skill_rules().find(|rule| {
-            rule.effect == Effect::Deny && named(rule).is_some_and(|n| n.eq_ignore_ascii_case(name))
-        }) {
+        let matches = |rule: &ToolRule| {
+            rule.argv
+                .as_ref()
+                .and_then(|argv| argv.first())
+                .is_some_and(|selector| {
+                    if selector == "operator/*" {
+                        name.starts_with("operator/")
+                    } else if rule.effect == Effect::Deny {
+                        selector.eq_ignore_ascii_case(name)
+                    } else {
+                        selector == name
+                    }
+                })
+        };
+        if let Some(rule) = skill_rules().find(|rule| rule.effect == Effect::Deny && matches(rule))
+        {
             return Verdict::Deny {
                 rule_id: Some(rule.id.clone()),
             };
         }
-        let approving = |rule: &&ToolRule| {
-            rule.effect == Effect::Approve && named(rule).is_some_and(|n| n == name)
-        };
+        let approving = |rule: &&ToolRule| rule.effect == Effect::Approve && matches(rule);
         if let Some(rule) = skill_rules().find(|rule| approving(rule) && !rule.ask) {
             return Verdict::Approve {
                 rule_id: rule.id.clone(),
@@ -82,12 +92,68 @@ impl ActionPolicy {
         Verdict::Deny { rule_id: None }
     }
 
+    pub(crate) fn evaluate_skill_command(
+        &self,
+        skill: &str,
+        script: &str,
+        path: &str,
+        args: &[String],
+    ) -> Verdict {
+        let matching = |rule: &ToolRule| {
+            let Some((skill_selector, script_selector)) = &rule.skill_script else {
+                return false;
+            };
+            let deny = rule.effect == Effect::Deny;
+            let equal = |a: &str, b: &str| a == b || (deny && a.eq_ignore_ascii_case(b));
+            (equal(skill_selector, skill)
+                || (skill_selector == "operator/*" && skill.starts_with("operator/"))
+                || (skill_selector == "repo/*" && skill.starts_with("repo/")))
+                && (equal(script_selector, script) || script_selector == "scripts/**")
+                && rule.argv_matches(args)
+                && rule.path.as_deref().is_none_or(|prefix| {
+                    if deny {
+                        path_within(&prefix.to_lowercase(), &path.to_lowercase())
+                    } else {
+                        path_within(prefix, path)
+                    }
+                })
+        };
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .find(|rule| rule.effect == Effect::Deny && matching(rule))
+        {
+            return Verdict::Deny {
+                rule_id: Some(rule.id.clone()),
+            };
+        }
+        for ask in [false, true] {
+            if let Some(rule) = self
+                .rules
+                .iter()
+                .find(|rule| rule.effect == Effect::Approve && rule.ask == ask && matching(rule))
+            {
+                return if ask {
+                    Verdict::Ask {
+                        rule_id: rule.id.clone(),
+                    }
+                } else {
+                    Verdict::Approve {
+                        rule_id: rule.id.clone(),
+                    }
+                };
+            }
+        }
+        Verdict::Deny { rule_id: None }
+    }
+
     /// `path` is the file, directory, or working directory the call names;
     /// `argv` is empty for every tool but `run_command`.
     pub(crate) fn evaluate(&self, tool: &str, path: &str, argv: &[String]) -> Verdict {
         let matching = || {
             self.rules.iter().filter(move |rule| {
-                rule.governs(tool)
+                rule.skill_script.is_none()
+                    && rule.governs(tool)
                     && rule.argv_matches(argv)
                     && rule
                         .path
@@ -102,6 +168,7 @@ impl ActionPolicy {
         let folded = path.to_lowercase();
         if let Some(rule) = self.rules.iter().find(|rule| {
             rule.effect == Effect::Deny
+                && rule.skill_script.is_none()
                 && rule.governs(tool)
                 && rule.argv_matches(argv)
                 && rule

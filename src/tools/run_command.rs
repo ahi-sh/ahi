@@ -65,6 +65,25 @@ impl RunError {
     }
 }
 
+/// Require an explicit executable script format; never let execvp fall back
+/// to interpreting a script without a shebang as shell source.
+pub(super) fn skill_argv(path: &Path, args: &[String]) -> Result<Vec<String>, &'static str> {
+    if !cfg!(unix) {
+        return Err("skill-relative script execution currently requires Unix");
+    }
+    let mut marker = [0; 2];
+    std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut marker))
+        .map_err(|_| "cannot read the skill script header")?;
+    if marker != *b"#!" {
+        return Err("a skill script must start with a shebang and be executable");
+    }
+    let program = path.to_str().ok_or("skill script path is not UTF-8")?;
+    Ok(std::iter::once(program.to_owned())
+        .chain(args.iter().cloned())
+        .collect())
+}
+
 /// Run `argv` until it exits, its timeout passes, or `cancel` is set. The
 /// child leads its own process group on Unix, and a kill takes the whole
 /// group, so a program that spawned helpers cannot leave them holding the

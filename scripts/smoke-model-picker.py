@@ -34,6 +34,8 @@ def main() -> None:
     focused = parser.add_mutually_exclusive_group()
     focused.add_argument("--appearance-only", action="store_true",
                          help="stop after local appearance, selection, and model-switch checks")
+    focused.add_argument("--skill-picker-only", action="store_true",
+                         help="stop after the scoped skill picker and bracketed paste checks")
     focused.add_argument("--session-details-only", action="store_true",
                          help="verify rich tool details in resumed standalone and service-backed chats")
     args = parser.parse_args()
@@ -354,32 +356,44 @@ def main() -> None:
         try:
             session.expect("Models · Enter use model")
             session.send("j\r")
-            session.expect("Skill: review-one (repo, not approved)")
-            session.send("$")
-            session.expect("Skills ·")
-            session.expect("$review-one")
-            session.send("TWO\r")
-            session.expect("$review-two")
-            session.absent("Skills ·")
-            session.send("\x03")  # Clear draft without exiting.
-            session.send("\x1b[200~before $rev after\x1b[201~")
+            session.expect("Skill: repo/review-one (not approved)")
+            session.send("\x1b[200~before $operator/review-two after\x1b[201~")
+            session.expect("before $operator/review-two after")
+            session.absent("Skills [")
+            session.absent("Skills: operator/review-two")
+            session.send("\x03")
+            session.send("before  after")
             session.send("\x1b[D" * 6)
-            session.expect("Skills ·")
+            session.send("$rvw")
+            session.expect("Skills [Both]")
+            session.expect("$repo/review-one")
+            session.expect("$operator/review-one")
+            session.send("\t")
+            session.expect("Skills [Repo]")
+            session.absent("$operator/review-one")
+            session.send("\t")
+            session.expect("Skills [Operator]")
+            session.absent("$repo/review-one")
             session.send("\x1b[B\r")
-            session.expect("before $review-two after")
-            session.absent("Skills ·")
+            session.expect("before $operator/review-two after")
+            session.expect("Skills: operator/review-two")
+            session.absent("Skills [")
             session.capture("inline-skill-completion")
-            session.send("\x1b[D")
-            session.expect("Skills ·")
+            session.send("\x03$rev")
+            session.expect("Skills [Both]")
             session.send("\x1b")
-            session.absent("Skills ·")
-            session.send("\r")
-            session.expect('no ahi.tools.yaml rule approves the skill "review-two"')
-            session.expect("before $review-two after")
+            session.absent("Skills [")
+            session.send("iew")
+            session.expect("$review")
+            session.absent("Skills [")
             session.send("\x03/quit\r")
             session.finish()
         finally:
             session.close()
+
+        if args.skill_picker_only:
+            print("scoped skill picker and bracketed paste passed")
+            return
 
         def expect_ids(session: Session, expected: list[str]) -> None:
             end = time.monotonic() + 10

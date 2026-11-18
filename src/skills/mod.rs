@@ -7,8 +7,8 @@
 //! <home>/.agents/skills/<name>/SKILL.md    operator skills, outside every workdir
 //! ```
 //!
-//! Both roots are enumerated, never fetched. A name in both is the
-//! repository's. A skill over a cap, with a bad frontmatter, behind a symbolic
+//! Both roots are enumerated, never fetched. Same-named skills have distinct
+//! scoped IDs. A skill over a cap, with bad frontmatter, behind a symbolic
 //! link, or whose directory name differs from its `name` is rejected with a
 //! reason: not advertised, not loadable, listed by `ahi doctor`. The text a
 //! skill carries has the authority of a file read with `read_file`: none.
@@ -18,7 +18,7 @@
 mod files;
 mod invocation;
 pub(crate) use files::valid_reference;
-pub(crate) use invocation::{name_char, requested_names};
+pub(crate) use invocation::{parse_id, query_char, valid_id};
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -81,7 +81,13 @@ pub(crate) struct Rejected {
     pub(crate) reason: String,
 }
 
-/// Everything both roots hold, valid and refused, repo shadowing operator.
+impl Skill {
+    pub(crate) fn id(&self) -> String {
+        format!("{}/{}", self.root.as_str(), self.name)
+    }
+}
+
+/// Everything both roots hold, valid and refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
     pub(crate) skills: Vec<Skill>,
@@ -89,9 +95,12 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    /// The valid skill called `name`.
-    pub(crate) fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.iter().find(|skill| skill.name == name)
+    /// Resolve only a qualified identity, never a same-named substitute.
+    pub(crate) fn get(&self, id: &str) -> Option<&Skill> {
+        let (scope, name) = id.split_once('/')?;
+        self.skills
+            .iter()
+            .find(|skill| skill.root.as_str() == scope && skill.name == name)
     }
 
     /// `ahi doctor` lines: the valid names by root, then each refusal.
@@ -179,23 +188,30 @@ pub(crate) fn enumerate(workdir: &Path, home: Option<&Path>) -> Catalog {
         &mut repo,
         &mut catalog.rejected,
     );
-    // The nearest workspace definition wins over the operator default.
-    for (name, skill) in operator {
-        match repo.entry(name) {
-            std::collections::btree_map::Entry::Occupied(taken) => {
-                catalog.rejected.push(Rejected {
-                    name: taken.key().clone(),
-                    root: Root::Operator,
-                    reason: "a repository skill of the same name shadows it".into(),
-                });
-            }
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(skill);
-            }
-        }
-    }
-    catalog.skills = repo.into_values().collect();
+    catalog.skills = repo.into_values().chain(operator.into_values()).collect();
     catalog
+}
+
+/// An exact script path below a skill's scripts directory, never a selector.
+pub(crate) fn valid_script(script: &str) -> bool {
+    script.starts_with("scripts/") && !script.contains('*') && valid_reference(script)
+}
+
+/// Resolve the script again immediately before dispatch. These are pathname
+/// checks, not protection against concurrent replacement or a sandbox.
+pub(crate) fn script_path(skill: &Skill, script: &str) -> Result<PathBuf, &'static str> {
+    if !valid_script(script) {
+        return Err("script must be a relative file below scripts/");
+    }
+    if !skill
+        .dir
+        .parent()
+        .is_some_and(|root| no_link_chain(root).is_ok_and(|present| present))
+    {
+        return Err("the skill root is not a real directory");
+    }
+    files::checked_file(&skill.dir, script)
+        .map_err(|_| "the skill script is not a regular, non-symlink file")
 }
 
 /// Read a skill's body (`file` `None`) or a supporting relative file, with the
@@ -451,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn both_roots_are_enumerated_and_the_repo_shadows_the_operator() {
+    fn both_roots_keep_same_named_skills_independently_addressable() {
         let base = crate::fixture_directory::create_unique_fixture_directory("skills");
         let work = base.join("work");
         let config = base.join("config");
@@ -484,11 +500,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [("release", Root::Repo), ("rust-review", Root::Repo)]
+            [
+                ("release", Root::Repo),
+                ("rust-review", Root::Repo),
+                ("release", Root::Operator)
+            ]
         );
-        assert_eq!(catalog.rejected.len(), 1, "{:?}", catalog.rejected);
-        assert!(catalog.rejected[0].reason.contains("shadows"));
-        let review = catalog.get("rust-review").unwrap();
+        assert!(catalog.rejected.is_empty());
+        assert!(catalog.get("release").is_none());
+        let review = catalog.get("repo/rust-review").unwrap();
         assert_eq!(review.when.as_deref(), Some("before a PR"));
         assert_eq!(review.references, ["checklist.md"]);
         assert_eq!(read(review, None).unwrap(), "# Review\nLook twice.\n");
@@ -500,13 +520,16 @@ mod tests {
             .unwrap_err()
             .contains("relative path"));
         assert_eq!(
-            read(catalog.get("release").unwrap(), None).unwrap(),
+            read(catalog.get("repo/release").unwrap(), None).unwrap(),
             "repo release\n"
         );
         let lines = catalog.doctor_lines();
         assert_eq!(lines[0], "skills (repo): release, rust-review");
-        assert_eq!(lines[1], "skills (operator): none");
-        assert!(lines[2].starts_with("skill rejected (operator): release:"));
+        assert_eq!(lines[1], "skills (operator): release");
+        assert_eq!(
+            read(catalog.get("operator/release").unwrap(), None).unwrap(),
+            "operator release\n"
+        );
         // No roots at all is no skills and no complaint.
         let empty = enumerate(&base.join("nowhere"), None);
         assert_eq!(empty, Catalog::default());
@@ -597,7 +620,7 @@ mod tests {
         let names: Vec<&str> = catalog.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["good", "unknown-key"]);
         assert_eq!(
-            catalog.get("unknown-key").unwrap().attributes["tools"],
+            catalog.get("repo/unknown-key").unwrap().attributes["tools"],
             serde_json::json!(["sh"])
         );
         let reason = |name: &str| {
@@ -669,7 +692,7 @@ mod tests {
         fs::create_dir_all(&support).unwrap();
         fs::write(support.join("guide.md"), "Nested guidance.\n").unwrap();
         let catalog = enumerate(&base, None);
-        let portable = catalog.get("portable").unwrap();
+        let portable = catalog.get("repo/portable").unwrap();
         assert_eq!(portable.description, description);
         assert!(portable.disable_model_invocation);
         assert_eq!(portable.attributes["license"], "MIT");

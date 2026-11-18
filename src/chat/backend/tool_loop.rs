@@ -128,11 +128,10 @@ impl ToolRuntime {
         // working directory (never a session header's `cwd`) and the
         // operator root; only approved names that validate are offered.
         let catalog = crate::skills::enumerate(workspace.root(), std::env::home_dir().as_deref());
-        let approved = policy.approved_skills();
         let skills: Vec<crate::skills::Skill> = catalog
             .skills
             .iter()
-            .filter(|skill| approved.contains(&skill.name))
+            .filter(|skill| !matches!(policy.evaluate_skill(&skill.id()), Verdict::Deny { .. }))
             .cloned()
             .collect();
         let mut advertised = policy.advertised_tools();
@@ -164,7 +163,7 @@ impl ToolRuntime {
             .skills
             .iter()
             .filter(|skill| {
-                !skill.disable_model_invocation || self.explicit_skills.contains(&skill.name)
+                !skill.disable_model_invocation || self.explicit_skills.contains(&skill.id())
             })
             .cloned()
             .collect();
@@ -191,7 +190,12 @@ impl ToolRuntime {
                 "too many explicit skill references in one turn",
             ));
         }
-        self.explicit_skills = names;
+        self.explicit_skills.clear();
+        for name in names {
+            if !self.explicit_skills.contains(&name) {
+                self.explicit_skills.push(name);
+            }
+        }
         let batch = crate::session::run_id();
         let calls: Vec<_> = self
             .explicit_skills
@@ -314,14 +318,18 @@ impl ToolRuntime {
         {
             return Plan::Done(Box::new(denied(
                 &prepared,
-                "manual-only skill requires an explicit $name reference this turn",
+                "manual-only skill requires an explicit selection this turn",
             )));
         }
-        let verdict = if prepared.tool == tools::LOAD_SKILL {
-            self.policy.evaluate_skill(prepared.target())
-        } else {
-            self.policy
-                .evaluate(prepared.tool, &prepared.path, prepared.argv())
+        let verdict = match &prepared.arguments {
+            Arguments::SkillCommand { argv, .. } => {
+                self.policy
+                    .evaluate_skill_command(&argv[0], &argv[1], &prepared.path, &argv[2..])
+            }
+            Arguments::Skill { .. } => self.policy.evaluate_skill(prepared.target()),
+            _ => self
+                .policy
+                .evaluate(prepared.tool, &prepared.path, prepared.argv()),
         };
         match verdict {
             Verdict::Deny {
@@ -349,6 +357,7 @@ impl ToolRuntime {
     }
 
     fn granted(&self, prepared: &PreparedCall) -> bool {
+        let skill_script = matches!(prepared.arguments, Arguments::SkillCommand { .. });
         self.grants.lock().is_ok_and(|grants| {
             grants.iter().any(|grant| {
                 grant.root == self.workspace.root()
@@ -356,7 +365,12 @@ impl ToolRuntime {
                     && grant.destination == self.destination
                     && grant.tool == prepared.tool
                     && path_within(&grant.prefix, &prepared.path)
-                    && prepared.argv().starts_with(&grant.argv)
+                    && grant.skill_script == skill_script
+                    && if skill_script {
+                        prepared.argv() == grant.argv
+                    } else {
+                        prepared.argv().starts_with(&grant.argv)
+                    }
             })
         })
     }
@@ -427,6 +441,7 @@ impl ToolRuntime {
                         .unwrap_or_default();
                     // A skill grant is the name alone (`argv`), under the
                     // root, like a command grant for a rule without a path.
+                    let skill_script = matches!(prepared.arguments, Arguments::SkillCommand { .. });
                     if !prefix.is_empty()
                         || matches!(prepared.tool, tools::RUN_COMMAND | tools::LOAD_SKILL)
                     {
@@ -437,7 +452,12 @@ impl ToolRuntime {
                                 destination: self.destination.clone(),
                                 tool: prepared.tool.to_string(),
                                 prefix,
-                                argv,
+                                skill_script,
+                                argv: if skill_script || prepared.tool == tools::LOAD_SKILL {
+                                    prepared.argv().to_vec()
+                                } else {
+                                    argv
+                                },
                             });
                         }
                     }
@@ -484,7 +504,9 @@ impl ToolRuntime {
                     "deadline reached: the turn's time ran out before this call started",
                 );
             }
-            if let Arguments::Command { timeout_secs, .. } = &mut bounded.arguments {
+            if let Arguments::Command { timeout_secs, .. }
+            | Arguments::SkillCommand { timeout_secs, .. } = &mut bounded.arguments
+            {
                 *timeout_secs = (*timeout_secs).min(remaining.as_secs().max(1));
             }
         }

@@ -97,6 +97,7 @@ pub struct Options {
     pub model: String,
     pub prompt: Option<String>,
     pub prompt_file: Option<PathBuf>,
+    pub skills: Vec<String>,
     pub headless: bool,
     pub workdir: Option<PathBuf>,
     pub tools: Option<PathBuf>,
@@ -139,6 +140,18 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
     let selection = crate::chat::backend::parse_selection(&options.model);
     if selection.gateway.is_empty() || selection.model.is_empty() {
         return Err(usage("--model takes gateway/model-id"));
+    }
+    if options.skills.len() > crate::skills::MAX_SKILLS {
+        return Err(usage("too many explicit --skill requests"));
+    }
+    if let Some(id) = options
+        .skills
+        .iter()
+        .find(|id| !crate::skills::valid_id(id))
+    {
+        return Err(usage(format!(
+            "invalid --skill {id:?}: expected repo/<skill-name> or operator/<skill-name>"
+        )));
     }
     if let Some(level) = &options.thinking {
         if crate::chat::thinking::ThinkingLevel::parse(level).is_none() {
@@ -251,6 +264,12 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
             client
         }
     };
+    if !options.skills.is_empty() {
+        client
+            .call("health", json!({}))
+            .and_then(|health| wire::require_skill_selection(&health))
+            .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+    }
     if options.verbose {
         if let Some(path) = client.socket() {
             eprintln!("using the server on {}", path.display());
@@ -294,6 +313,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
     let progress = options.headless || options.verbose;
     let timeout = Duration::from_secs(options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let request = TurnRequest {
+        skills: options.skills.clone(),
         prompt,
         run_id: options.run_id.clone(),
         prompt_sha256: Some(digest),

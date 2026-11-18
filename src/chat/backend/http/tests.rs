@@ -568,6 +568,7 @@ fn verify_responses_tool_requests() {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        skills: Vec::new(),
         selection: parse_selection("local/vendor/model"),
         thinking: ThinkingLevel::Medium,
         messages: vec![
@@ -2438,10 +2439,10 @@ fn an_explicit_actions_file_replaces_the_workspace_policy() {
 
 const SKILL_RULES: &str = "version: 1\nrules:\n\
     - {id: reads, action: tool_call, match: {tool: read_file, path: src}, effect: approve}\n\
-    - {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n\
-    - {id: release, action: skill, match: {skill: release}, effect: approve, ask: true}\n\
-    - {id: ghost, action: skill, match: {skill: ghost}, effect: approve}\n\
-    - {id: no-deploy, action: skill, match: {skill: deploy}, effect: deny}\n";
+    - {id: review, action: skill, match: {skill: repo/rust-review}, effect: approve}\n\
+    - {id: release, action: skill, match: {skill: repo/release}, effect: approve, ask: true}\n\
+    - {id: ghost, action: skill, match: {skill: repo/ghost}, effect: approve}\n\
+    - {id: no-deploy, action: skill, match: {skill: repo/deploy}, effect: deny}\n";
 
 /// The fixture with three repo skills: `rust-review` with a reference,
 /// `release`, and `deploy`; `ghost` is approved but installed nowhere.
@@ -2481,29 +2482,29 @@ fn advertised_tools(request: &serde_json::Value) -> Vec<String> {
 fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() {
     let (url, server) = server_sequence(vec![
         calls_stream(&[
-            ("c1", "load_skill", json!({"name": "rust-review"})),
+            ("c1", "load_skill", json!({"name": "repo/rust-review"})),
             (
                 "c2",
                 "load_skill",
-                json!({"name": "rust-review", "file": "checklist.md"}),
+                json!({"name": "repo/rust-review", "file": "checklist.md"}),
             ),
             (
                 "c3",
                 "load_skill",
-                json!({"name": "rust-review", "file": "notes.md"}),
+                json!({"name": "repo/rust-review", "file": "notes.md"}),
             ),
             (
                 "c4",
                 "load_skill",
-                json!({"name": "rust-review", "file": "../secret"}),
+                json!({"name": "repo/rust-review", "file": "../secret"}),
             ),
-            ("c5", "load_skill", json!({"name": "deploy"})),
-            ("c6", "load_skill", json!({"name": "ghost"})),
-            ("c7", "load_skill", json!({"name": "unknown"})),
+            ("c5", "load_skill", json!({"name": "repo/deploy"})),
+            ("c6", "load_skill", json!({"name": "repo/ghost"})),
+            ("c7", "load_skill", json!({"name": "operator/rust-review"})),
             (
                 "c8",
                 "load_skill",
-                json!({"name": "rust-review", "path": "src"}),
+                json!({"name": "repo/rust-review", "path": "src"}),
             ),
         ]),
         text_stream("done"),
@@ -2560,7 +2561,8 @@ fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() 
         (
             "c6".into(),
             1,
-            "error: no valid skill of that name is installed; `ahi doctor` lists them".into()
+            "error: no valid skill with that scoped ID is installed; `ahi doctor` lists them"
+                .into()
         )
     );
     assert_eq!(
@@ -2586,12 +2588,12 @@ fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() 
         .unwrap();
     assert!(
         description.contains(
-            "- rust-review: Review Rust changes — before a PR (references: checklist.md)"
+            "- repo/rust-review: Review Rust changes — before a PR (references: checklist.md)"
         ),
         "{description}"
     );
     assert!(
-        description.contains("- release: Cut a release"),
+        description.contains("- repo/release: Cut a release"),
         "{description}"
     );
     assert!(
@@ -2619,6 +2621,7 @@ fn explicit_skill_is_loaded_once_before_the_first_model_request() {
     let mut input = request();
     input.messages[0].text = "$not-a-current-request".into();
     input.messages.last_mut().unwrap().text = "Before $rust-review and\n$rust-review after".into();
+    input.skills = vec!["repo/rust-review".into(), "repo/rust-review".into()];
     let (events, approvals) = collect_answering(&mut fixture.backend(), input, vec![]);
     assert!(approvals.is_empty());
     let loaded = results(&events);
@@ -2648,7 +2651,7 @@ fn explicit_skill_is_loaded_once_before_the_first_model_request() {
 #[test]
 fn manual_only_skill_is_hidden_and_cannot_be_auto_loaded() {
     let (url, server) = server_sequence(vec![
-        calls_stream(&[("c1", "load_skill", json!({"name": "rust-review"}))]),
+        calls_stream(&[("c1", "load_skill", json!({"name": "repo/rust-review"}))]),
         text_stream("done"),
     ]);
     let fixture = skill_fixture(&url, SKILL_RULES);
@@ -2660,7 +2663,7 @@ fn manual_only_skill_is_hidden_and_cannot_be_auto_loaded() {
         (
             "c1".into(),
             126,
-            "denied: manual-only skill requires an explicit $name reference this turn".into()
+            "denied: manual-only skill requires an explicit selection this turn".into()
         )
     );
     let requests = server.join().unwrap();
@@ -2680,7 +2683,7 @@ fn explicit_skills_over_the_output_budget_are_not_sent_partially() {
     let mut policy = String::from("version: 1\nrules:\n");
     for name in &names {
         policy.push_str(&format!(
-            "- {{id: {name}, action: skill, match: {{skill: {name}}}, effect: approve}}\n"
+            "- {{id: {name}, action: skill, match: {{skill: repo/{name}}}, effect: approve}}\n"
         ));
     }
     let fixture = ToolFixture::new(&url, &policy, json!({"id": "vendor/model"}));
@@ -2697,11 +2700,7 @@ fn explicit_skills_over_the_output_budget_are_not_sent_partially() {
         .unwrap();
     }
     let mut input = request();
-    input.messages.last_mut().unwrap().text = names
-        .iter()
-        .map(|name| format!("${name}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    input.skills = names.iter().map(|name| format!("repo/{name}")).collect();
     let (events, approvals) = collect_answering(&mut fixture.backend(), input, vec![]);
     assert!(approvals.is_empty());
     assert!(matches!(
@@ -2719,7 +2718,7 @@ fn explicit_skill_approval_denial_prevents_inference() {
     let (url, server) = server_sequence(vec![]);
     let fixture = skill_fixture(&url, SKILL_RULES);
     let mut input = request();
-    input.messages.last_mut().unwrap().text = "Please $release now".into();
+    input.skills = vec!["repo/release".into()];
     let (events, approvals) = collect_answering(
         &mut fixture.backend(),
         input,
@@ -2741,11 +2740,11 @@ fn explicit_skill_approval_denial_prevents_inference() {
 fn a_skill_under_an_ask_rule_prompts_with_its_name_and_a_grant_holds_for_the_session() {
     let (url, server) = server_sequence(vec![
         calls_stream(&[
-            ("c1", "load_skill", json!({"name": "release"})),
-            ("c2", "load_skill", json!({"name": "release"})),
+            ("c1", "load_skill", json!({"name": "repo/release"})),
+            ("c2", "load_skill", json!({"name": "repo/release"})),
         ]),
         // Granted for the session by c1's answer: no second prompt.
-        calls_stream(&[("c3", "load_skill", json!({"name": "release"}))]),
+        calls_stream(&[("c3", "load_skill", json!({"name": "repo/release"}))]),
         text_stream("done"),
     ]);
     let fixture = skill_fixture(&url, SKILL_RULES);
@@ -2763,14 +2762,14 @@ fn a_skill_under_an_ask_rule_prompts_with_its_name_and_a_grant_holds_for_the_ses
             ProposedAction {
                 call_id: "c1".into(),
                 tool: "load_skill".into(),
-                target: "release".into(),
+                target: "repo/release".into(),
                 grant_prefix: "".into(),
                 detail: "the skill's text".into(),
             },
             ProposedAction {
                 call_id: "c2".into(),
                 tool: "load_skill".into(),
-                target: "release".into(),
+                target: "repo/release".into(),
                 grant_prefix: "".into(),
                 detail: "the skill's text".into(),
             },
@@ -2790,7 +2789,7 @@ fn a_skill_under_an_ask_rule_prompts_with_its_name_and_a_grant_holds_for_the_ses
 
     // Unattended, the same ask is a denial the model is told about.
     let (url, _server) = server_sequence(vec![
-        calls_stream(&[("c1", "load_skill", json!({"name": "release"}))]),
+        calls_stream(&[("c1", "load_skill", json!({"name": "repo/release"}))]),
         text_stream("done"),
     ]);
     let fixture = skill_fixture(&url, SKILL_RULES);
@@ -2813,7 +2812,7 @@ fn a_skill_under_an_ask_rule_prompts_with_its_name_and_a_grant_holds_for_the_ses
 #[test]
 fn without_a_skill_rule_nothing_is_advertised_and_a_planted_skill_is_invisible() {
     let (url, server) = server_sequence(vec![
-        calls_stream(&[("c1", "load_skill", json!({"name": "rust-review"}))]),
+        calls_stream(&[("c1", "load_skill", json!({"name": "repo/rust-review"}))]),
         text_stream("done"),
     ]);
     // The skills are on disk; the policy names none of them.

@@ -190,8 +190,28 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
             "client is at most {MAX_CLIENT_LEN} bytes of printable text"
         )));
     }
+    let skills = match params.get("skills") {
+        None => Vec::new(),
+        Some(value) => {
+            let ids = value
+                .as_array()
+                .ok_or_else(|| usage("skills must be an array of qualified IDs"))?;
+            if ids.len() > crate::skills::MAX_SKILLS {
+                return Err(usage("too many explicit skill requests"));
+            }
+            ids.iter()
+                .map(|id| {
+                    let id = id
+                        .as_str()
+                        .ok_or_else(|| usage("skill ID must be a string"))?;
+                    crate::skills::parse_id(id).map_err(|reason| usage(&reason))
+                })
+                .collect::<ServiceResult<Vec<_>>>()?
+        }
+    };
     Ok(TurnRequest {
         prompt,
+        skills,
         run_id,
         prompt_sha256,
         workdir: text("workdir").map(PathBuf::from),
@@ -204,11 +224,25 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
     })
 }
 
+/// Old services ignore unknown turn fields. Fail before submitting a turn
+/// if a service may drop the operator's selections.
+pub(crate) fn require_skill_selection(health: &Value) -> ServiceResult<()> {
+    if health["scoped_skill_selection"] == true {
+        Ok(())
+    } else {
+        Err(ServiceError {
+            kind: "config",
+            message: "the session service does not support scoped skill selection; upgrade or restart it before retrying".into(),
+        })
+    }
+}
+
 /// Encode a `TurnRequest` as `turn.submit` params.
 pub(crate) fn turn_params(session: &str, request: &TurnRequest) -> Value {
     json!({
         "session": session,
         "prompt": request.prompt,
+        "skills": request.skills,
         "run_id": request.run_id,
         "prompt_sha256": request.prompt_sha256,
         "workdir": request.workdir.as_ref().map(|path| path.display().to_string()),
@@ -247,6 +281,7 @@ pub(crate) fn dispatch(
             "version": crate::VERSION,
             "store": service.store_dir().display().to_string(),
             "open_turns": service.open_turns(),
+            "scoped_skill_selection": true,
         })),
         "session.list" => Ok(Value::Array(service.list_sessions()?)),
         "session.create" => {
@@ -353,6 +388,24 @@ mod tests {
             matches!(Event::from_json(&json), Some(Event::Lagged { session }) if session == "s1")
         );
         assert!(Event::from_json(&json!({"event": "lagged"})).is_none());
+    }
+
+    #[test]
+    fn turn_keeps_scoped_skill_selection_separate_from_prompt() {
+        let turn =
+            request(json!({"prompt": "echo $PATH", "skills": ["operator/review", "repo/review"]}))
+                .unwrap();
+        let round_trip = turn_request(&turn_params("s", &turn)).unwrap();
+        assert_eq!(round_trip.prompt, "echo $PATH");
+        assert_eq!(round_trip.skills, ["operator/review", "repo/review"]);
+        for bad in [
+            json!("repo/review"),
+            json!(["review"]),
+            json!(["repo/a/b"]),
+            json!([1]),
+        ] {
+            assert_eq!(request(json!({"skills": bad})).unwrap_err().kind, "usage");
+        }
     }
 
     #[test]

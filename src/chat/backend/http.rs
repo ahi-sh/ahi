@@ -256,14 +256,8 @@ fn complete(
         selection,
         thinking,
         mut messages,
+        skills: explicit,
     } = request;
-    // Only the new operator message may request a load. Never reinterpret
-    // references in history, assistant text, or tool output as fresh intent.
-    let explicit = messages
-        .last()
-        .filter(|message| message.role == TranscriptRole::Operator)
-        .map(|message| crate::skills::requested_names(&message.text))
-        .unwrap_or_default();
     if !explicit.is_empty() {
         cancelled(cancel)?;
         let runtime = tools.as_mut().ok_or_else(|| Error::policy(

@@ -1,0 +1,10 @@
+# Opt in to every current and future operator skill and its bounded supporting
+# text files. The selected provider can receive skill metadata and loaded text.
+# Repo skills, commands, and other tools are not approved by this policy.
+version: 1
+default: deny
+rules:
+  - id: operator-skills
+    action: skill
+    match: {skill: "operator/*"}
+    effect: approve

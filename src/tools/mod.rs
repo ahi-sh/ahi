@@ -51,7 +51,7 @@ pub(crate) const WRITE_FILE: &str = "write_file";
 pub(crate) const RUN_COMMAND: &str = "run_command";
 pub(crate) const DELEGATE: &str = "delegate";
 /// The builtin tool that reads a skill's text, governed by `action: skill`
-/// rules matched on the skill's name. Text, never authority.
+/// rules matched on the skill's scoped ID. Text, never authority.
 pub(crate) const LOAD_SKILL: &str = crate::tool_policy::SKILL_TOOL;
 
 pub(crate) const BUILTIN: [&str; 9] = [
@@ -118,6 +118,11 @@ pub(super) enum Arguments {
         argv: Vec<String>,
         timeout_secs: u64,
     },
+    SkillCommand {
+        // Scoped ID, relative script path, then arguments.
+        argv: Vec<String>,
+        timeout_secs: u64,
+    },
     /// `load_skill`: `name` holds the one skill name, as a list so policy
     /// and grants match it the way they match an argv prefix; `file` names
     /// a declared reference instead of the skill's own text.
@@ -167,7 +172,7 @@ impl PreparedCall {
     /// rules and session grants match.
     pub(super) fn argv(&self) -> &[String] {
         match &self.arguments {
-            Arguments::Command { argv, .. } => argv,
+            Arguments::Command { argv, .. } | Arguments::SkillCommand { argv, .. } => argv,
             Arguments::Delegate { worker, .. } => worker,
             Arguments::Skill { name, .. } => name,
             _ => &[],
@@ -180,7 +185,9 @@ impl PreparedCall {
     /// argument the operator must see to decide, so it is shown.
     pub(super) fn detail(&self) -> String {
         match &self.arguments {
-            Arguments::Command { argv, .. } => run_command::render(argv),
+            Arguments::Command { argv, .. } | Arguments::SkillCommand { argv, .. } => {
+                run_command::render(argv)
+            }
             Arguments::Skill { file, .. } => match file {
                 Some(file) => format!("reference {file}"),
                 None => "the skill's text".to_string(),
@@ -251,7 +258,7 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "name": string("The skill's name, one of those listed"),
+                        "name": string("The skill's scoped ID (repo/name or operator/name), one of those listed"),
                         "file": string("A UTF-8 supporting file relative to the skill directory, such as references/guide.md; omit to load instructions")
                     },
                     "required": ["name"],
@@ -358,15 +365,17 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             _ => ToolSchema {
                 name: RUN_COMMAND,
-                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. Policy approves commands by argv prefix. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.".into(),
+                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. For an approved bundled script, send skill, script and optional args instead of argv. Policy approves these two forms separately. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments, one element each"},
+                        "skill": string("Scoped skill ID for a bundled script, instead of argv"),
+                        "script": string("Exact skill-relative path below scripts/"),
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Bundled script arguments"},
                         "path": string("Working directory relative to the working directory; defaults to '.'"),
                         "timeout": integer("Seconds before the program is killed", 1)
                     },
-                    "required": ["argv"],
                     "additionalProperties": false
                 }),
             },
@@ -386,7 +395,7 @@ fn skill_description(skills: &[crate::skills::Skill]) -> String {
     for skill in skills {
         text.push_str(&format!(
             "\n- {}: {}",
-            skill.name,
+            skill.id(),
             skill
                 .description
                 .split_whitespace()
@@ -414,6 +423,9 @@ fn skill_description(skills: &[crate::skills::Skill]) -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawArguments {
+    skill: Option<String>,
+    script: Option<String>,
+    args: Option<Vec<String>>,
     path: Option<String>,
     offset: Option<u64>,
     limit: Option<u64>,
@@ -473,7 +485,11 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         && raw.content.is_none()
         && raw.overwrite.is_none();
     let no_paging = raw.offset.is_none() && raw.limit.is_none();
-    let no_command = raw.argv.is_none() && (raw.timeout.is_none() || tool == DELEGATE);
+    let no_command = raw.argv.is_none()
+        && raw.skill.is_none()
+        && raw.script.is_none()
+        && raw.args.is_none()
+        && (raw.timeout.is_none() || tool == DELEGATE);
     let no_delegate = raw.worker.is_none() && raw.prompt.is_none() && raw.task.is_none();
     if tool != RUN_COMMAND {
         only(no_command)?;
@@ -499,8 +515,8 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                     && raw.task.is_none(),
             )?;
             let name = raw.name.ok_or(INVALID)?;
-            if !crate::precommit::policy::valid_rule_id(&name) {
-                return Err("name is a skill name of 1 to 64 letters, digits, '-', '_', or '.'");
+            if !crate::skills::valid_id(&name) {
+                return Err("name must be repo/<skill-name> or operator/<skill-name>");
             }
             if let Some(file) = &raw.file {
                 if !crate::skills::valid_reference(file) {
@@ -544,7 +560,22 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         }
         RUN_COMMAND => {
             only(no_paging && no_search && no_write)?;
-            let argv = raw.argv.ok_or(INVALID)?;
+            let scoped = raw.skill.is_some() || raw.script.is_some() || raw.args.is_some();
+            let argv = if scoped {
+                if raw.argv.is_some() {
+                    return Err("use argv or skill/script/args, not both");
+                }
+                let skill = raw.skill.ok_or(INVALID)?;
+                let script = raw.script.ok_or(INVALID)?;
+                if !crate::skills::valid_id(&skill) || !crate::skills::valid_script(&script) {
+                    return Err("expected a scoped skill ID and a relative file below scripts/");
+                }
+                let mut argv = vec![skill, script];
+                argv.extend(raw.args.unwrap_or_default());
+                argv
+            } else {
+                raw.argv.ok_or(INVALID)?
+            };
             if argv.is_empty() || argv.len() > run_command::MAX_ARGV {
                 return Err("argv must have 1 to 64 elements");
             }
@@ -559,7 +590,11 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                 Some(0) => return Err(INVALID),
                 Some(secs) => secs.min(run_command::MAX_TIMEOUT_SECS),
             };
-            Arguments::Command { argv, timeout_secs }
+            if scoped {
+                Arguments::SkillCommand { argv, timeout_secs }
+            } else {
+                Arguments::Command { argv, timeout_secs }
+            }
         }
         READ_FILE => {
             if path.is_empty() {
@@ -724,15 +759,27 @@ pub(super) fn execute(
                 skill: None,
             })
         }
-        Arguments::Command { argv, timeout_secs } => {
+        Arguments::Command { argv, timeout_secs }
+        | Arguments::SkillCommand { argv, timeout_secs } => {
             let cwd = workspace
                 .resolve(&call.path)
                 .map_err(|message| ToolFailure {
                     message,
                     ran: Some(false),
                 })?;
+            let resolved;
+            let command = if matches!(call.arguments, Arguments::SkillCommand { .. }) {
+                let skill = skills
+                    .get(&argv[0])
+                    .ok_or("no valid skill with that scoped ID is installed")?;
+                let path = crate::skills::script_path(skill, &argv[1])?;
+                resolved = run_command::skill_argv(&path, &argv[2..])?;
+                &resolved
+            } else {
+                argv
+            };
             let (content, report, output) =
-                run_command::run(argv, &cwd, *timeout_secs, toolchain_env, cancel)?;
+                run_command::run(command, &cwd, *timeout_secs, toolchain_env, cancel)?;
             Ok(Executed {
                 content,
                 detail: Some(ToolDetail::Command {

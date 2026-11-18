@@ -126,6 +126,7 @@ struct ChatScreen {
     /// The last turn failed before the gateway was reached, so Enter on a
     /// blank input sends the same transcript again.
     resend_available: bool,
+    turn_skills: Vec<String>,
     preferences: preferences::Preferences,
     appearance: appearance::Appearance,
     /// Set on send, cleared at the turn's end; drives the activity counter.
@@ -139,7 +140,7 @@ struct ChatScreen {
     status: crate::program_status::Reporter,
     /// The session this chat is recorded into.
     recorder: session::recorder::Recorder,
-    /// `--tools <file>`, when given, for the `$name` check; otherwise the
+    /// `--tools <file>`, when given, for showing skill policy; otherwise the
     /// working directory's `ahi.tools.yaml`.
     actions_file: Option<std::path::PathBuf>,
 }
@@ -257,6 +258,7 @@ impl ChatScreen {
             location_receiver: None,
             reconnecting: None,
             resend_available: false,
+            turn_skills: Vec::new(),
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -279,19 +281,25 @@ impl ChatScreen {
             Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
             None => crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN),
         };
-        let approved = policy
-            .ok()
-            .flatten()
-            .map(|p| p.approved_skills())
-            .unwrap_or_default();
+        let policy = policy.ok().flatten();
         let catalog =
             crate::skills::enumerate(&self.workspace_root, std::env::home_dir().as_deref());
-        self.skill_menu.names = catalog
+        self.skill_menu.names = catalog.skills.iter().map(|skill| skill.id()).collect();
+        self.skill_menu.descriptions = catalog
             .skills
             .iter()
-            .map(|skill| skill.name.clone())
+            .map(|skill| {
+                (
+                    skill.id(),
+                    skill
+                        .description
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            })
             .collect();
-        let skills = header::skills_text(&catalog, &approved);
+        let skills = header::skills_text(&catalog, policy.as_ref());
         let text = header::text(
             120,
             &self.selection.model,
@@ -530,7 +538,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             Event::Paste(text) => {
-                self.skill_menu.reset();
+                self.skill_menu.dismissed = true;
                 self.settings_menu.reset();
                 self.input.insert_paste(&text);
                 Ok(ScreenAction::Continue)
@@ -549,6 +557,10 @@ impl ChatScreen {
                 let names = self.skill_menu.matching(&query);
                 let count = names.len();
                 match action {
+                    KeyAction::CycleSkillScope => {
+                        self.skill_menu.cycle_scope();
+                        return Ok(ScreenAction::Continue);
+                    }
                     KeyAction::Cancel => {
                         self.skill_menu.dismissed = true;
                         return Ok(ScreenAction::Continue);
@@ -625,7 +637,7 @@ impl ChatScreen {
             }
         }
         match action {
-            KeyAction::Ignore => Ok(ScreenAction::Continue),
+            KeyAction::Ignore | KeyAction::CycleSkillScope => Ok(ScreenAction::Continue),
             KeyAction::Cancel => {
                 // A selection or a pending approval owns Esc first; with
                 // neither, Esc stops the streaming response.
@@ -691,9 +703,26 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Edit(key) => {
-                self.skill_menu.reset();
                 self.settings_menu.reset();
+                let shrinking_query = key == input::EditorKey::Backspace
+                    && !self.skill_menu.dismissed
+                    && self
+                        .input
+                        .skill_query()
+                        .is_some_and(|query| !query.is_empty());
                 self.input.apply(key, self.transcript_width);
+                match key {
+                    input::EditorKey::Character('$') if self.input.skill_query().is_some() => {
+                        self.skill_menu.reset();
+                    }
+                    input::EditorKey::Character(c) if crate::skills::query_char(c) => {
+                        self.skill_menu.selected = 0;
+                    }
+                    input::EditorKey::Backspace if shrinking_query => {
+                        self.skill_menu.selected = 0;
+                    }
+                    _ => self.skill_menu.dismissed = true,
+                }
                 Ok(ScreenAction::Continue)
             }
         }
@@ -1049,9 +1078,14 @@ impl ChatScreen {
         } else if self.resend_available && self.input.is_blank() {
             "Enter resends the last message ".to_string()
         } else {
-            String::new()
+            let skills = self.input.selected_skills();
+            if skills.is_empty() {
+                String::new()
+            } else {
+                format!("Skills: {} ", skills.join(", "))
+            }
         };
-        let activity_width = (activity.chars().count() as u16).min(chunks[1].width);
+        let activity_width = activity.chars().count().min(usize::from(chunks[1].width)) as u16;
         let header = Layout::horizontal([Constraint::Length(activity_width), Constraint::Min(0)])
             .split(chunks[1]);
         let accent = Style::default().fg(ACCENT);
@@ -1149,15 +1183,6 @@ impl ChatScreen {
             }
             return Ok(ScreenAction::Continue);
         }
-        // Keep invalid skill references in the draft. The shared backend
-        // performs the actual bounded loads and approvals before inference.
-        let text = match self.skill_request(&text) {
-            Ok(text) => text,
-            Err(notice) => {
-                self.push_notice(notice);
-                return Ok(ScreenAction::Continue);
-            }
-        };
         if !text.trim_start().starts_with('/') && self.recorder.over_budget() {
             self.push_notice(
                 "this session has reached its 64 MiB budget; /clear starts a new one and the draft was kept"
@@ -1165,43 +1190,18 @@ impl ChatScreen {
             );
             return Ok(ScreenAction::Continue);
         }
+        let skills = self.input.selected_skills();
         self.input.clear();
-        self.skill_menu.reset();
+        self.skill_menu.dismissed = true;
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim(), backend);
         }
+        self.turn_skills = skills;
         self.push_message(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
         self.send_transcript(backend);
         Ok(ScreenAction::Continue)
-    }
-
-    /// Preflight explicit references without rewriting the operator's text.
-    /// Loading is owned by the shared backend, not this screen.
-    fn skill_request(&self, text: &str) -> std::result::Result<String, String> {
-        let names = crate::skills::requested_names(text);
-        if names.is_empty() {
-            return Ok(text.to_string());
-        }
-        let policy = match &self.actions_file {
-            Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
-            None => crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN),
-        };
-        let approved = policy
-            .ok()
-            .flatten()
-            .map(|policy| policy.approved_skills())
-            .unwrap_or_default();
-        for name in names {
-            if !approved.contains(&name) {
-                return Err(format!(
-                    "no {} rule approves the skill \"{name}\"; the draft was kept",
-                    crate::tool_policy::FILE_NAME
-                ));
-            }
-        }
-        Ok(text.to_string())
     }
 
     /// Start a turn from the transcript as it stands. Screen-only rows stay
@@ -1211,24 +1211,31 @@ impl ChatScreen {
         self.refresh_location();
         // The operator's line is on disk before the request goes out. A
         // resend after a transport failure is the same turn again.
-        if let Some(prompt) = self
+        let prompt = self
             .messages
             .iter()
             .rev()
             .find(|message| !message.role.is_notice())
             .filter(|message| message.role == TranscriptRole::Operator)
-            .map(|message| message.text.clone())
-        {
+            .map(|message| message.text.clone());
+        if let Some(prompt) = &prompt {
             self.recorder.begin_turn(
                 &session::Store::new(&self.state_dir),
                 &self.workspace_root,
                 &self.selection,
                 self.thinking.as_str(),
-                &prompt,
+                prompt,
             );
             self.surface_recording_failure();
         }
         let request = ChatRequest {
+            // A retry whose history already contains tool results replays that
+            // exchange, rather than recording the explicit loads a second time.
+            skills: if prompt.is_some() {
+                self.turn_skills.clone()
+            } else {
+                Vec::new()
+            },
             selection: self.selection.clone(),
             thinking: self.thinking,
             messages: self
@@ -2584,63 +2591,49 @@ mod tests {
     }
 
     #[test]
-    fn a_dollar_prefix_asks_for_an_approved_skill_and_refuses_the_rest() {
-        let state = crate::fixture_directory::create_unique_fixture_directory("chat-skill");
-        let mut screen = screen_in(&state);
-        let work = state.join("work");
-        fs::create_dir_all(&work).unwrap();
-        screen.workspace_root = work.clone();
-        let mut backend = RecordingBackend {
-            requests: Vec::new(),
-        };
-        // No policy: nothing is approved, the draft stays.
-        screen.set_input_text("$rust-review look at src");
-        screen
-            .apply_action(KeyAction::Submit, &mut backend)
-            .unwrap();
-        assert!(backend.requests.is_empty());
-        assert_eq!(screen.input_text(), "$rust-review look at src");
-        assert!(screen
-            .messages
-            .last()
-            .is_some_and(|m| m.role == TranscriptRole::Notice
-                && m.text
-                    .contains("no ahi.tools.yaml rule approves the skill \"rust-review\"")));
-        fs::write(
-            work.join("ahi.tools.yaml"),
-            "version: 1\nrules:\n- {id: r, action: skill, match: {skill: rust-review}, effect: approve}\n",
-        )
-        .unwrap();
-        screen
-            .apply_action(KeyAction::Submit, &mut backend)
-            .unwrap();
-        assert_eq!(backend.requests.len(), 1);
-        assert_eq!(
-            backend.requests[0].messages.last().unwrap().text,
-            "$rust-review look at src"
-        );
-        assert!(screen.input_text().is_empty());
-        screen.set_input_text("$not a name!");
-        screen
-            .apply_action(KeyAction::Submit, &mut backend)
-            .unwrap();
-        assert_eq!(backend.requests.len(), 1);
-        assert_eq!(screen.input_text(), "$not a name!");
-        // A `--tools` file wins over the working directory's.
-        let elsewhere = state.join("ops.yaml");
-        fs::write(
-            &elsewhere,
-            "version: 1\nrules:\n- {id: r, action: skill, match: {skill: release}, effect: approve}\n",
-        )
-        .unwrap();
-        screen.actions_file = Some(elsewhere);
-        assert_eq!(screen.skill_request("$release").unwrap(), "$release");
-        assert!(screen
-            .skill_request("$rust-review")
-            .unwrap_err()
-            .contains("no ahi.tools.yaml rule approves"));
-        assert_eq!(screen.skill_request("plain text").unwrap(), "plain text");
-        let _ = fs::remove_dir_all(state);
+    fn pasted_and_dismissed_dollars_submit_as_literal_text() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-skill-literal");
+        for paste in [true, false] {
+            let mut screen = screen_in(&state);
+            screen.skill_menu.names = vec!["operator/review".into()];
+            let mut backend = RecordingBackend {
+                requests: Vec::new(),
+            };
+            if paste {
+                screen
+                    .apply_terminal_event(Event::Paste("$operator/review".into()), &mut backend)
+                    .unwrap();
+            } else {
+                screen
+                    .apply_action(
+                        KeyAction::Edit(input::EditorKey::Character('$')),
+                        &mut backend,
+                    )
+                    .unwrap();
+                assert!(!screen.skill_menu.dismissed);
+                screen
+                    .apply_action(KeyAction::Cancel, &mut backend)
+                    .unwrap();
+                for c in "operator/review".chars() {
+                    screen
+                        .apply_action(
+                            KeyAction::Edit(input::EditorKey::Character(c)),
+                            &mut backend,
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(screen.skill_menu.dismissed);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+            assert_eq!(
+                backend.requests[0].messages.last().unwrap().text,
+                "$operator/review"
+            );
+            assert!(backend.requests[0].skills.is_empty());
+        }
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
@@ -2659,30 +2652,41 @@ mod tests {
         }
         screen.workspace_root = work;
         screen.push_header();
-        screen.set_input_text("before $rev after");
+        screen.skill_menu.names.push("operator/review-two".into());
+        screen.set_input_text("before  after");
         for _ in 0..6 {
             screen.input.apply(input::EditorKey::Left, 80);
         }
         let mut backend = RecordingBackend {
             requests: Vec::new(),
         };
+        for c in "$rev".chars() {
+            screen
+                .apply_action(
+                    KeyAction::Edit(input::EditorKey::Character(c)),
+                    &mut backend,
+                )
+                .unwrap();
+        }
+        screen
+            .apply_action(KeyAction::CycleSkillScope, &mut backend)
+            .unwrap();
+        screen
+            .apply_action(KeyAction::CycleSkillScope, &mut backend)
+            .unwrap();
+        assert_eq!(screen.skill_menu.matching("rev"), ["operator/review-two"]);
         screen
             .apply_action(KeyAction::Edit(input::EditorKey::Down), &mut backend)
             .unwrap();
         screen
             .apply_action(KeyAction::Submit, &mut backend)
             .unwrap();
-        assert_eq!(screen.input_text(), "before $review-two after");
+        assert_eq!(screen.input_text(), "before $operator/review-two after");
         assert!(backend.requests.is_empty());
         screen
-            .apply_action(KeyAction::Edit(input::EditorKey::Left), &mut backend)
+            .apply_action(KeyAction::Submit, &mut backend)
             .unwrap();
-        screen
-            .apply_action(KeyAction::Cancel, &mut backend)
-            .unwrap();
-        assert!(screen.skill_menu.dismissed);
-        assert_eq!(screen.input_text(), "before $review-two after");
-        assert_eq!(screen.skill_menu.matching("ONE"), ["review-one"]);
+        assert_eq!(backend.requests[0].skills, ["operator/review-two"]);
         fs::remove_dir_all(state).unwrap();
     }
 

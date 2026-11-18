@@ -39,6 +39,7 @@ pub(crate) enum ActionKind {
     ToolCall,
     FileWrite,
     Command,
+    SkillCommand,
     Delegate,
     /// `action: skill`: the model may read the named skill's text through
     /// `load_skill`. Matched on the name alone.
@@ -64,6 +65,8 @@ pub(crate) struct ToolRule {
     /// names, matched the same way against the call's label; for `skill`,
     /// the one skill name.
     pub(crate) argv: Option<Vec<String>>,
+    /// Skill identity and script selectors for a skill-relative command.
+    pub(crate) skill_script: Option<(String, String)>,
     /// `command` only: toolchain variable names passed through to the
     /// process in addition to the base set, as in `ahi.hooks.yaml`.
     pub(crate) toolchain_env: Vec<String>,
@@ -496,7 +499,8 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 11,
+            seen,
+            examples::EXAMPLES.len() + 1,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".
@@ -566,60 +570,82 @@ mod delegate_tests {
     #[test]
     fn skill_rules_name_a_skill_and_govern_load_skill() {
         let policy = parse_rules(
-            "- {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n\
-             - {id: release, action: skill, match: {skill: release}, effect: approve, ask: true}\n\
-             - {id: no-deploy, action: skill, match: {skill: deploy}, effect: deny}\n\
-             - {id: twice, action: skill, match: {skill: rust-review}, effect: approve}\n",
+            "- {id: review, action: skill, match: {skill: repo/rust-review}, effect: approve}\n\
+             - {id: release, action: skill, match: {skill: repo/release}, effect: approve, ask: true}\n\
+             - {id: no-deploy, action: skill, match: {skill: repo/deploy}, effect: deny}\n\
+             - {id: twice, action: skill, match: {skill: repo/rust-review}, effect: approve}\n",
         )
         .unwrap();
         assert_eq!(policy.advertised_tools(), ["load_skill"]);
-        assert_eq!(policy.approved_skills(), ["rust-review", "release"]);
+        assert_eq!(
+            policy.approved_skills(),
+            ["repo/rust-review", "repo/release"]
+        );
         assert_eq!(policy.rules[0].action, ActionKind::Skill);
-        assert_eq!(policy.rules[0].argv, Some(vec!["rust-review".to_string()]));
+        assert_eq!(
+            policy.rules[0].argv,
+            Some(vec!["repo/rust-review".to_string()])
+        );
         assert!(matches!(
-            policy.evaluate_skill("rust-review"),
+            policy.evaluate_skill("repo/rust-review"),
             Verdict::Approve { rule_id } if rule_id == "review"
         ));
         assert!(matches!(
-            policy.evaluate_skill("release"),
+            policy.evaluate_skill("repo/release"),
             Verdict::Ask { rule_id } if rule_id == "release"
         ));
         assert!(matches!(
-            policy.evaluate_skill("deploy"),
+            policy.evaluate_skill("repo/deploy"),
             Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no-deploy"
         ));
         assert!(
             matches!(
-                policy.evaluate_skill("Deploy"),
+                policy.evaluate_skill("repo/Deploy"),
                 Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no-deploy"
             ),
             "deny ignores case"
         );
         assert!(
             matches!(
-                policy.evaluate_skill("Rust-Review"),
+                policy.evaluate_skill("repo/Rust-Review"),
                 Verdict::Deny { rule_id: None }
             ),
             "approve is exact"
         );
         assert!(matches!(
-            policy.evaluate_skill("other"),
+            policy.evaluate_skill("repo/other"),
+            Verdict::Deny { rule_id: None }
+        ));
+        let operator = parse_rules(
+            "- {id: operators, action: skill, match: {skill: 'operator/*'}, effect: approve}\n\
+             - {id: private, action: skill, match: {skill: operator/private}, effect: deny}\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(operator.evaluate_skill("operator/review"), Verdict::Approve { rule_id } if rule_id == "operators")
+        );
+        assert!(
+            matches!(operator.evaluate_skill("operator/private"), Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "private")
+        );
+        assert!(matches!(
+            operator.evaluate_skill("repo/review"),
             Verdict::Deny { rule_id: None }
         ));
         // Deny beats approve for the same name.
         let both = parse_rules(
-            "- {id: yes, action: skill, match: {skill: x}, effect: approve}\n\
-             - {id: no, action: skill, match: {skill: X}, effect: deny}\n",
+            "- {id: yes, action: skill, match: {skill: repo/x}, effect: approve}\n\
+             - {id: no, action: skill, match: {skill: repo/X}, effect: deny}\n",
         )
         .unwrap();
         assert!(matches!(
-            both.evaluate_skill("x"),
+            both.evaluate_skill("repo/x"),
             Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no"
         ));
         for (bad, message) in [
             ("- {id: x, action: skill, match: {}, effect: approve}\n", "match.skill is required"),
-            ("- {id: x, action: skill, match: {skill: 'a b'}, effect: approve}\n", "name of 1-64"),
-            ("- {id: x, action: skill, match: {skill: '*'}, effect: approve}\n", "name of 1-64"),
+            ("- {id: x, action: skill, match: {skill: 'a b'}, effect: approve}\n", "expected repo/<skill-name> or operator/<skill-name>"),
+            ("- {id: x, action: skill, match: {skill: repo/*}, effect: approve}\n", "expected repo/<skill-name> or operator/<skill-name>"),
+            ("- {id: x, action: skill, match: {skill: unscoped}, effect: approve}\n", "expected repo/<skill-name> or operator/<skill-name>"),
             ("- {id: x, action: skill, match: {skill: s, path: src}, effect: approve}\n", "match.path does not apply"),
             ("- {id: x, action: skill, match: {skill: s, tool: read_file}, effect: approve}\n", "omit match.tool"),
             ("- {id: x, action: skill, match: {skill: s, worker: w}, effect: approve}\n", "match.worker applies only"),

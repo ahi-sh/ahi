@@ -82,9 +82,11 @@ struct RawMatch {
     /// `delegate` only: the worker label, required.
     #[serde(default)]
     worker: Option<String>,
-    /// `skill` only: the skill name, required.
+    /// `skill` only: the qualified skill ID, required.
     #[serde(default)]
     skill: Option<String>,
+    #[serde(default)]
+    script: Option<String>,
 }
 
 const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
@@ -115,7 +117,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         if rules.iter().any(|existing| existing.id == id) {
             return Err(fail("duplicate rule id".into()));
         }
-        if rule.action != "command" {
+        if !matches!(rule.action.as_str(), "command" | "skill_command") {
             if rule.matcher.argv.is_some() {
                 return Err(fail("match.argv applies only to action: command".into()));
             }
@@ -126,13 +128,23 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         if rule.action != "delegate" && rule.matcher.worker.is_some() {
             return Err(fail("match.worker applies only to action: delegate".into()));
         }
-        if rule.action != "skill" && rule.matcher.skill.is_some() {
-            return Err(fail("match.skill applies only to action: skill".into()));
+        if !matches!(rule.action.as_str(), "skill" | "skill_command")
+            && rule.matcher.skill.is_some()
+        {
+            return Err(fail(
+                "match.skill applies only to action: skill or skill_command".into(),
+            ));
+        }
+        if rule.action != "skill_command" && rule.matcher.script.is_some() {
+            return Err(fail(
+                "match.script applies only to action: skill_command".into(),
+            ));
         }
         let mut argv = None;
+        let mut skill_script = None;
         let mut toolchain_env = Vec::new();
         let (action, tools) = match rule.action.as_str() {
-            "command" => {
+            "command" | "skill_command" => {
                 if rule
                     .matcher
                     .tool
@@ -143,24 +155,57 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                         "action: command governs `{COMMAND_TOOL}` only; omit match.tool"
                     )));
                 }
-                let Some(prefix) = rule.matcher.argv.take() else {
+                if rule.action == "skill_command" {
+                    let skill = rule
+                        .matcher
+                        .skill
+                        .take()
+                        .ok_or_else(|| fail("match.skill is required".into()))?;
+                    let script = rule
+                        .matcher
+                        .script
+                        .take()
+                        .ok_or_else(|| fail("match.script is required".into()))?;
+                    if !matches!(skill.as_str(), "operator/*" | "repo/*")
+                        && !crate::skills::valid_id(&skill)
+                    {
+                        return Err(fail(
+                            "match.skill needs a scoped ID, operator/*, or repo/*".into(),
+                        ));
+                    }
+                    if script != "scripts/**" && !crate::skills::valid_script(&script) {
+                        return Err(fail(
+                            "match.script needs an exact scripts/ path or scripts/**".into(),
+                        ));
+                    }
+                    skill_script = Some((skill, script));
+                }
+                let prefix = rule.matcher.argv.take();
+                if prefix.is_none() && skill_script.is_none() {
                     return Err(fail(
                         "match.argv is required for action: command (the argv prefix, as a list)"
                             .into(),
                     ));
-                };
-                if prefix.is_empty() || prefix.iter().any(|token| token.is_empty()) {
+                }
+                if prefix.as_ref().is_some_and(|prefix| {
+                    prefix.is_empty() || prefix.iter().any(|token| token.is_empty())
+                }) {
                     return Err(fail(
                         "match.argv must list at least one non-empty token".into(),
                     ));
                 }
-                argv = Some(prefix);
+                argv = prefix;
                 toolchain_env = crate::precommit::policy::parse_toolchain_names(
                     &rule.toolchain_env.unwrap_or_default(),
                     origin,
                     &format!("rule `{id}`: toolchain_env"),
                 )?;
-                (ActionKind::Command, vec![COMMAND_TOOL.to_string()])
+                let kind = if skill_script.is_some() {
+                    ActionKind::SkillCommand
+                } else {
+                    ActionKind::Command
+                };
+                (kind, vec![COMMAND_TOOL.to_string()])
             }
             "delegate" => {
                 if rule
@@ -211,19 +256,15 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 }
                 let Some(skill) = rule.matcher.skill.take() else {
                     return Err(fail(
-                        "match.skill is required for action: skill (the skill's name)".into(),
+                        "match.skill is required for action: skill (repo/<skill-name> or operator/<skill-name>)".into(),
                     ));
                 };
-                if !crate::precommit::policy::valid_rule_id(&skill) {
-                    return Err(fail(
-                        "match.skill is a name of 1-64 ASCII letters, digits, '-', '_', or '.'"
-                            .into(),
-                    ));
-                }
-                if skill == "*" {
-                    return Err(fail(
-                        "match.skill names one skill; there is no wildcard".into(),
-                    ));
+                if skill != "operator/*" {
+                    crate::skills::parse_id(&skill).map_err(|reason| {
+                        fail(format!(
+                            "match.skill: {reason}; operator/* is also supported"
+                        ))
+                    })?;
                 }
                 argv = Some(vec![skill]);
                 (ActionKind::Skill, vec![SKILL_TOOL.to_string()])
@@ -317,6 +358,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
             path,
             argv,
             toolchain_env,
+            skill_script,
             effect: rule.effect,
             ask: rule.ask,
         });

@@ -245,6 +245,9 @@ struct ExecArgs {
     /// Read the prompt from this file (UTF-8, at most 1 MiB).
     #[arg(long, value_name = "PATH")]
     prompt_file: Option<PathBuf>,
+    /// Load repo/NAME or operator/NAME before inference (repeatable).
+    #[arg(long = "skill", value_name = "SCOPE/NAME", value_parser = crate::skills::parse_id)]
+    skills: Vec<String>,
     /// No human: the prompt from --prompt-file only, every `ask` denied, a result file required.
     #[arg(long)]
     headless: bool,
@@ -790,6 +793,7 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
         model: args.model.clone(),
         prompt: args.prompt.clone(),
         prompt_file: args.prompt_file.clone(),
+        skills: args.skills.clone(),
         headless: args.headless,
         workdir: args.workdir.clone(),
         tools: args.tools.clone(),

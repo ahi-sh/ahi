@@ -26,6 +26,7 @@ pub(crate) enum KeyAction {
     JumpToTop,
     JumpToBottom,
     CycleThinkingLevel,
+    CycleSkillScope,
     CopySelection,
     /// Ctrl+S: keyboard selection mode over the transcript.
     EnterSelectionMode,
@@ -118,6 +119,7 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
     }
     match key.code {
         KeyCode::Enter => KeyAction::Submit,
+        KeyCode::Tab => KeyAction::CycleSkillScope,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::ClearInputOrExit
         }

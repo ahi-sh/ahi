@@ -58,6 +58,7 @@ const TEXT_CAP: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub(crate) struct TurnRequest {
     pub(crate) prompt: String,
+    pub(crate) skills: Vec<String>,
     /// Caller-chosen; generated when absent. Idempotent per session.
     pub(crate) run_id: Option<String>,
     /// Hex SHA-256 the caller computed; the turn is refused when the prompt
@@ -406,6 +407,20 @@ impl Service {
                         format!("run_id {run_id} was already used for a different prompt"),
                     ));
                 }
+                let recorded_skills = found["requested_skills"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if !recorded_skills
+                    .iter()
+                    .map(Value::as_str)
+                    .eq(request.skills.iter().map(|id| Some(id.as_str())))
+                {
+                    return Err(ServiceError::new(
+                        "conflict",
+                        format!("run_id {run_id} was already used with different skill selections"),
+                    ));
+                }
                 return Ok(Submitted::Replayed(found));
             }
             if live.open.as_ref().is_some_and(|open| open.run_id == run_id) {
@@ -699,9 +714,10 @@ impl Turn {
         let live = Arc::clone(&self.live);
         let session = self.session.clone();
         let run_id = self.run_id.clone();
+        let skills = self.request.skills.clone();
         let drove = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drive()));
         if drove.is_err() {
-            close_panicked(&live, &session, &run_id);
+            close_panicked(&live, &session, &run_id, &skills);
         }
     }
 
@@ -718,6 +734,7 @@ impl Turn {
                 .begin_turn_as(self.run_id.clone(), &self.request.prompt);
             live.fan_out_fresh(&self.session);
             lock(&self.backend).submit(ChatRequest {
+                skills: self.request.skills.clone(),
                 selection: self.selection.clone(),
                 thinking: self.thinking,
                 messages,
@@ -803,6 +820,9 @@ impl Turn {
         }
         for (key, value) in ledger.to_json().as_object().into_iter().flatten() {
             doc[key] = value.clone();
+        }
+        if !self.request.skills.is_empty() {
+            doc["requested_skills"] = json!(self.request.skills);
         }
         // The record holds the document without the text, which is the
         // assistant message before the turn line.
@@ -979,7 +999,7 @@ impl Live {
 
 /// Close the open turn `run_id` as `failed` after its thread panicked, so the
 /// session takes the next turn. Waiting asks are answered `Unattended`.
-fn close_panicked(live: &Arc<Mutex<Live>>, session: &str, run_id: &str) {
+fn close_panicked(live: &Arc<Mutex<Live>>, session: &str, run_id: &str, skills: &[String]) {
     let mut live = lock(live);
     if !live.open.as_ref().is_some_and(|open| open.run_id == run_id) {
         return;
@@ -998,6 +1018,9 @@ fn close_panicked(live: &Arc<Mutex<Live>>, session: &str, run_id: &str) {
             "message": "the turn thread panicked",
         },
     });
+    if !skills.is_empty() {
+        doc["requested_skills"] = json!(skills);
+    }
     live.recorder.finish_turn(Status::Failed, doc.clone());
     live.fan_out_fresh(session);
     if let Some(found) = live.session().find_turn(run_id) {
@@ -1084,7 +1107,7 @@ mod tests {
         }
         assert_eq!(service.open_turns(), 1);
 
-        close_panicked(&live, &header.id, "r1");
+        close_panicked(&live, &header.id, "r1", &[]);
 
         assert_eq!(
             decisions.recv().unwrap(),

@@ -22,12 +22,12 @@ pub(super) fn run(
     // not loadable, and the text is read again with every check.
     let skill = skills
         .get(&name[0])
-        .ok_or("no valid skill of that name is installed; `ahi doctor` lists them")?;
+        .ok_or("no valid skill with that scoped ID is installed; `ahi doctor` lists them")?;
     let text = crate::skills::read(skill, file.as_deref())
         .map_err(|_| "the skill could not be read; `ahi doctor` says why")?;
     let digest = crate::session::sha256_hex(text.as_bytes());
     let report = SkillReport {
-        name: skill.name.clone(),
+        name: skill.id(),
         root: skill.root.as_str().to_string(),
         file: file.clone(),
         sha256: digest.clone(),
