@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23.1 (2026-11-19)
+
+### Changed
+
+- Shift+Tab cycles Policy → Read-only → permissive Read-write even when a tools YAML file exists. Selecting Read-write directly bypasses custom policy for the session, without an extra confirmation dialog or file changes; startup still defaults to Policy.
+- Both input bars use mode-specific colors: cyan for Policy, blue for Read-only, and amber for Read-write. Queued changes retain explicit active/next-turn labels.
+
+### Fixed
+
+- `run_command` ignores empty placeholders for its unused command form, so `argv` with empty `skill`/`script`/`args` fields no longer fails as an ambiguous call. Two nonempty forms remain rejected; real arguments are never silently discarded or merged.
+
 ## 0.23.0 (2026-11-19)
 
 ### Added

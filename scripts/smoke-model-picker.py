@@ -226,7 +226,9 @@ def main() -> None:
                     finish = "stop"
                 else:
                     delta = {"tool_calls": [{"index": 0, "id": "write-mode", "type": "function",
-                             "function": {"name": "write_file", "arguments": json.dumps({"path": "marker", "content": "written"})}}]}
+                             "function": {"name": "write_file", "arguments": json.dumps({"path": "marker", "content": "written"})}},
+                             {"index": 1, "id": "command-mode", "type": "function",
+                              "function": {"name": "run_command", "arguments": json.dumps({"argv": ["/bin/sh", "-c", "printf command-ok > command-marker"], "skill": "", "script": "", "args": []})}}]}
                     finish = "tool_calls"
                 for item in [{"choices": [{"index": 0, "delta": delta}]},
                              {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]:
@@ -278,6 +280,7 @@ def main() -> None:
                         chat.send("\r")
                         chat.expect("mode-fixture-complete")
                         assert not (work / "marker").exists()
+                        assert not (work / "command-marker").exists()
                         chat.send("\x1b[Z")
                         chat.expect("Read-write · Shift+Tab")
                         chat.send("now write\r")
@@ -306,6 +309,7 @@ def main() -> None:
                             assert time.monotonic() < deadline
                         chat.expect("Read-only · Shift+Tab")
                         assert (work / "marker").read_text() == "written"
+                        assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
                         chat.expect("Workspace trust revoked")
                         assert not list((state / "workspace-trust").iterdir())
@@ -321,18 +325,20 @@ def main() -> None:
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")
                         chat.expect("Read-only · Shift+Tab")
+                        (work / "marker").unlink()
+                        (work / "command-marker").unlink()
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-write · Shift+Tab")
+                        chat.absent("Bypass tool policy")
+                        chat.send("permissive policy bypass\r")
+                        deadline = time.monotonic() + 5
+                        while not (work / "command-marker").exists():
+                            chat.read()
+                            assert time.monotonic() < deadline
+                        assert (work / "marker").read_text() == "written"
+                        assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("\x1b[Z")
                         chat.expect("Policy · Shift+Tab")
-                        chat.send("/mode\r")
-                        chat.expect("Shift+Tab cycles available modes.")
-                        chat.send("2")
-                        chat.expect("Bypass tool policy")
-                        chat.send("\x1b")
-                        chat.expect("Policy · Shift+Tab")
-                        chat.send("/mode\r2")
-                        chat.expect("Bypass tool policy")
-                        chat.send("t")
-                        chat.expect("Read-write · Shift+Tab")
                         assert (work / "ahi.tools.yaml").read_text() == policy
                         chat.send("/quit\r")
                         chat.finish()
@@ -345,7 +351,7 @@ def main() -> None:
             gateway.shutdown()
             gateway.server_close()
             worker.join()
-        print("PASS: trust, draft-preserving mode cycle, read-only enforcement, read-write effect, policy confirmation and revocation in both engines")
+        print("PASS: trust, draft-preserving mode cycle, read-only enforcement, read-write effect, direct permissive policy cycling, placeholder-filled command execution and revocation in both engines")
         return
 
     if args.login_copy_only:

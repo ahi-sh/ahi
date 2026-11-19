@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 pub(super) enum Dialog {
     Trust,
     Choose,
-    Bypass,
 }
 
 pub(super) struct Modes {
@@ -18,7 +17,6 @@ pub(super) struct Modes {
     pub dialog: Option<Dialog>,
     pub has_policy: bool,
     pub trusted: bool,
-    pub bypass: bool,
 }
 impl Default for Modes {
     fn default() -> Self {
@@ -28,7 +26,6 @@ impl Default for Modes {
             dialog: None,
             has_policy: false,
             trusted: false,
-            bypass: false,
         }
     }
 }
@@ -59,8 +56,7 @@ impl Modes {
         use ExecutionMode::*;
         self.selected = match self.selected {
             Policy => ReadOnly,
-            ReadOnly if self.has_policy && !self.bypass => Policy,
-            ReadOnly if self.trusted || self.bypass => ReadWrite,
+            ReadOnly if self.has_policy || self.trusted => ReadWrite,
             ReadOnly => {
                 self.dialog = Some(Dialog::Trust);
                 ReadOnly
@@ -68,6 +64,14 @@ impl Modes {
             ReadWrite if self.has_policy => Policy,
             ReadWrite => ReadOnly,
         };
+    }
+    pub fn color(&self) -> ratatui_core::style::Color {
+        use ratatui_core::style::Color;
+        match self.selected {
+            ExecutionMode::Policy => Color::Cyan,
+            ExecutionMode::ReadOnly => Color::Blue,
+            ExecutionMode::ReadWrite => Color::Yellow,
+        }
     }
     pub fn status(&self) -> String {
         match self.active {
@@ -90,8 +94,7 @@ impl Modes {
         );
         let (title, body) = match dialog {
             Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue read-only (no commands or writes)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
-            Dialog::Choose => (" Execution mode ", format!("Current: {}\nPolicy: {}\n\n[1] Read-only: no writes, commands or delegation\n[2] Read-write: trusted host access\n[3] Policy: use the policy file\n\nShift+Tab cycles available modes. Changes apply next turn; running commands are not stopped.\n/mode revoke forgets workspace trust. Esc closes without changing the draft.", self.status(), policy.display())),
-            Dialog::Bypass => (" Bypass tool policy for this session? ", "Read-write ignores your custom policy, including denies and approval prompts. Commands run with your account's access, not in a sandbox. The policy file is unchanged.\n\n[t] Confirm session-only bypass\n[Esc] Keep current mode".to_string()),
+            Dialog::Choose => (" Execution mode ", format!("Current: {}\nPolicy: {}\n\n[1] Read-only: no writes, commands or delegation\n[2] Read-write: permissive host access, ignores custom policy\n[3] Policy: use the policy file\n\nShift+Tab cycles available modes. Changes apply next turn; running commands are not stopped.\n/mode revoke forgets workspace trust. Esc closes without changing the draft.", self.status(), policy.display())),
         };
         frame.render_widget(Clear, popup);
         frame.render_widget(
@@ -169,6 +172,10 @@ mod tests {
         let mut modes = Modes::startup(&root, &state, None).unwrap();
         assert_eq!(modes.selected, ExecutionMode::Policy);
         modes.cycle();
+        assert_eq!(modes.selected, ExecutionMode::ReadOnly);
+        modes.cycle();
+        assert_eq!(modes.selected, ExecutionMode::ReadWrite);
+        assert!(modes.dialog.is_none());
         modes.cycle();
         assert_eq!(modes.selected, ExecutionMode::Policy);
         std::fs::write(root.join("ahi.tools.yaml"), "version: broken\n").unwrap();
