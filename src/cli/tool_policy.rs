@@ -390,7 +390,10 @@ pub(super) fn init(
         );
         return ExitCode::from(0);
     }
-    if Path::new(tool_policy::LEGACY_FILE_NAME).symlink_metadata().is_ok() {
+    if Path::new(tool_policy::LEGACY_FILE_NAME)
+        .symlink_metadata()
+        .is_ok()
+    {
         eprintln!("error: migrate the existing ahi.tools.yaml before creating {FILE_NAME}");
         return ExitCode::from(1);
     }

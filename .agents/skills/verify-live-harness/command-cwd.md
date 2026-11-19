@@ -12,10 +12,21 @@ ahi_bin="$PWD/target/debug/ahi"
 verify="$PWD/.agents/skills/verify-live-harness/scripts/verify-cwd.py"
 probe=$(mktemp -d)
 mkdir -p "$probe/work/crates/probe"
-printf '%s\n' 'version: 1' 'rules:' '  - {id: pwd, action: command, match: {argv: [pwd], path: crates/probe}, effect: approve}' > "$probe/policy.yaml"
+cat > "$probe/policy.yaml" <<'YAML'
+version: 2
+default_mode: probe
+modes:
+  probe:
+    allow:
+      commands:
+        - programs:
+            - pwd
+          working_dirs:
+            - crates/probe
+YAML
 ```
 
-This explicit policy exercises today's validated cwd matcher, not a proposed `working_dirs` syntax. For a schema migration, substitute an equivalent supported policy, keeping exactly the same permission. Use a configured tool-capable model the operator authorizes; stop before inference otherwise.
+This explicit policy exercises the compact `working_dirs` syntax. For a schema migration, keep exactly the same permission. Use a configured tool-capable model the operator authorizes; stop before inference otherwise.
 
 ### Exercise the interactive harness
 
