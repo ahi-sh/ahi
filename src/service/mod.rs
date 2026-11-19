@@ -755,6 +755,7 @@ impl Turn {
         let mut ledger = Ledger::default();
         let mut text = String::new();
         let mut usage = None;
+        let mut context_window = None;
         let mut timed_out = false;
         // Set when the turn was cancelled or timed out: the engine gets
         // `CANCEL_GRACE` to report, then the turn closes without it, since a
@@ -774,7 +775,14 @@ impl Turn {
                 .unwrap_or(Duration::from_secs(1))
                 .min(Duration::from_millis(250));
             match receiver.recv_timeout(wait) {
-                Ok(event) => self.handle(event, &mut ledger, &mut text, &mut usage, &mut outcome),
+                Ok(event) => self.handle(
+                    event,
+                    &mut ledger,
+                    &mut text,
+                    &mut usage,
+                    &mut context_window,
+                    &mut outcome,
+                ),
                 Err(RecvTimeoutError::Timeout) => {
                     let mut live = lock(&self.live);
                     live.recorder.checkpoint();
@@ -835,6 +843,9 @@ impl Turn {
         if let Some(usage) = &usage {
             doc["usage"] = usage.clone();
         }
+        if let Some(window) = context_window {
+            doc["context_window"] = json!(window);
+        }
         for (key, value) in ledger.to_json().as_object().into_iter().flatten() {
             doc[key] = value.clone();
         }
@@ -872,6 +883,7 @@ impl Turn {
         ledger: &mut Ledger,
         text: &mut String,
         usage: &mut Option<Value>,
+        context_window: &mut Option<u64>,
         outcome: &mut Option<Result<(), (ErrorKind, String)>>,
     ) {
         let mut live = lock(&self.live);
@@ -977,9 +989,8 @@ impl Turn {
                     "cost_usd": cost_usd,
                 }));
             }
-            ResponseEvent::ToolCallReturned
-            | ResponseEvent::ContextWindow(_)
-            | ResponseEvent::Reconnecting { .. } => {}
+            ResponseEvent::ContextWindow(window) => *context_window = Some(window),
+            ResponseEvent::ToolCallReturned | ResponseEvent::Reconnecting { .. } => {}
             ResponseEvent::Completed => *outcome = Some(Ok(())),
             ResponseEvent::Failed { message, kind } => *outcome = Some(Err((kind, message))),
         }

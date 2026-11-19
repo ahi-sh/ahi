@@ -4,8 +4,17 @@
 
 ### Added
 
+- Borderless Models, Catalog, gateway setup, login, and Commands views use plain headings and full-width content. Copy complete model IDs with `y` in Models or Catalog, and raw URLs with Ctrl+Y in gateway setup or login, without UI decoration or soft-wrap newlines.
 - Interactive workspace trust with Read-write, Read-only, and Policy modes; Shift+Tab cycles available modes and `/mode` opens the chooser. Policy bypass requires session-only confirmation, trust is stored outside the checkout and can be revoked, and mode changes are enforced at the per-turn execution boundary.
 - Ctrl+Y in OpenAI's TUI login copies the raw authorization URL through the shared clipboard adapters without border characters, wrapping, or changes to the callback draft.
+
+### Fixed
+
+- Forward the model context window through service turn results so service-backed chat shows its context meter alongside reported usage.
+
+## 0.22.0 (2026-11-18)
+
+### Added
 
 - Streaming sessions checkpoint partial prose during generation. Quit cancels and closes the active turn, and resume shows interrupted prose without replaying it to the model. Commands record successful spawn separately from their result.
 - Opt-in policy selectors for operator skill reads and skill-relative commands; this checkout allows bundled scripts under both skill scopes without enumerating them.

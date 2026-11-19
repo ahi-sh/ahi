@@ -487,6 +487,9 @@ fn follow(
                 result,
                 ..
             } if *id == run_id => {
+                if let Some(window) = result.get("context_window").and_then(Value::as_u64) {
+                    let _ = sender.send(ResponseEvent::ContextWindow(window));
+                }
                 if let Some(usage) = result.get("usage").filter(|usage| !usage.is_null()) {
                     let _ = sender.send(ResponseEvent::Usage {
                         input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),

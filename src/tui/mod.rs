@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use ahi_widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ahi_widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -633,11 +633,14 @@ impl Picker {
         items: Vec<ListItem<'_>>,
         title: &str,
     ) {
+        let areas = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+        frame.render_widget(
+            Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
+            areas[0],
+        );
         frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            area,
+            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            areas[1],
             &mut self.cursor,
         );
     }
@@ -708,7 +711,7 @@ impl Picker {
         };
         frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), chunks[1]);
         let help = match self.screen {
-            Screen::Picker => "/ commands · Enter use model · c catalog · Esc/q cancel\n↑/↓ move · Shift+↑/↓ reorder gateway · r refresh · e edit",
+            Screen::Picker => "/ commands · Enter use model · c catalog · Esc/q cancel\n↑/↓ move · Shift+↑/↓ reorder gateway · y copy · r refresh · e edit",
             Screen::Catalog { .. } => "/ commands · Space add/remove · Enter use checked model\nEsc models · q cancel · ↑/↓ move · Shift+↑/↓ reorder\ny copy · e edit · r refresh",
         };
         let footer =
@@ -968,9 +971,13 @@ fn pick_loop(
                     Err(err) => picker.status = err.to_string(),
                 }
             }
-            KeyCode::Char('y') if matches!(picker.screen, Screen::Catalog { .. }) => {
+            KeyCode::Char('y') => {
                 if let Row::Model { provider, model } = picker.selected() {
-                    let id = catalog_ids(&picker.registry.providers[provider])[model].to_string();
+                    let entry = &picker.registry.providers[provider];
+                    let id = match picker.screen {
+                        Screen::Picker => entry.models[model].id.clone(),
+                        Screen::Catalog { .. } => catalog_ids(entry)[model].to_string(),
+                    };
                     if crate::clipboard::copy(&id) {
                         picker.status = format!("Copied {id}");
                     } else {

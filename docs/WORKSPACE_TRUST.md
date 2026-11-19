@@ -57,6 +57,8 @@ inherits the interactive workspace trust record. Existing `ahi tools init`
 presets remain available for advanced policy authoring. Read-write is not a
 promise that an unconfigured worker or a script unsupported on the platform can
 run; existing connector, executable, and platform requirements still apply.
+The OpenAI browser-login Responses transport still does not execute tools;
+execution modes do not change that transport boundary.
 
 ## Local verification
 
