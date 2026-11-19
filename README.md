@@ -1,34 +1,12 @@
 # ahi
 
-`ahi` is a Rust library and command-line tool with three jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration file (`.pre-commit-config.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model read, search, edit, create, and run commands in the working directory only where an `ahi.tools.yaml` rule approves each one. As a development container launcher (`ahi dev`) it opens the working directory in a published image through podman or docker.
+`ahi` is a Rust library and command-line tool for working on software projects:
 
-## Glossary
+- **Terminal assistant:** `ahi tui` streams model responses from OpenAI and configured gateways, with workspace tools, saved sessions, and configurable execution permissions.
+- **Offline hook runner:** `ahi precommit` reads [pre-commit](https://pre-commit.com/) configuration and runs builtin checks and approved local hooks. It does not download runtimes or clone hook repositories.
+- **Development container:** `ahi dev` opens the working directory in a published image using Podman or Docker.
 
-These terms describe ahi's boundaries, not interchangeable names for the same subsystem.
-
-| Term | Meaning in ahi |
-| --- | --- |
-| **Primitive** | A capability with a clear owner, such as tools, policy, sessions, or terminal hosting. Usually a Rust module, not a plugin or separate crate. |
-| **Agent runtime** | The loop that asks a model for a response, executes authorized tool calls, and continues the turn. Its separation from chat presentation is still planned. |
-| **Provider / gateway** | A provider implements a model API; a gateway exposes models through a configured endpoint. Neither owns tool authorization. |
-| **Tool** | A compiled, model-callable operation such as `read_file`, `edit_file`, or `run_command`. Its implementation is separate from permission to run it. |
-| **Tool policy / approval** | `ahi.tools.yaml` rules authorize capabilities. An approval answers a particular permission request; model text and tool output cannot grant authority. |
-| **Skill** | Instructions loaded as tool-result content under policy. A skill supplies information, not new permissions or executable plugins. |
-| **Precommit / Git hook** | Precommit runs repository checks. A Git lifecycle hook invokes that runner; it is not the runner itself. |
-| **TUI** | Ahi's terminal user interface: chat, model selection, approval prompts, and transcript presentation. |
-| **Terminal host** | An external multiplexer server that provides persistent terminals and runs programs in them. `terminal_host` is ahi's interface to Rex (primary) and hc. It does not implement a multiplexer. |
-| **Terminal / shell / UI client** | A terminal supplies program input/output; a shell is one program that can run in it. A graphical UI client displays terminals. Ahi does not manage the external client's windows, layout, or focus. |
-| **Execution target** | The selected server/core and local or remote execution namespace. Native Windows and WSL are different targets, even on one physical computer. |
-| **Terminal handle** | A backend- and target-qualified native terminal ID. It is not an ahi session ID, worker label, or currently focused pane. Local core IDs are not portable to another machine. |
-| **Ahi session / turn** | A session is a recorded conversation and its execution history. A turn is one submitted request and the model/tool work needed to answer it. A Rex session is a separate native resource container. |
-| **Session service / connector** | `ahi serve` owns structured session operations. `ahi connect` carries that protocol over stdio, including through SSH. `hc connect` carries a different protocol. |
-| **Worker / delegation / orchestration** | A worker is an ahi service receiving a task. Delegation submits that task through an explicitly configured connector. Scheduling and coordinating multiple workers are not terminal-host responsibilities. |
-| **Program status** | Advisory OSC 7501 reports such as working or blocked. They are neither structured agent replies nor authorization or proof that a process exited. |
-| **Durability / ledger** | Stored conversation and execution facts, including tool presentation details. Rendering and authorization remain application responsibilities. |
-| **Conversation resume / crash recovery** | Resume restores a saved conversation. Crash recovery would reconcile unfinished effects and permissions; it is not implemented by conversation resume. |
-| **Containment / development environment** | Containment restricts what a process can access. `ahi dev` launches a development container; software path checks and terminal multiplexing are not OS sandboxes. |
-
-See the [module plan](docs/MODULE_STRUCTURE.md) for implemented versus proposed ownership.
+Tool permissions depend on the selected workspace mode. Define named modes in `ahi.modes.yaml`; existing `ahi.tools.yaml` policies remain supported. Keep only one of these files in a workspace. Commands run with the user's access; these permissions are not an OS sandbox.
 
 ## Installation
 
@@ -39,7 +17,7 @@ cargo install ahi --locked
 ahi --version
 ```
 
-Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS cannot yet (due to instability with GitHub Actions MacOS runners, as of early November 2026).
+Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS prebuilt archives are not currently available.
 
 ### Linux
 
@@ -273,7 +251,7 @@ Installation and the manual verification steps are under [Installation](#install
 
 ### ahi tools
 
-Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi precommit migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy. `ahi tools init --interactive` lists the modes and their capabilities in a terminal, accepts a name or number (Enter selects `read-all`, `q` cancels), and previews the selection; add `--write` to save it. Interactive selection requires terminal input and stderr; scripts should use `--example`. The `permissive` example enables workspace reads and writes without prompts and approves commands through `sh`, `bash`, `pwsh`, `powershell`, or `cmd`; other executable prefixes remain denied. Those shells have the operator's host access and can bypass builtin file protections: this is not a sandbox. The interactive chooser requires typing `permissive` again to acknowledge this; explicit `--example permissive` is the headless opt-in. Skills and delegation still require explicit rules. `ahi tools list` shows the `ahi.tools.yaml` in the working directory with the same summary `ahi doctor` prints, or says it is absent. `ahi tools examples list` (or bare `ahi tools examples`) names the shipped policies with what each lets the model do; `ahi tools examples show` prints every one and `ahi tools examples show <name>` prints one. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves. In a terminal, `list`, `examples`, and `init` paint each rule by its outcome, green for approve, gray for ask, red for deny, with a legend; `--color never` prints plain text and the written file is always plain. Every builtin tool works inside the working directory: rule paths are relative to it, absolute paths, `..`, and symbolic links are refused before any read, write, or command, and `run_command` starts only in a directory inside it, so a rule's `path` narrows access and never widens it. This is not a sandbox: a program approved by a command rule runs on the host with the operator's access and can follow symbolic links, read files above the working directory, and run other programs, so command rules deserve the most care; `ahi tui` inside `ahi dev run` adds a container boundary.
+In Policy mode, chat tools require an approving workspace policy (`ahi.modes.yaml` or legacy `ahi.tools.yaml`) or an explicit `--tools` file. Interactive Read-only and Read-write modes are separate choices; see [Workspace trust and execution modes](#workspace-trust-and-execution-modes). `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi precommit migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy. `ahi tools init --interactive` lists the modes and their capabilities in a terminal, accepts a name or number (Enter selects `read-all`, `q` cancels), and previews the selection; add `--write` to save it. Interactive selection requires terminal input and stderr; scripts should use `--example`. The `permissive` example enables workspace reads and writes without prompts and approves commands through `sh`, `bash`, `pwsh`, `powershell`, or `cmd`; other executable prefixes remain denied. Those shells have the operator's host access and can bypass builtin file protections: this is not a sandbox. The interactive chooser requires typing `permissive` again to acknowledge this; explicit `--example permissive` is the headless opt-in. Skills and delegation still require explicit rules. `ahi tools list` shows the `ahi.tools.yaml` in the working directory with the same summary `ahi doctor` prints, or says it is absent. `ahi tools examples list` (or bare `ahi tools examples`) names the shipped policies with what each lets the model do; `ahi tools examples show` prints every one and `ahi tools examples show <name>` prints one. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves. In a terminal, `list`, `examples`, and `init` paint each rule by its outcome, green for approve, gray for ask, red for deny, with a legend; `--color never` prints plain text and the written file is always plain. Every builtin tool works inside the working directory: rule paths are relative to it, absolute paths, `..`, and symbolic links are refused before any read, write, or command, and `run_command` starts only in a directory inside it, so a rule's `path` narrows access and never widens it. This is not a sandbox: a program approved by a command rule runs on the host with the operator's access and can follow symbolic links, read files above the working directory, and run other programs, so command rules deserve the most care; `ahi tui` inside `ahi dev run` adds a container boundary.
 
 ### ahi tui
 
@@ -281,7 +259,7 @@ Pick curated models from `models.json`. Load is local-only; `--refresh` explicit
 
 #### Picker and curation
 
-In 0.3.0, model catalogs and curated selections are separate. The main picker offers **only** `providers.<id>.models` from `models.json`, in saved order, for OpenAI and every gateway. An omitted list stays empty even after refresh. Reference catalogs never supply picker defaults; their curation view lets you explicitly choose the saved list. See [CHANGELOG.md](CHANGELOG.md) for the breaking gateway-loading change.
+Model catalogs and curated selections are separate. The main picker offers **only** `providers.<id>.models` from `models.json`, in saved order, for OpenAI and every gateway. An omitted list stays empty even after refresh. Reference catalogs never supply picker defaults; their curation view lets you explicitly choose the saved list. See [CHANGELOG.md](CHANGELOG.md) for the breaking gateway-loading change.
 
 The curated picker includes OpenAI and every registered gateway. Provider groups follow the key order of the `providers` object in `models.json`. An implicit, unconfigured OpenAI group starts first; an explicit gateway reorder saves its position too. Highlight a **provider/gateway header** and use **Shift+Up/Down** or **Shift+J/K** to move the whole group and save its order, without changing its models or credentials.
 
@@ -319,12 +297,11 @@ boundaries.
 On entering chat without a policy, ahi asks whether you trust the workspace.
 **t** enables Read-write and remembers trust outside the checkout; **r** continues
 Read-only without saving trust; **Esc** cancels. Commands run with your account's
-access, not in a sandbox. An existing `ahi.tools.yaml` or `--tools` instead starts
-in **Policy** mode and keeps its rules authoritative.
+access, not in a sandbox. With a version 2 `ahi.modes.yaml`, chat starts in its `default_mode`; a version 1 policy starts in **Policy** mode.
 
 **Shift+Tab** cycles available modes without changing the draft. **`/mode`** opens
-the chooser. Read-only blocks writes, commands, bundled scripts, and delegation.
-With a custom policy, Shift+Tab cycles Policy → Read-only → Read-write; selecting
+a searchable picker. Read-only blocks writes, commands, bundled scripts, and delegation.
+Shift+Tab cycles the built-in and configured modes; selecting
 Read-write explicitly bypasses custom rules for this session without changing
 the file. The bars are cyan for Policy, blue for Read-only, and amber for
 permissive Read-write. Changes during generation are queued for the next turn, not applied
@@ -387,7 +364,7 @@ A starter `models.json` is in [Getting started](#getting-started). Explicit chec
 
 #### Catalogs and refresh
 
-Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only with new direct-token credentials. **A live request with a new direct-token credential returned HTTP 200 and model metadata.** That response used `models[].slug`; ahi accepts this shape as well as the standard `data[].id` format, preserving every reported ID in order. The earlier HTTP 403 was from an old Codex-flow credential, not the new grant. A 403 preserves the catalog and curated IDs and reports unavailable discovery. Expiry is checked before requests; authentication failures permit at most one renewal and retry. Requests refuse redirects, have a 15-second timeout and a 1 MiB response cap. Pi uses this grant for Responses, not Decisions; ahi now implements the corresponding Responses transport. Configured gateway inference uses a separate Chat Completions backend. Local transport/authentication fixtures passed, but no live OpenAI inference was performed for this implementation. `auth signed-in` means only a credential file exists.
+Explicit OpenAI refresh requests `GET https://api.openai.com/v1/models` with direct-token credentials. It accepts `models[].slug` and the standard `data[].id` format, preserving reported IDs in order. A 403 preserves the catalog and curated IDs and reports unavailable discovery. Expiry is checked before requests; authentication failures permit at most one renewal and retry. Requests refuse redirects, have a 15-second timeout, and cap responses at 1 MiB. `auth signed-in` means only that a credential file exists.
 
 Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the path from the configured `baseUrl`. Both the original flat catalog and supported Pi-shaped `{"providers": {"home": {...}}}` documents are accepted. A validated returned same-origin `baseUrl` supplies the inference path for new registration and is shown in Review; no `/v1` is guessed. Multiple candidates require an exact inference URL to disambiguate. Metadata survives caching and curation; discovery never automatically selects remote models. This is a gateway-specific discovery convention, not an OpenAI or industry-standard catalog endpoint. The gateway retains `/pi/agent/model.json` as a legacy alias; ahi uses only the canonical route. Gateways without this catalog route can still serve inference for explicitly configured model IDs.
 
@@ -516,6 +493,34 @@ The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the w
 
 Detection only in this version; nothing is confined yet. `ahi sandbox check` prints the platform, whether an outer sandbox is already active on the process, the evidence, and the backend `ahi sandbox run` would use, then exits 0. On Linux it reads `Seccomp:` and `NoNewPrivs:` from `/proc/self/status`, the active LSM list for Landlock, `bwrap` on `PATH` with the user-namespace limits, and container markers. A seccomp filter already active on the process (mode 2, as inside OpenShell) is reported as an outer sandbox, and ahi would run a child directly rather than nest a second filter. The backend order is Landlock plus seccomp, then `bwrap`, then none; macOS reports `sandbox-exec` as best effort because Apple treats it as deprecated; Windows reports a job object, which contains the process tree only. The probes read files and `PATH` and need no unsafe code; the definitive OpenShell test, a `seccomp` call returning `EPERM`, arrives with `ahi sandbox run`. `ahi doctor` carries the same one-line summary.
 
+## Glossary
+
+These terms describe ahi's boundaries, not interchangeable names for the same subsystem.
+
+| Term | Meaning in ahi |
+| --- | --- |
+| **Primitive** | A capability with a clear owner, such as tools, policy, sessions, or terminal hosting. Usually a Rust module, not a plugin or separate crate. |
+| **Agent runtime** | The loop that asks a model for a response, executes authorized tool calls, and continues the turn. Its separation from chat presentation is still planned. |
+| **Provider / gateway** | A provider implements a model API; a gateway exposes models through a configured endpoint. Neither owns tool authorization. |
+| **Tool** | A compiled, model-callable operation such as `read_file`, `edit_file`, or `run_command`. Its implementation is separate from permission to run it. |
+| **Tool policy / approval** | Workspace mode rules authorize capabilities. An approval answers a particular permission request; model text and tool output cannot grant authority. |
+| **Skill** | Instructions loaded as tool-result content under policy. A skill supplies information, not new permissions or executable plugins. |
+| **Precommit / Git hook** | Precommit runs repository checks. A Git lifecycle hook invokes that runner; it is not the runner itself. |
+| **TUI** | Ahi's terminal user interface: chat, model selection, approval prompts, and transcript presentation. |
+| **Terminal host** | An external multiplexer server that provides persistent terminals and runs programs in them. `terminal_host` is ahi's interface to Rex (primary) and hc. It does not implement a multiplexer. |
+| **Terminal / shell / UI client** | A terminal supplies program input/output; a shell is one program that can run in it. A graphical UI client displays terminals. Ahi does not manage the external client's windows, layout, or focus. |
+| **Execution target** | The selected server/core and local or remote execution namespace. Native Windows and WSL are different targets, even on one physical computer. |
+| **Terminal handle** | A backend- and target-qualified native terminal ID. It is not an ahi session ID, worker label, or currently focused pane. Local core IDs are not portable to another machine. |
+| **Ahi session / turn** | A session is a recorded conversation and its execution history. A turn is one submitted request and the model/tool work needed to answer it. A Rex session is a separate native resource container. |
+| **Session service / connector** | `ahi serve` owns structured session operations. `ahi connect` carries that protocol over stdio, including through SSH. `hc connect` carries a different protocol. |
+| **Worker / delegation / orchestration** | A worker is an ahi service receiving a task. Delegation submits that task through an explicitly configured connector. Scheduling and coordinating multiple workers are not terminal-host responsibilities. |
+| **Program status** | Advisory OSC 7501 reports such as working or blocked. They are neither structured agent replies nor authorization or proof that a process exited. |
+| **Durability / ledger** | Stored conversation and execution facts, including tool presentation details. Rendering and authorization remain application responsibilities. |
+| **Conversation resume / crash recovery** | Resume restores a saved conversation. Crash recovery would reconcile unfinished effects and permissions; it is not implemented by conversation resume. |
+| **Containment / development environment** | Containment restricts what a process can access. `ahi dev` launches a development container; software path checks and terminal multiplexing are not OS sandboxes. |
+
+See the [module plan](docs/MODULE_STRUCTURE.md) for implemented versus proposed ownership.
+
 ## Files and directories
 
 ahi keeps its own files in the XDG base directories, each with an `ahi` child:
@@ -551,7 +556,6 @@ gh attestation verify ahi-0.6.0-sha256sums.txt --repo iancleary/ahi
 ```
 
 `sha256sum --check` uses the filenames recorded in the sums file, so the archive has to sit beside that file; `--ignore-missing` skips the archives you did not download. Verify each archive you use the same way, and replace `0.6.0` with the release that was downloaded.
-
 
 ## Development
 
