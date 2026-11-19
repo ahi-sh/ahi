@@ -177,6 +177,37 @@ mod tests {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
     }
 
+    #[test]
+    fn compact_commands_match_both_directory_and_argv_prefix() {
+        let src = "version: 2\ndefault_mode: review\nmodes:\n  review:\n    ask:\n      commands:\n        - argv_prefixes: [[cargo, test], [cargo, check]]\n          working_dirs: [crates/api, crates/cli]\n";
+        let policy = policy(src);
+        for (dir, subcommand, asks) in [
+            ("crates/api", "test", true),
+            ("crates/cli/src", "check", true),
+            ("crates/api-old", "test", false),
+            ("", "check", false),
+            ("crates/api", "publish", false),
+        ] {
+            let verdict = policy.evaluate(
+                "run_command",
+                dir,
+                &["cargo".into(), subcommand.into(), "--quiet".into()],
+            );
+            match (asks, verdict) {
+                (true, Verdict::Ask { .. }) | (false, Verdict::Deny { .. }) => {}
+                (_, unexpected) => panic!("{dir} cargo {subcommand}: {unexpected:?}"),
+            }
+        }
+        for invalid in ["[]", "['']", "[../elsewhere]", "null"] {
+            assert!(parse(
+                &src.replace("[crates/api, crates/cli]", invalid),
+                "fixture",
+                &TOOLS
+            )
+            .is_err());
+        }
+    }
+
     fn error(src: &str) -> String {
         parse(src, "ahi.tools.yaml", &TOOLS)
             .unwrap_err()

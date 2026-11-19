@@ -64,13 +64,21 @@ modes:
       tools: [read_file, list_dir, find_files, search_files]
       skills: ["operator/*"]
     ask:
-      commands: [{programs: [cargo]}]
+      commands:
+        - argv_prefixes:
+            - [cargo, check]
+            - [cargo, test]
+          working_dirs:
+            - crates/ahi-widgets
+            - crates/ahi-unix
 ```
 
-Each program name is a separate argv prefix, **not** a complete command:
-`[cargo]` matches any cargo subcommand. For narrower argv prefixes, path
-filters, worker labels, or individual scripts, use a mode's `rules` list
-with the v1 rule syntax. `write_files: true` covers edit and write;
+Use `programs` for whole programs or `argv_prefixes` for token prefixes (not
+shell strings). A group matches any listed prefix **and** any listed working
+directory or its descendants. Omit `working_dirs` to allow any workspace
+directory; it never selects the process directory or confines filesystem
+access. The model still supplies `run_command.path`. For worker labels or
+individual scripts, use the detailed `rules` list. `write_files: true` covers edit and write;
 `skill_scripts` grants scripts under `scripts/**` independently of skill reads.
 See the checkout's `ahi.modes.yaml` for shared command environment settings.
 

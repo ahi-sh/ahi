@@ -33,9 +33,18 @@ struct Permissions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Commands {
+    #[serde(default)]
     programs: Vec<String>,
     #[serde(default)]
+    argv_prefixes: Vec<Vec<String>>,
+    #[serde(default = "workspace_root")]
+    working_dirs: Vec<String>,
+    #[serde(default)]
     toolchain_env: Vec<String>,
+}
+
+fn workspace_root() -> Vec<String> {
+    vec![".".into()]
 }
 
 impl Modes {
@@ -102,20 +111,45 @@ impl Modes {
                     );
                 }
                 for commands in grants.commands {
-                    if commands.programs.is_empty() {
+                    let prefixes = match (
+                        commands.programs.is_empty(),
+                        commands.argv_prefixes.is_empty(),
+                    ) {
+                        (true, false) => commands.argv_prefixes,
+                        (false, true) => commands.programs.into_iter().map(|p| vec![p]).collect(),
+                        _ => {
+                            return Err(Error::new(format!(
+                                "{origin}: a command group needs either programs or argv_prefixes"
+                            )))
+                        }
+                    };
+                    if commands.working_dirs.is_empty()
+                        || commands
+                            .working_dirs
+                            .iter()
+                            .any(|dir| dir.trim().is_empty())
+                    {
                         return Err(Error::new(format!(
-                            "{origin}: commands.programs cannot be empty"
+                            "{origin}: working_dirs requires a nonempty list of directories"
                         )));
                     }
-                    for program in commands.programs {
-                        push(
-                            "command",
-                            RawMatch {
-                                argv: Some(vec![program]),
-                                ..Default::default()
-                            },
-                            Some(commands.toolchain_env.clone()),
-                        );
+                    if prefixes.len().saturating_mul(commands.working_dirs.len()) > 1024 {
+                        return Err(Error::new(format!(
+                            "{origin}: command group exceeds 1024 prefix/directory pairs"
+                        )));
+                    }
+                    for prefix in prefixes {
+                        for dir in &commands.working_dirs {
+                            push(
+                                "command",
+                                RawMatch {
+                                    argv: Some(prefix.clone()),
+                                    path: Some(dir.clone()),
+                                    ..Default::default()
+                                },
+                                Some(commands.toolchain_env.clone()),
+                            );
+                        }
                     }
                 }
             }
