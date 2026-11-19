@@ -17,6 +17,9 @@ pub(super) struct Modes {
     pub dialog: Option<Dialog>,
     pub has_policy: bool,
     pub trusted: bool,
+    named: Vec<ExecutionMode>,
+    query: String,
+    cursor: usize,
 }
 impl Default for Modes {
     fn default() -> Self {
@@ -26,6 +29,9 @@ impl Default for Modes {
             dialog: None,
             has_policy: false,
             trusted: false,
+            named: Vec::new(),
+            query: String::new(),
+            cursor: 0,
         }
     }
 }
@@ -41,8 +47,14 @@ impl Modes {
         Ok(Self {
             has_policy,
             trusted,
+            named: installed
+                .iter()
+                .flat_map(|p| p.named.keys().cloned().map(ExecutionMode::Named))
+                .collect(),
             selected: if has_policy {
-                ExecutionMode::Policy
+                installed
+                    .and_then(|p| p.default_mode)
+                    .map_or(ExecutionMode::Policy, ExecutionMode::Named)
             } else if trusted {
                 ExecutionMode::ReadWrite
             } else {
@@ -54,34 +66,111 @@ impl Modes {
     }
     pub fn cycle(&mut self) {
         use ExecutionMode::*;
-        self.selected = match self.selected {
+        self.selected = match &self.selected {
+            Named(_) => self
+                .named
+                .iter()
+                .position(|m| m == &self.selected)
+                .and_then(|i| self.named.get(i + 1))
+                .cloned()
+                .unwrap_or(ReadOnly),
             Policy => ReadOnly,
             ReadOnly if self.has_policy || self.trusted => ReadWrite,
             ReadOnly => {
                 self.dialog = Some(Dialog::Trust);
                 ReadOnly
             }
-            ReadWrite if self.has_policy => Policy,
+            ReadWrite if self.has_policy => self.named.first().cloned().unwrap_or(Policy),
             ReadWrite => ReadOnly,
         };
     }
     pub fn color(&self) -> ratatui_core::style::Color {
         use ratatui_core::style::Color;
         match self.selected {
-            ExecutionMode::Policy => Color::Cyan,
+            ExecutionMode::Policy | ExecutionMode::Named(_) => Color::Cyan,
             ExecutionMode::ReadOnly => Color::Blue,
             ExecutionMode::ReadWrite => Color::Yellow,
         }
     }
     pub fn status(&self) -> String {
-        match self.active {
-            Some(active) if active != self.selected => {
+        match &self.active {
+            Some(active) if active != &self.selected => {
                 format!("{} → {} next turn", active.label(), self.selected.label())
             }
             _ => self.selected.label().to_string(),
         }
     }
-    pub fn draw(&self, frame: &mut ratatui_core::terminal::Frame, root: &Path, policy: &Path) {
+    fn choices(&self) -> Vec<ExecutionMode> {
+        let mut modes = vec![ExecutionMode::ReadOnly, ExecutionMode::ReadWrite];
+        if self.has_policy && self.named.is_empty() {
+            modes.push(ExecutionMode::Policy);
+        }
+        modes.extend(self.named.iter().cloned());
+        modes.retain(|m| {
+            m.label()
+                .to_ascii_lowercase()
+                .contains(&self.query.to_ascii_lowercase())
+        });
+        modes
+    }
+    pub fn refresh_policy(&mut self, root: &Path, file: Option<&Path>) -> Result<()> {
+        let installed = match file {
+            Some(path) => Some(crate::tool_policy::load_file(path, &crate::tools::BUILTIN)?),
+            None => crate::tool_policy::load(root, &crate::tools::BUILTIN)?,
+        };
+        if let Some(policy) = installed {
+            self.named = policy.named.into_keys().map(ExecutionMode::Named).collect();
+            if !self.has_policy && self.selected != ExecutionMode::ReadOnly {
+                self.selected = policy
+                    .default_mode
+                    .map_or(ExecutionMode::Policy, ExecutionMode::Named);
+            }
+            self.has_policy = true;
+        } else if self.has_policy {
+            return Err(Error::policy(
+                "Workspace policy is missing; restore it or reopen chat to review trust.",
+            ));
+        }
+        Ok(())
+    }
+    pub fn open_picker(&mut self) {
+        self.query.clear();
+        self.cursor = self
+            .choices()
+            .iter()
+            .position(|m| m == &self.selected)
+            .unwrap_or(0);
+        self.dialog = Some(Dialog::Choose);
+    }
+    pub fn picker_key(&mut self, key: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+        let choices = self.choices();
+        let len = choices.len();
+        match key {
+            KeyCode::Up if len > 0 => self.cursor = (self.cursor + len - 1) % len,
+            KeyCode::Down if len > 0 => self.cursor = (self.cursor + 1) % len,
+            KeyCode::Enter => {
+                if let Some(mode) = choices.get(self.cursor) {
+                    if *mode == ExecutionMode::ReadWrite && !self.trusted && !self.has_policy {
+                        self.dialog = Some(Dialog::Trust);
+                    } else {
+                        self.selected = mode.clone();
+                        self.dialog = None;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.cursor = 0;
+            }
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.cursor = 0;
+            }
+            _ => {}
+        }
+    }
+    pub fn draw(&self, frame: &mut ratatui_core::terminal::Frame, root: &Path) {
         let Some(dialog) = self.dialog else {
             return;
         };
@@ -94,7 +183,19 @@ impl Modes {
         );
         let (title, body) = match dialog {
             Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue read-only (no commands or writes)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
-            Dialog::Choose => (" Execution mode ", format!("Current: {}\nPolicy: {}\n\n[1] Read-only: no writes, commands or delegation\n[2] Read-write: permissive host access, ignores custom policy\n[3] Policy: use the policy file\n\nShift+Tab cycles available modes. Changes apply next turn; running commands are not stopped.\n/mode revoke forgets workspace trust. Esc closes without changing the draft.", self.status(), policy.display())),
+            Dialog::Choose => {
+                use ahi_widgets::{List, ListItem, ListState};
+                use ratatui_core::style::{Color, Style};
+                let choices = self.choices();
+                let height = popup.height.min(8).min(choices.len().max(1) as u16 + 2);
+                let popup = Rect::new(popup.x, popup.bottom().saturating_sub(height), popup.width.min(80), height);
+                let mut items: Vec<_> = choices.iter().map(|m| ListItem::new(format!("{}{}", m.label(), if m == &self.selected { "  (selected)" } else { "" }))).collect();
+                if items.is_empty() {items.push(ListItem::new("No matching modes"));}
+                let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(" Modes · filter: {} · Enter select · Esc dismiss ",self.query))).highlight_symbol("› ").highlight_style(Style::default().bg(Color::Rgb(45,65,85)));
+                frame.render_widget(Clear,popup);
+                frame.render_stateful_widget(list,popup,&mut ListState::default().with_selected((!choices.is_empty()).then_some(self.cursor)));
+                return;
+            },
         };
         frame.render_widget(Clear, popup);
         frame.render_widget(

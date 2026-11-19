@@ -125,6 +125,7 @@ struct ChatScreen {
     /// The backend is between connection attempts: (next attempt, of).
     reconnecting: Option<(u8, u8)>,
     command_running: bool,
+    expanded_tools: bool,
     /// The last turn failed before the gateway was reached, so Enter on a
     /// blank input sends the same transcript again.
     resend_available: bool,
@@ -300,6 +301,7 @@ impl ChatScreen {
             location_receiver: None,
             reconnecting: None,
             command_running: false,
+            expanded_tools: false,
             resend_available: false,
             turn_skills: Vec::new(),
         };
@@ -331,6 +333,9 @@ impl ChatScreen {
             crate::tool_policy::ExecutionMode::ReadWrite
             | crate::tool_policy::ExecutionMode::ReadOnly => {
                 Some(crate::tool_policy::ActionPolicy::trusted())
+            }
+            crate::tool_policy::ExecutionMode::Named(_) => {
+                policy.and_then(|p| p.select(&self.modes.selected).ok())
             }
             crate::tool_policy::ExecutionMode::Policy => policy,
         };
@@ -407,6 +412,7 @@ impl ChatScreen {
         let exists = move |path: &str| file_exists(&root, path);
         let options = transcript::format::Options {
             markdown: self.preferences.markdown,
+            expanded_tools: self.expanded_tools,
             exists: &exists,
             appearance: &self.appearance,
         };
@@ -520,22 +526,7 @@ impl ChatScreen {
                         self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
                         self.modes.dialog = None;
                     }
-                    (mode::Dialog::Choose, KeyCode::Char('1')) => {
-                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
-                        self.modes.dialog = None;
-                    }
-                    (mode::Dialog::Choose, KeyCode::Char('2')) => {
-                        if !self.modes.has_policy && !self.modes.trusted {
-                            self.modes.dialog = Some(mode::Dialog::Trust);
-                        } else {
-                            self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
-                            self.modes.dialog = None;
-                        }
-                    }
-                    (mode::Dialog::Choose, KeyCode::Char('3')) if self.modes.has_policy => {
-                        self.modes.selected = crate::tool_policy::ExecutionMode::Policy;
-                        self.modes.dialog = None;
-                    }
+                    (mode::Dialog::Choose, code) => self.modes.picker_key(code),
                     _ => {}
                 }
             }
@@ -782,6 +773,12 @@ impl ChatScreen {
                 } else {
                     Ok(ScreenAction::Continue)
                 }
+            }
+            KeyAction::ToggleToolOutput => {
+                self.expanded_tools = !self.expanded_tools;
+                self.text_selection.clear();
+                self.mark_dirty(0);
+                Ok(ScreenAction::Continue)
             }
             KeyAction::CycleThinkingLevel => {
                 self.thinking = self.thinking.next();
@@ -1228,23 +1225,25 @@ impl ChatScreen {
                 chunks[2].y + input.cursor_row.min(chunks[2].height as usize - 1) as u16,
             ));
         }
+        let footer = format!(
+            "─ / commands · {} · Shift+Tab · /mode{} · Ctrl+O tools",
+            self.modes.status(),
+            if self.modes.has_policy {
+                format!(
+                    " · {}",
+                    self.actions_file
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| crate::tool_policy::FILE_NAME.into())
+                )
+            } else {
+                String::new()
+            }
+        );
+        let remaining = usize::from(chunks[3].width)
+            .saturating_sub(unicode_width::UnicodeWidthStr::width(footer.as_str()) + 1);
         frame.render_widget(
-            Paragraph::new(format!(
-                "/ commands · {} · Shift+Tab · /mode{}",
-                self.modes.status(),
-                if self.modes.has_policy {
-                    format!(
-                        " · {}",
-                        self.actions_file
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| crate::tool_policy::FILE_NAME.into())
-                    )
-                } else {
-                    String::new()
-                }
-            ))
-            .style(accent),
+            Paragraph::new(format!("{footer} {}", "─".repeat(remaining))).style(accent),
             chunks[3],
         );
 
@@ -1292,14 +1291,7 @@ impl ChatScreen {
         if let Some(query) = self.input.skill_query() {
             self.skill_menu.draw(frame, chunks[0], &query);
         }
-        self.modes.draw(
-            frame,
-            &self.workspace_root,
-            &self
-                .actions_file
-                .clone()
-                .unwrap_or_else(|| crate::tool_policy::workspace_file(&self.workspace_root)),
-        );
+        self.modes.draw(frame, &self.workspace_root);
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
@@ -1314,11 +1306,8 @@ impl ChatScreen {
                 .symlink_metadata()
                 .is_ok()
         {
-            crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN)?;
-            self.modes.has_policy = true;
-            if self.modes.selected != crate::tool_policy::ExecutionMode::ReadOnly {
-                self.modes.selected = crate::tool_policy::ExecutionMode::Policy;
-            }
+            self.modes
+                .refresh_policy(&self.workspace_root, self.actions_file.as_deref())?;
             self.push_notice("New workspace policy detected; custom rules now apply.".into());
         }
         if self.modes.has_policy
@@ -1387,9 +1376,9 @@ impl ChatScreen {
             );
             self.surface_recording_failure();
         }
-        self.modes.active = Some(self.modes.selected);
+        self.modes.active = Some(self.modes.selected.clone());
         let request = ChatRequest {
-            mode: self.modes.selected,
+            mode: self.modes.selected.clone(),
             // A retry whose history already contains tool results replays that
             // exchange, rather than recording the explicit loads a second time.
             skills: if prompt.is_some() {
@@ -1460,7 +1449,14 @@ impl ChatScreen {
     ) -> Result<ScreenAction> {
         match command::parse(text) {
             ParsedCommand::Mode => {
-                self.modes.dialog = Some(mode::Dialog::Choose);
+                if let Err(err) = self
+                    .modes
+                    .refresh_policy(&self.workspace_root, self.actions_file.as_deref())
+                {
+                    self.push_alert(err.to_string());
+                    return Ok(ScreenAction::Continue);
+                }
+                self.modes.open_picker();
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::RevokeTrust => {
@@ -3148,7 +3144,7 @@ mod tests {
         });
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
-        assert!(idle[idle.len() - 2].starts_with("/ commands "));
+        assert!(idle[idle.len() - 2].starts_with("─ / commands "));
         assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab · /mode"));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
@@ -3379,6 +3375,12 @@ mod tests {
     fn edit_preview_draws_numbered_red_and_green_lines() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-edit-preview");
         let mut screen = screen_in(&state);
+        screen
+            .apply_action(
+                KeyAction::ToggleToolOutput,
+                &mut RecordingBackend { requests: vec![] },
+            )
+            .unwrap();
         screen.apply_event(ResponseEvent::ToolResult {
             call_id: "edit-1".into(),
             tool: "edit_file".into(),

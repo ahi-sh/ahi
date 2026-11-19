@@ -2,25 +2,28 @@
 use super::{ActionKind, ActionPolicy, Effect, ToolRule};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ExecutionMode {
     #[default]
     Policy,
     ReadOnly,
     ReadWrite,
+    #[serde(untagged)]
+    Named(String),
 }
 
 impl ExecutionMode {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Policy => "Policy",
             Self::ReadOnly => "Read-only",
             Self::ReadWrite => "Read-write",
+            Self::Named(name) => name,
         }
     }
-    pub(crate) fn allows(self, tool: &str) -> bool {
-        self != Self::ReadOnly
+    pub(crate) fn allows(&self, tool: &str) -> bool {
+        self != &Self::ReadOnly
             || matches!(
                 tool,
                 "read_file" | "list_dir" | "find_files" | "search_files" | "load_skill"
@@ -79,6 +82,9 @@ impl ActionPolicy {
                 ask: false,
             });
         }
-        Self { rules }
+        Self {
+            rules,
+            ..Default::default()
+        }
     }
 }

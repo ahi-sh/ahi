@@ -22,6 +22,7 @@ const MAX_LINE_CHARS: usize = 400;
 pub(crate) struct Options<'a> {
     pub(crate) appearance: &'a crate::chat::appearance::Appearance,
     pub(crate) markdown: bool,
+    pub(crate) expanded_tools: bool,
     /// Whether a relative path names a real file in the workspace.
     pub(crate) exists: &'a dyn Fn(&str) -> bool,
 }
@@ -31,6 +32,7 @@ impl Options<'static> {
     /// No markdown, no file targets: what layout tests use.
     pub(crate) const PLAIN: Options<'static> = Options {
         markdown: false,
+        expanded_tools: true,
         appearance: &crate::chat::appearance::Appearance::DEFAULT,
         exists: &|_| false,
     };
@@ -508,6 +510,9 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
         header.push(&part, style);
     }
     out.push(header);
+    if !options.expanded_tools {
+        return out;
+    }
 
     match &message.detail {
         Some(ToolDetail::Write { before, after }) => {
@@ -791,6 +796,7 @@ mod tests {
     fn options() -> Options<'static> {
         Options {
             markdown: true,
+            expanded_tools: true,
             appearance: &crate::chat::appearance::Appearance::DEFAULT,
             exists: &exists,
         }
@@ -853,6 +859,7 @@ mod tests {
             &assistant("# Title\n**bold**"),
             &Options {
                 markdown: false,
+                expanded_tools: true,
                 appearance: &crate::chat::appearance::Appearance::DEFAULT,
                 exists: &exists,
             },

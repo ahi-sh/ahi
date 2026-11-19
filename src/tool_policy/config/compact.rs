@@ -24,10 +24,35 @@ struct Mode {
 #[serde(default, deny_unknown_fields)]
 struct Permissions {
     tools: Vec<String>,
+    files: Vec<Files>,
+    workers: Vec<String>,
     write_files: bool,
     skills: Vec<String>,
-    skill_scripts: Vec<String>,
+    skill_scripts: Vec<SkillScripts>,
     commands: Vec<Commands>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Files {
+    tools: Vec<String>,
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SkillScripts {
+    Scope(String),
+    Group(ScriptGroup),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScriptGroup {
+    skills: Vec<String>,
+    scripts: Vec<String>,
+    #[serde(default = "workspace_root")]
+    working_dirs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +74,7 @@ fn workspace_root() -> Vec<String> {
 
 impl Modes {
     pub(super) fn compile(self, origin: &str, builtin: &[&str]) -> Result<ActionPolicy> {
-        let mut selected = None;
+        let mut named = BTreeMap::new();
         for (name, mode) in self.modes {
             if !crate::precommit::policy::valid_rule_id(&name)
                 || matches!(name.as_str(), "read-only" | "read-write" | "policy")
@@ -86,6 +111,42 @@ impl Modes {
                         None,
                     );
                 }
+                for files in grants.files {
+                    if files.tools.is_empty()
+                        || files.paths.is_empty()
+                        || files.paths.iter().any(|p| p.trim().is_empty())
+                        || files.tools.len().saturating_mul(files.paths.len()) > 1024
+                    {
+                        return Err(Error::new(format!("{origin}: files requires nonempty tools and paths (at most 1024 pairs)")));
+                    }
+                    for tool in files.tools {
+                        for path in &files.paths {
+                            push(
+                                if WRITE_TOOLS.contains(&tool.as_str()) {
+                                    "file_write"
+                                } else {
+                                    "tool_call"
+                                },
+                                RawMatch {
+                                    tool: Some(tool.clone()),
+                                    path: Some(path.clone()),
+                                    ..Default::default()
+                                },
+                                None,
+                            );
+                        }
+                    }
+                }
+                for worker in grants.workers {
+                    push(
+                        "delegate",
+                        RawMatch {
+                            worker: Some(worker),
+                            ..Default::default()
+                        },
+                        None,
+                    );
+                }
                 if grants.write_files {
                     push("file_write", RawMatch::default(), None);
                 }
@@ -99,16 +160,41 @@ impl Modes {
                         None,
                     );
                 }
-                for skill in grants.skill_scripts {
-                    push(
-                        "skill_command",
-                        RawMatch {
-                            skill: Some(skill),
-                            script: Some("scripts/**".into()),
-                            ..Default::default()
+                for entry in grants.skill_scripts {
+                    let group = match entry {
+                        SkillScripts::Group(group) => group,
+                        SkillScripts::Scope(scope) => ScriptGroup {
+                            skills: vec![scope],
+                            scripts: vec!["scripts/**".into()],
+                            working_dirs: workspace_root(),
                         },
-                        None,
-                    );
+                    };
+                    let count = group
+                        .skills
+                        .len()
+                        .saturating_mul(group.scripts.len())
+                        .saturating_mul(group.working_dirs.len());
+                    if !(1..=1024).contains(&count)
+                        || group.working_dirs.iter().any(|p| p.trim().is_empty())
+                    {
+                        return Err(Error::new(format!("{origin}: skill script group requires 1–1024 skill/script/directory combinations")));
+                    }
+                    for skill in group.skills {
+                        for script in &group.scripts {
+                            for dir in &group.working_dirs {
+                                push(
+                                    "skill_command",
+                                    RawMatch {
+                                        skill: Some(skill.clone()),
+                                        script: Some(script.clone()),
+                                        path: Some(dir.clone()),
+                                        ..Default::default()
+                                    },
+                                    None,
+                                );
+                            }
+                        }
+                    }
                 }
                 for commands in grants.commands {
                     let prefixes = match (
@@ -162,15 +248,18 @@ impl Modes {
                 &format!("{origin}: mode {name}"),
                 builtin,
             )?;
-            if name == self.default_mode {
-                selected = Some(policy);
-            }
+            named.insert(name, policy.rules);
         }
-        selected.ok_or_else(|| {
+        let rules = named.get(&self.default_mode).cloned().ok_or_else(|| {
             Error::new(format!(
                 "{origin}: unknown default_mode `{}`",
                 self.default_mode
             ))
+        })?;
+        Ok(ActionPolicy {
+            rules,
+            default_mode: Some(self.default_mode),
+            named,
         })
     }
 }

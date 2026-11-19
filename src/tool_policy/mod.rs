@@ -97,6 +97,19 @@ pub(crate) enum Effect {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ActionPolicy {
     pub(crate) rules: Vec<ToolRule>,
+    pub(crate) default_mode: Option<String>,
+    pub(crate) named: std::collections::BTreeMap<String, Vec<ToolRule>>,
+}
+
+impl ActionPolicy {
+    pub(crate) fn select(mut self, mode: &ExecutionMode) -> crate::error::Result<Self> {
+        if let ExecutionMode::Named(name) = mode {
+            self.rules = self.named.remove(name).ok_or_else(|| {
+                crate::error::Error::new(format!("workspace mode `{name}` is unavailable"))
+            })?;
+        }
+        Ok(self)
+    }
 }
 
 /// The verdict from declared rules alone. Operator grants are applied by the
@@ -175,6 +188,40 @@ mod tests {
 
     fn policy(src: &str) -> ActionPolicy {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
+    }
+
+    #[test]
+    fn scoped_example_enforces_files_scripts_and_workers() {
+        let p = parse(
+            include_str!("../../examples/modes/scoped-development.yaml"),
+            "scoped-development",
+            &crate::tools::BUILTIN,
+        )
+        .unwrap();
+        assert!(matches!(
+            p.evaluate("write_file", "docs/draft", &[]),
+            Verdict::Approve { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("write_file", "docs/published/post", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("read_file", "src-other/file", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate_skill_command("repo/review", "scripts/check.sh", "crates/api", &[]),
+            Verdict::Ask { .. }
+        ));
+        assert!(matches!(
+            p.evaluate_skill_command("repo/review", "scripts/check.sh", "crates/cli", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("delegate", "", &["reviewer".into()]),
+            Verdict::Ask { .. }
+        ));
     }
 
     #[test]

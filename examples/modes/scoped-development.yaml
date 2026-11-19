@@ -1,0 +1,63 @@
+# Example: grouped permissions for all nine tools. Unlisted actions are denied.
+version: 2
+default_mode: development
+modes:
+  development:
+    allow:
+      files:
+        - tools:
+            - read_file
+          paths:
+            - README.md
+            - src
+            - docs
+        - tools:
+            - list_dir
+            - find_files
+            - search_files
+          paths:
+            - src
+            - docs
+        - tools:
+            - edit_file
+            - write_file
+          paths:
+            - docs
+
+      # run_command: each inner list is ONE argv prefix. No shell splitting.
+      commands:
+        - argv_prefixes:
+            - [cargo, check]
+            - [cargo, test]
+          working_dirs:
+            - crates/api
+            - crates/cli
+          toolchain_env:
+            - CARGO_TARGET_DIR
+
+      # load_skill: optional catalog restriction, not permission to execute.
+      skills:
+        - "operator/*"
+        - repo/review
+
+    ask:
+      # run_command's bundled-script form, separate from ordinary argv.
+      skill_scripts:
+        - skills:
+            - repo/review
+          scripts:
+            - scripts/check.sh
+          working_dirs:
+            - crates/api
+
+      # delegate: match configured worker labels, not local file paths.
+      workers:
+        - reviewer
+
+    deny:
+      files:
+        - tools:
+            - edit_file
+            - write_file
+          paths:
+            - docs/published

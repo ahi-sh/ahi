@@ -469,6 +469,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn operator_link_is_resolved_once_but_repo_link_is_refused() {
+        let base =
+            crate::fixture_directory::create_unique_fixture_directory("linked-operator-skill");
+        let work = base.join("work");
+        let home = base.join("home");
+        let target = base.join("dotfiles");
+        skill(
+            &target,
+            "probe",
+            "name: probe\ndescription: An installed probe\n",
+            "original instructions",
+        );
+        for root in [work.join(REPO_ROOT), home.join(OPERATOR_ROOT)] {
+            fs::create_dir_all(&root).unwrap();
+            std::os::unix::fs::symlink(target.join("probe"), root.join("probe")).unwrap();
+        }
+        let catalog = enumerate(&work, Some(&home));
+        assert!(catalog.get("repo/probe").is_none());
+        fs::remove_file(home.join(OPERATOR_ROOT).join("probe")).unwrap();
+        assert_eq!(
+            read(catalog.get("operator/probe").unwrap(), None).unwrap(),
+            "original instructions"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn both_roots_keep_same_named_skills_independently_addressable() {
         let base = crate::fixture_directory::create_unique_fixture_directory("skills");
         let work = base.join("work");

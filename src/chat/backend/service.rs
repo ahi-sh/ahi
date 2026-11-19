@@ -211,7 +211,7 @@ impl ServiceBackend {
         }
         let session = self.prepare(request)?;
         let turn = TurnRequest {
-            mode: request.mode,
+            mode: request.mode.clone(),
             prompt: prompt.to_string(),
             skills: request.skills.clone(),
             run_id: None,

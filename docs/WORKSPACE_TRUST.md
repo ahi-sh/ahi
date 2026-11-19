@@ -17,7 +17,8 @@ server; trust does not sandbox the remote account or authorize a connector.
 ## Switching modes
 
 The mode is always shown below the draft. **Shift+Tab** cycles available modes;
-`/mode` opens the numbered chooser, with the selected policy path. The draft and
+`/mode` opens a searchable picker. Type to filter, use the arrows to highlight,
+Enter to select, or Esc to dismiss. The draft and
 conversation stay intact when cycling. No denied action is automatically retried.
 
 - **Read-write**: the explicitly trusted workflow, without a custom policy.
@@ -29,7 +30,8 @@ conversation stay intact when cycling. No denied action is automatically retried
   file selected with `--tools`. An existing policy chooses this mode at startup,
   even in a remembered trusted workspace. Invalid policies fail closed.
 
-With a policy, Shift+Tab cycles **Policy → Read-only → Read-write → Policy**.
+With a v1 policy, Shift+Tab cycles **Policy → Read-only → Read-write → Policy**.
+With a v2 file, each named mode appears individually; chat starts in `default_mode`.
 Selecting Read-write directly, with Shift+Tab or `/mode`, is the explicit choice
 to bypass the custom policy, including deny rules and approval prompts, for this
 session. There is no additional confirmation dialog. This does not edit the
@@ -52,7 +54,7 @@ and selects Read-only for the next turn.
 ## Writing a compact workspace mode
 
 `ahi.modes.yaml` version 2 declares a `default_mode` and a `modes` mapping.
-The Policy choice uses `default_mode`. Each mode may group permissions under
+Headless Policy uses `default_mode`; interactive chat can select another named entry. Each mode may group permissions under
 `allow`, `ask`, and `deny`. Unlisted actions are denied. For example:
 
 ```yaml
@@ -77,8 +79,10 @@ Use `programs` for whole programs or `argv_prefixes` for token prefixes (not
 shell strings). A group matches any listed prefix **and** any listed working
 directory or its descendants. Omit `working_dirs` to allow any workspace
 directory; it never selects the process directory or confines filesystem
-access. The model still supplies `run_command.path`. For worker labels or
-individual scripts, use the detailed `rules` list. `write_files: true` covers edit and write;
+access. The model still supplies `run_command.path`. Use `files` groups with `tools` and workspace-relative `paths` for file scopes;
+`workers` lists allowed delegate labels. `skill_scripts` accepts groups with
+`skills`, `scripts`, and optional `working_dirs` for bundled script calls.
+Unknown tools and unsupported match combinations are rejected. `write_files: true` covers edit and write;
 `skill_scripts` grants scripts under `scripts/**` independently of skill reads.
 See the checkout's `ahi.modes.yaml` for shared command environment settings.
 
@@ -91,7 +95,7 @@ the new filename. Do not leave both files present: ahi refuses to choose.
 Standalone and service-backed chat submit the same typed per-turn mode. The
 service enforces restrictions, not just the UI's tool list. A TUI requesting a
 non-default mode refuses older services that do not advertise mode support.
-`turn.submit` accepts `mode: "policy" | "read-only" | "read-write"`; omission
+`turn.submit` accepts `policy`, `read-only`, `read-write`, or a workspace mode name; omission
 means Policy. Explicit API Read-write is an authorization decision by the caller.
 The result records the mode; reusing a run ID with another mode is a conflict.
 

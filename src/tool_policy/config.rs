@@ -121,7 +121,7 @@ mod compact;
 fn compile_rules(raw: RawPolicy, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     if raw.version != 1 {
         return Err(Error::new(format!(
-            "{origin}: {FILE_NAME} version {} is not supported (expected 1)",
+            "{origin}: {FILE_NAME} version {} is not supported (expected 1 or 2)",
             raw.version
         )));
     }
@@ -388,5 +388,8 @@ fn compile_rules(raw: RawPolicy, origin: &str, builtin_tools: &[&str]) -> Result
             ask: rule.ask,
         });
     }
-    Ok(ActionPolicy { rules })
+    Ok(ActionPolicy {
+        rules,
+        ..Default::default()
+    })
 }

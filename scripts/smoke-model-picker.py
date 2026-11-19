@@ -209,6 +209,8 @@ def main() -> None:
 
     if args.workspace_modes_only:
         queue_release = threading.Event()
+        redraw_release = threading.Event()
+        advertised_skills = {}
 
         class ModeGateway(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -216,6 +218,19 @@ def main() -> None:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
+                prompt = body["messages"][-1].get("content")
+                if prompt in ("redraw-probe", "now write"):
+                    advertised_skills[prompt] = next((t["function"]["description"] for t in body.get("tools", []) if t["function"]["name"] == "load_skill"), "")
+                if prompt == "redraw-probe":
+                    for fragment in ["Cleaned up", " the README’s introduction", " and organization:\n\n- Summarized the changes."]:
+                        item = {"choices": [{"index": 0, "delta": {"content": fragment}}]}
+                        self.wfile.write(f"data: {json.dumps(item)}\n\n".encode())
+                        self.wfile.flush()
+                        if fragment == "Cleaned up":
+                            redraw_release.wait(10)
+                    self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+                    self.wfile.flush()
+                    return
                 if body["messages"][-1].get("content") == "queue-turn":
                     prefix = {"choices": [{"index": 0, "delta": {"content": "mode-stream-waiting"}}]}
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
@@ -228,7 +243,7 @@ def main() -> None:
                     delta = {"tool_calls": [{"index": 0, "id": "write-mode", "type": "function",
                              "function": {"name": "write_file", "arguments": json.dumps({"path": "marker", "content": "written"})}},
                              {"index": 1, "id": "command-mode", "type": "function",
-                              "function": {"name": "run_command", "arguments": json.dumps({"argv": ["/bin/sh", "-c", "printf command-ok > command-marker"], "skill": "", "script": "", "args": []})}}]}
+                              "function": {"name": "run_command", "arguments": json.dumps({"argv": ["/bin/sh", "-c", "printf command-ok > command-marker; printf 'captured-%s\\nsecond-%s\\n' stdout line"], "skill": "", "script": "", "args": []})}}]}
                     finish = "tool_calls"
                 for item in [{"choices": [{"index": 0, "delta": delta}]},
                              {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]:
@@ -261,12 +276,31 @@ def main() -> None:
                     }}}))
                     sock = str(state / "run/serve.sock")
                     options = ("--standalone",) if engine == "standalone" else ("--socket", sock)
+                    home = Path(temp) / "home"
+                    operator = home / ".agents/skills"
+                    operator.mkdir(parents=True)
+                    installed = Path(temp) / "dotfiles" / "local-probe"
+                    installed.mkdir(parents=True)
+                    (installed / "SKILL.md").write_text("---\nname: local-probe\ndescription: Probe metadata\n---\nHidden body\n")
+                    (operator / "local-probe").symlink_to(installed, target_is_directory=True)
+                    repo = work / ".agents/skills/repo-probe"
+                    repo.mkdir(parents=True)
+                    (repo / "SKILL.md").write_text("---\nname: repo-probe\ndescription: Repository fixture\n---\nHidden body\n")
+                    advertised_skills.clear()
                     command = ("tui", "--session", sid, *options)
-                    chat = Session(state, cwd=work, columns=120, rows=35, command=command)
+                    chat = Session(state, cwd=work, columns=120, rows=35, command=command, environment={"HOME": str(home)})
                     try:
                         chat.expect("Trust this workspace?")
                         chat.send("r")
                         chat.expect("Read-only · Shift+Tab")
+                        redraw_release.clear()
+                        chat.send("redraw-probe\r")
+                        chat.expect("Cleaned up")
+                        assert chat.screen().count("Cleaned up") == 1
+                        redraw_release.set()
+                        chat.expect("Cleaned up the README’s introduction and organization:")
+                        chat.expect("• Summarized the changes.")
+                        assert chat.screen().count("Cleaned up") == 1
                         chat.send("draft-preserved")
                         chat.send("\x1b[Z")
                         chat.expect("Trust this workspace?")
@@ -290,12 +324,27 @@ def main() -> None:
                             chat.read()
                             assert time.monotonic() < deadline
                         assert (work / "marker").read_text() == "written"
+                        chat.expect("exit 0")
+                        for prompt in ("redraw-probe", "now write"):
+                            catalog = advertised_skills[prompt]
+                            assert "operator/local-probe" in catalog and "repo/repo-probe" in catalog, catalog
+                            assert "Hidden body" not in catalog
+                        chat.absent("captured-stdout")
+                        chat.send("draft-toggle")
+                        chat.send("\x0f")
+                        chat.expect("captured-stdout")
+                        chat.expect("second-line")
+                        assert chat.screen().count("captured-stdout") == 1
+                        chat.send("\x0f")
+                        chat.absent("captured-stdout")
+                        chat.expect("draft-toggle")
+                        chat.send("\x03")  # clear draft before issuing /mode
                         # Start another read-write turn, queue read-only while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
-                        chat.expect("Shift+Tab cycles available modes.")
+                        chat.expect("Enter select · Esc dismiss")
                         chat.send("\x1b")
-                        chat.absent("Shift+Tab cycles available modes.")
+                        chat.absent("Enter select · Esc dismiss")
                         (work / "marker").unlink()
                         queue_release.clear()
                         chat.send("queue-turn\r")
@@ -314,14 +363,16 @@ def main() -> None:
                         chat.expect("Workspace trust revoked")
                         assert not list((state / "workspace-trust").iterdir())
                         chat.send("/quit\r")
-                        chat.finish()
+                        restored = chat.finish().rsplit("\x1b[?1049l", 1)[-1]
+                        assert "You: now write" in restored and "Assistant: mode-fixture-complete" in restored
+                        assert f"Resume: ahi --session {sid}" in restored
                     finally:
                         chat.close()
-                    policy = "version: 1\nrules:\n- {id: reads, action: tool_call, match: {tool: read_file}, effect: approve}\n"
-                    (work / "ahi.tools.yaml").write_text(policy)
+                    policy = "version: 2\ndefault_mode: review\nmodes:\n  review: {allow: {tools: [read_file]}}\n  editing: {allow: {write_files: true}}\n"
+                    (work / "ahi.modes.yaml").write_text(policy)
                     chat = Session(state, cwd=work, columns=120, rows=35, command=command)
                     try:
-                        chat.expect("Policy · Shift+Tab")
+                        chat.expect("review · Shift+Tab")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")
                         chat.expect("Read-only · Shift+Tab")
@@ -338,8 +389,22 @@ def main() -> None:
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("\x1b[Z")
-                        chat.expect("Policy · Shift+Tab")
-                        assert (work / "ahi.tools.yaml").read_text() == policy
+                        chat.expect("editing · Shift+Tab")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("review\r")
+                        chat.expect("review · Shift+Tab")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("edit\r")
+                        chat.expect("editing · Shift+Tab")
+                        (work / "marker").unlink()
+                        (work / "command-marker").unlink()
+                        chat.send("named permission check\r")
+                        chat.expect("no policy rule allows this call")
+                        assert (work / "marker").read_text() == "written"
+                        assert not (work / "command-marker").exists()
+                        assert (work / "ahi.modes.yaml").read_text() == policy
                         chat.send("/quit\r")
                         chat.finish()
                     finally:
@@ -580,6 +645,8 @@ def main() -> None:
                     session = Session(state, columns=100, rows=60, command=command)
                     try:
                         session.expect("edit_file src/a.rs · +1 -1 · 0.4s")
+                        session.absent("assertion failed")
+                        session.send("\x0f")
                         session.expect("1   -old")
                         session.expect("1 +new")
                         session.expect("cargo test · exit 1 · 3.8s")
@@ -686,7 +753,7 @@ def main() -> None:
         try:
             session.expect("Models · Enter use model")
             session.send("j\r")
-            session.expect("Skill: repo/review-one (available)")
+            session.expect("Skills: 4 available · 4 discovered")
             session.send("\x1b[200~before $operator/review-two after\x1b[201~")
             session.expect("before $operator/review-two after")
             session.absent("Skills [")
@@ -854,7 +921,7 @@ def main() -> None:
         # Explicit files exercise loading; omitted vertical padding uses one row.
         (state / "padding.toml").write_text("horizontal = 2\n")
         (state / "theme.toml").write_text("[backgrounds]\noperator = '#112233'\n")
-        session = Session(state, executable_dir=clipboard_bin,
+        session = Session(state, cwd=state, executable_dir=clipboard_bin,
                           environment={"AHI_CLIPBOARD_OSC52": "1"})
         try:
             session.expect("vendor/model/variant")
@@ -880,7 +947,7 @@ def main() -> None:
             assert "128k" not in session.screen()  # Never invent model context/usage.
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
-            assert rows[-2].startswith("/ commands ")
+            assert rows[-2].startswith("─ / commands ")
             initial_mode = "Read-only" if session.onboarded_read_only else "Policy"
             assert f"{initial_mode} · Shift+Tab · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
@@ -1940,6 +2007,8 @@ def main() -> None:
             assert len(gateway_requests) == 1
             session.send("y")
             session.expect("approved once")
+            session.absent("pub fn tool_fixture() {}")
+            session.send("\x0f")
             session.expect("pub fn tool_fixture() {}")
             session.expect("tool result received")
             session.absent("Working")

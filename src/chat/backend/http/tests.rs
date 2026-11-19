@@ -1032,7 +1032,7 @@ fn read_only_blocks_effects_even_under_a_permissive_policy_and_read_write_is_exp
         let policy = format!("version: 1\nrules:\n- {{id: reads, action: tool_call, match: {{tool: read_file}}, effect: approve}}\n- {{id: secret, action: tool_call, match: {{tool: read_file, path: secret}}, effect: deny}}\n- {{id: edits, action: file_write, match: {{}}, effect: {effect}}}\n");
         let fixture = ToolFixture::new(&url, &policy, json!({"id":"vendor/model"}));
         let mut input = request();
-        input.mode = mode;
+        input.mode = mode.clone();
         let (events, _) = collect_answering(&mut fixture.backend(), input, vec![]);
         let outcomes = results(&events);
         assert!(outcomes[0].2.contains("fn a() {}"));

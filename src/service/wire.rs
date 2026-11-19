@@ -212,8 +212,12 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
     let mode = params
         .get("mode")
         .map(|value| {
-            serde_json::from_value(value.clone())
-                .map_err(|_| usage("mode must be policy, read-only or read-write"))
+            let name = value
+                .as_str()
+                .filter(|name| crate::precommit::policy::valid_rule_id(name))
+                .ok_or_else(|| usage("mode must be a valid built-in or workspace mode name"))?;
+            serde_json::from_value(serde_json::Value::String(name.into()))
+                .map_err(|_| usage("invalid execution mode"))
         })
         .transpose()?
         .unwrap_or_default();
@@ -428,7 +432,7 @@ mod tests {
         let selected = request(json!({"mode":"read-only"})).unwrap();
         assert_eq!(turn_params("s", &selected)["mode"], "read-only");
         assert_eq!(
-            request(json!({"mode":"unrestricted"})).unwrap_err().kind,
+            request(json!({"mode":"../invalid"})).unwrap_err().kind,
             "usage"
         );
         assert_eq!(
