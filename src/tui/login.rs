@@ -1,3 +1,4 @@
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 use ahi_widgets::{Block, Borders, Paragraph, Wrap};
@@ -28,10 +29,26 @@ fn login_loop(terminal: &mut crate::term::DefaultTerminal, state: &Directories) 
         "Waiting for browser login. Paste the full callback URL if needed.".to_string();
     let mut scroll = 0_u16;
     let mut browser_opened = false;
+    let mut copy_result: Option<mpsc::Receiver<bool>> = None;
     loop {
+        if let Some(receiver) = &copy_result {
+            match receiver.try_recv() {
+                Ok(true) => {
+                    status =
+                        "URL sent to clipboard (terminal copy requests cannot confirm acceptance)."
+                            .into();
+                    copy_result = None;
+                }
+                Ok(false) | Err(TryRecvError::Disconnected) => {
+                    status = "Clipboard unavailable. Ctrl+Y retries; the URL remains above.".into();
+                    copy_result = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         terminal
             .draw(|frame| {
-                let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(5)])
+                let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(7)])
                     .split(frame.area());
                 frame.render_widget(
                     Paragraph::new(format!(
@@ -45,7 +62,7 @@ fn login_loop(terminal: &mut crate::term::DefaultTerminal, state: &Directories) 
                 );
                 frame.render_widget(
                     Paragraph::new(format!(
-                        "{status}\nCallback: {} characters (hidden)\nEnter submit  Ctrl+U clear  Up/Down scroll URL  Esc/Ctrl+C cancel",
+                        "{status}\nCallback: {} characters (hidden)\nCtrl+Y copy URL  Enter submit  Ctrl+U clear\nUp/Down scroll URL  Esc/Ctrl+C cancel",
                         callback.chars().count()
                     ))
                     .wrap(Wrap { trim: false }),
@@ -68,6 +85,19 @@ fn login_loop(terminal: &mut crate::term::DefaultTerminal, state: &Directories) 
                 KeyCode::Esc => return Err(Error::new("OpenAI login cancelled")),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(Error::new("OpenAI login cancelled"));
+                }
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if copy_result.is_none() {
+                        let (sender, receiver) = mpsc::channel();
+                        copy_result = Some(receiver);
+                        status = "Copying login URL…".into();
+                        // Use the raw URL, not rendered terminal cells. Helpers can
+                        // take time; keep callback polling and cancellation responsive.
+                        let url = login.authorization_url().to_string();
+                        std::thread::spawn(move || {
+                            let _ = sender.send(crate::clipboard::copy(&url));
+                        });
+                    }
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     callback.clear();

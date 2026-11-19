@@ -36,6 +36,8 @@ def main() -> None:
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
                          help="stop after the scoped skill picker and bracketed paste checks")
+    focused.add_argument("--login-copy-only", action="store_true",
+                         help="verify raw OAuth URL clipboard copy and cancellation with disposable adapters")
     focused.add_argument("--stream-recovery-only", action="store_true",
                          help="verify live checkpoints and Ctrl+C recovery in both engines")
     focused.add_argument("--session-details-only", action="store_true",
@@ -192,6 +194,68 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    if args.login_copy_only:
+        with tempfile.TemporaryDirectory(prefix="ahi-login-copy-", dir="/tmp") as temp:
+            state = Path(temp)
+            helpers = state / "bin"
+            helpers.mkdir()
+            (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                "baseUrl": "http://127.0.0.1:9/v1", "api": "openai-completions",
+                "models": [{"id": "fixture"}],
+            }}}))
+            authorization = state / "authorization"
+            copied = state / "copied"
+            for name in ("open", "xdg-open"):
+                helper = helpers / name
+                helper.write_text("#!/bin/sh\nprintf '%s' \"$1\" > " + shlex.quote(str(authorization)) + "\n")
+                helper.chmod(0o700)
+            for name in ("pbcopy", "wl-copy", "xclip", "xsel"):
+                helper = helpers / name
+                helper.write_text("#!/bin/sh\n/bin/cat > " + shlex.quote(str(copied)) + "\n")
+                helper.chmod(0o700)
+            for mode in ("native", "unavailable", "osc52"):
+                authorization.unlink(missing_ok=True)
+                copied.unlink(missing_ok=True)
+                if mode == "unavailable":
+                    for name in ("pbcopy", "wl-copy", "xclip", "xsel"):
+                        (helpers / name).write_text("#!/bin/sh\nexit 1\n")
+                env = {"AHI_CLIPBOARD_OSC52": "1" if mode == "osc52" else "",
+                       "WSL_DISTRO_NAME": "", "WSL_INTEROP": "", "WSLENV": ""}
+                chat = Session(state, executable_dir=helpers, columns=80, rows=24,
+                               command=("tui", "--standalone"), environment=env)
+                try:
+                    chat.expect("Models · Enter use model")
+                    chat.send("/login\r")
+                    chat.expect("Ctrl+Y copy URL")
+                    deadline = time.monotonic() + 5
+                    while not authorization.exists():
+                        assert time.monotonic() < deadline
+                        chat.read()
+                    raw = authorization.read_text()
+                    assert raw.startswith("https://auth.openai.com/")
+                    chat.send("\x1b[200~callback-draft\x1b[201~")
+                    chat.expect("Callback: 14 characters (hidden)")
+                    chat.send("\x19")
+                    if mode == "unavailable":
+                        chat.expect("Clipboard unavailable")
+                    else:
+                        chat.expect("URL sent to clipboard")
+                        if mode == "native":
+                            assert copied.read_text() == raw  # no borders, line breaks, or extra newline
+                        else:
+                            payload = base64.b64encode(raw.encode())
+                            assert b"\x1b]52;c;" + payload + b"\x07" in chat.output
+                    chat.expect("Callback: 14 characters (hidden)")
+                    chat.send("\x1b")
+                    chat.expect("OpenAI login cancelled")
+                    chat.send("/quit\r")
+                    chat.finish()
+                finally:
+                    chat.close()
+            assert not (state / "credentials/openai.json").exists()
+        print("PASS: exact raw login URL copy, unavailable clipboard, OSC52 payload, callback preservation and cancel")
+        return
 
     if args.stream_recovery_only:
         marker = "visible-stream-marker"
