@@ -37,6 +37,22 @@ const CHAT_CONTEXTS: &[CommandContext] = &[CommandContext::Chat];
 
 const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
+        command: "/mode",
+        label: "Execution mode",
+        description: "Choose Read-write, Read-only or Policy; Shift+Tab cycles",
+        aliases: &[],
+        action: None,
+        contexts: CHAT_CONTEXTS,
+    },
+    CommandDefinition {
+        command: "/mode revoke",
+        label: "Revoke workspace trust",
+        description: "Forget trust and restrict the next turn to read-only",
+        aliases: &[],
+        action: None,
+        contexts: CHAT_CONTEXTS,
+    },
+    CommandDefinition {
         command: "/gateway",
         label: "Add gateway",
         description: "Discover gateway by URL",
