@@ -1,0 +1,29 @@
+# Shells run as your account, not in a sandbox. Unlisted actions are denied.
+version: 2
+default_mode: development
+modes:
+  development:
+    allow:
+      tools:
+        - read_file
+        - list_dir
+        - find_files
+        - search_files
+      write_files: true
+
+      skills:
+        - "operator/*"
+      skill_scripts:
+        - "operator/*"
+        - "repo/*"
+
+      commands:
+        - programs:
+            - sh
+            - bash
+          toolchain_env:
+            - CARGO_TARGET_DIR
+        - programs:
+            - pwsh
+            - powershell
+            - cmd

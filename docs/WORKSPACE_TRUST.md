@@ -24,8 +24,8 @@ conversation stay intact when cycling. No denied action is automatically retried
 - **Read-only**: reads, searches, and skill/supporting-file reads only. Commands
   (including bundled scripts), writes, and delegation are refused even if the
   model guesses their calls or an existing policy approves them. An existing
-  policy still restricts which reads are available and which need approval.
-- **Policy**: exactly the rules and approval prompts of `ahi.tools.yaml` or the
+  policy is validated but does not narrow this built-in mode’s skill catalog or reads.
+- **Policy**: exactly the rules and approval prompts of `ahi.modes.yaml` or the
   file selected with `--tools`. An existing policy chooses this mode at startup,
   even in a remembered trusted workspace. Invalid policies fail closed.
 
@@ -48,6 +48,35 @@ keeps an immutable mode snapshot; switching cannot stop an already running
 command. Use Esc to cancel the current turn separately. The next submitted
 prompt uses the queued mode. `/mode revoke` removes remembered workspace trust
 and selects Read-only for the next turn.
+
+## Writing a compact workspace mode
+
+`ahi.modes.yaml` version 2 declares a `default_mode` and a `modes` mapping.
+The Policy choice uses `default_mode`. Each mode may group permissions under
+`allow`, `ask`, and `deny`. Unlisted actions are denied. For example:
+
+```yaml
+version: 2
+default_mode: review
+modes:
+  review:
+    allow:
+      tools: [read_file, list_dir, find_files, search_files]
+      skills: ["operator/*"]
+    ask:
+      commands: [{programs: [cargo]}]
+```
+
+Each program name is a separate argv prefix, **not** a complete command:
+`[cargo]` matches any cargo subcommand. For narrower argv prefixes, path
+filters, worker labels, or individual scripts, use a mode's `rules` list
+with the v1 rule syntax. `write_files: true` covers edit and write;
+`skill_scripts` grants scripts under `scripts/**` independently of skill reads.
+See the checkout's `ahi.modes.yaml` for shared command environment settings.
+
+Version 1 policies still work, including under the old `ahi.tools.yaml` name.
+Upgrade ahi before renaming a workspace file; older binaries do not recognize
+the new filename. Do not leave both files present: ahi refuses to choose.
 
 ## Service and headless boundaries
 

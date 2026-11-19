@@ -11,8 +11,10 @@ ahi discovers `<workspace>/.agents/skills/<name>/SKILL.md` and
 ahi configuration/state overrides do not relocate it. Ahi keeps both definitions
 when names collide: `repo/review` and `operator/review` are distinct IDs. The
 picker puts repository skills first on an equal match. `ahi doctor` lists
-both roots. Discovery does not scan ancestors, recurse for skills, or follow
-symlinks. Install a real directory in one of these roots.
+both roots. Discovery does not scan ancestors or recurse for skills. An
+operator-installed skill directory entry may link to a dotfiles checkout; ahi
+resolves the target before reading its files. Repository skill entries, skill
+files, and referenced paths cannot be symlinks.
 
 Discovery reads each bounded file locally to validate and extract frontmatter.
 It retains metadata, not the instruction body. The model does not receive the
@@ -135,7 +137,8 @@ this rule to a policy you control:
   effect: approve
 ```
 
-This is not the default. It matches the turn runner's OS-resolved home, not
+That opt-in applies to a custom policy. Built-in Read-only and Read-write
+already make both skill scopes available. The rule matches the turn runner's OS-resolved home, not
 repository skills. Exact deny rules still win; add `ask: true` to require
 approval before loading. Reading `scripts/` files does not authorize execution. The audit log records the scoped ID, source,
 file, size, and content hash, not the instruction text. Session tool results retain
@@ -177,5 +180,4 @@ inferred from a filename. These opt-ins do not change the default policy or
 the read-only `operator-skills` preset.
 
 This does not implement `AGENTS.md` instruction loading, automatic project trust,
-operator symlink adoption, or a new skill allow/deny list. Existing tool-policy
-approval remains required.
+or a new skill allow/deny list. Policy-mode approval remains required.

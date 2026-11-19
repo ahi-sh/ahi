@@ -60,6 +60,24 @@ pub(crate) fn skills_text(
     if catalog.skills.is_empty() {
         return "Skills: none discovered".into();
     }
+    if catalog.skills.len() > 3 {
+        let available = catalog
+            .skills
+            .iter()
+            .filter(|skill| {
+                policy.is_some_and(|policy| {
+                    !matches!(
+                        policy.evaluate_skill(&skill.id()),
+                        crate::tool_policy::Verdict::Deny { .. }
+                    )
+                })
+            })
+            .count();
+        return format!(
+            "Skills: {available} available · {} discovered · $ to browse",
+            catalog.skills.len()
+        );
+    }
     let mut lines = vec!["Skills (loaded on demand):".to_string()];
     for skill in &catalog.skills {
         let status = if policy.is_some_and(|policy| {

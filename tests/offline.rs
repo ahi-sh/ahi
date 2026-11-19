@@ -533,7 +533,7 @@ fn the_retired_policy_filename_is_an_error_not_silence() {
 #[test]
 fn tools_init_prints_a_policy_and_writes_only_with_write() {
     let dir = fixture_directory::create_unique_fixture_directory("tools-init");
-    let policy = dir.join("ahi.tools.yaml");
+    let policy = dir.join("ahi.modes.yaml");
     let absent = run(&dir, &["tools", "list"]);
     let absent_out = String::from_utf8(absent.stdout).unwrap();
     assert_eq!(absent.status.code(), Some(0));
@@ -582,7 +582,7 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
     let stdout = String::from_utf8(dry.stdout).unwrap();
     assert_eq!(dry.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("id: read-tree"), "{stdout}");
-    assert!(stdout.contains("Left ahi.tools.yaml unchanged"), "{stdout}");
+    assert!(stdout.contains("Left ahi.modes.yaml unchanged"), "{stdout}");
     assert!(!policy.exists());
 
     let unknown = run(&dir, &["tools", "init", "--example", "nope"]);
@@ -650,7 +650,7 @@ fn tools_init_colors_only_when_asked_on_a_pipe() {
     assert!(colored_out.contains("approve"), "{colored_out}");
     // The file on disk is never colored.
     assert_eq!(
-        fs::read_to_string(dir.join("ahi.tools.yaml")).unwrap(),
+        fs::read_to_string(dir.join("ahi.modes.yaml")).unwrap(),
         example("tools/read-all.yaml")
     );
     let never = run(&dir, &["--color", "never", "tools", "list"]);

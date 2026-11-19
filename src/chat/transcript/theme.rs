@@ -50,8 +50,13 @@ pub(crate) fn list_marker() -> Style {
 pub(crate) fn rule() -> Style {
     dim()
 }
-pub(crate) fn tool_header() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
+pub(crate) fn tool_header(exit_code: i32) -> Style {
+    let color = if exit_code == 0 {
+        Color::LightGreen
+    } else {
+        Color::LightRed
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 pub(crate) fn stream_label() -> Style {
     dim()

@@ -22,7 +22,18 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub(crate) const FILE_NAME: &str = "ahi.tools.yaml";
+pub(crate) const FILE_NAME: &str = "ahi.modes.yaml";
+pub(crate) const LEGACY_FILE_NAME: &str = "ahi.tools.yaml";
+
+pub(crate) fn workspace_file(root: &Path) -> std::path::PathBuf {
+    let primary = root.join(FILE_NAME);
+    if primary.symlink_metadata().is_err() && root.join(LEGACY_FILE_NAME).symlink_metadata().is_ok()
+    {
+        root.join(LEGACY_FILE_NAME)
+    } else {
+        primary
+    }
+}
 /// The name this file had before 0.7.0. Its presence is an error, never silence.
 pub(crate) const RETIRED_FILE_NAME: &str = "ahi.actions.yaml";
 
@@ -349,7 +360,7 @@ mod tests {
     fn rejects_unknown_fields_kinds_tools_profiles_and_escaping_paths() {
         let rule = |body: &str| format!("version: 1\nrules:\n- {{id: r, {body}}}\n");
         for (src, expected) in [
-            ("version: 2\n".to_string(), "version 2 is not supported"),
+            ("version: 99\n".to_string(), "version 99 is not supported"),
             ("version: 1\ndefault: approve\n".into(), "default must be deny"),
             ("version: 1\nextra: 1\n".into(), "unknown field `extra`"),
             (
@@ -488,7 +499,7 @@ mod tests {
             let name = path.file_name().unwrap().to_str().unwrap();
             if name == "invalid-version.yaml" {
                 let error = result.unwrap_err().to_string();
-                assert!(error.contains("version 2 is not supported"), "{error}");
+                assert!(error.contains("version 99 is not supported"), "{error}");
                 assert!(error.contains(name), "origin names the file: {error}");
             } else {
                 let policy = result.unwrap_or_else(|err| panic!("{name}: {err}"));

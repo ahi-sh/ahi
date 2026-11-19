@@ -147,7 +147,39 @@ struct ChatScreen {
     actions_file: Option<std::path::PathBuf>,
 }
 
+pub(crate) struct ChatExit {
+    pub(crate) session: Option<String>,
+    pub(crate) conversation: String,
+}
+
 impl ChatScreen {
+    fn exit_output(&mut self, backend: &dyn CompletionBackend) -> ChatExit {
+        // Write conversation text after leaving raw mode, not terminal draws or
+        // raw tool payloads. Do not replay control sequences into the shell.
+        let conversation = self
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let speaker = match message.role {
+                    TranscriptRole::Operator => "You",
+                    TranscriptRole::Assistant if !message.text.is_empty() => "Assistant",
+                    _ => return None,
+                };
+                let text: String = message
+                    .text
+                    .chars()
+                    .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                    .collect();
+                Some(format!("{speaker}: {text}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        ChatExit {
+            session: self.finish_session(backend),
+            conversation,
+        }
+    }
+
     fn finish_session(&mut self, backend: &dyn CompletionBackend) -> Option<String> {
         self.status.clear();
         backend
@@ -288,7 +320,7 @@ impl ChatScreen {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".to_string());
         let tools = self.modes.selected != crate::tool_policy::ExecutionMode::Policy
-            || self.workspace_root.join("ahi.tools.yaml").is_file()
+            || crate::tool_policy::workspace_file(&self.workspace_root).is_file()
             || self.actions_file.is_some();
         let policy = match &self.actions_file {
             Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
@@ -296,11 +328,9 @@ impl ChatScreen {
         };
         let policy = policy.ok().flatten();
         let policy = match self.modes.selected {
-            crate::tool_policy::ExecutionMode::ReadWrite => {
+            crate::tool_policy::ExecutionMode::ReadWrite
+            | crate::tool_policy::ExecutionMode::ReadOnly => {
                 Some(crate::tool_policy::ActionPolicy::trusted())
-            }
-            crate::tool_policy::ExecutionMode::ReadOnly => {
-                policy.or_else(|| Some(crate::tool_policy::ActionPolicy::trusted()))
             }
             crate::tool_policy::ExecutionMode::Policy => policy,
         };
@@ -1112,6 +1142,8 @@ impl ChatScreen {
             );
         }
 
+        let accent = Style::default().fg(self.modes.color());
+        let mut activity_style = accent;
         let activity = if let Some((status, _)) = self
             .copy_status
             .filter(|(_, when)| when.elapsed() < Duration::from_secs(4))
@@ -1137,6 +1169,7 @@ impl ChatScreen {
                 "Tool approval waiting: clear the draft (Ctrl+C) to answer ".to_string()
             }
         } else if self.response_in_progress {
+            activity_style = transcript::theme::dim();
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             let verb = match self.reconnecting {
                 Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
@@ -1167,8 +1200,7 @@ impl ChatScreen {
         let activity_width = activity.chars().count().min(usize::from(chunks[1].width)) as u16;
         let header = Layout::horizontal([Constraint::Length(activity_width), Constraint::Min(0)])
             .split(chunks[1]);
-        let accent = Style::default().fg(self.modes.color());
-        frame.render_widget(Paragraph::new(activity).style(accent), header[0]);
+        frame.render_widget(Paragraph::new(activity).style(activity_style), header[0]);
         let context_rule = status::render_context_rule(header[1].width as usize, &self.meters);
         frame.render_widget(Paragraph::new(context_rule).style(accent), header[1]);
         frame.render_widget(Paragraph::new(input.lines.join("\n")), chunks[2]);
@@ -1266,7 +1298,7 @@ impl ChatScreen {
             &self
                 .actions_file
                 .clone()
-                .unwrap_or_else(|| self.workspace_root.join(crate::tool_policy::FILE_NAME)),
+                .unwrap_or_else(|| crate::tool_policy::workspace_file(&self.workspace_root)),
         );
     }
 
@@ -1278,10 +1310,9 @@ impl ChatScreen {
         }
         if !self.modes.has_policy
             && self.modes.selected != crate::tool_policy::ExecutionMode::Policy
-            && self
-                .workspace_root
-                .join(crate::tool_policy::FILE_NAME)
-                .exists()
+            && crate::tool_policy::workspace_file(&self.workspace_root)
+                .symlink_metadata()
+                .is_ok()
         {
             crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN)?;
             self.modes.has_policy = true;
@@ -1292,10 +1323,7 @@ impl ChatScreen {
         }
         if self.modes.has_policy
             && self.actions_file.is_none()
-            && !self
-                .workspace_root
-                .join(crate::tool_policy::FILE_NAME)
-                .is_file()
+            && !crate::tool_policy::workspace_file(&self.workspace_root).is_file()
         {
             self.push_alert("Workspace policy is missing; restore it or reopen chat to review workspace trust. Draft kept.".into());
             return Ok(ScreenAction::Continue);
@@ -1922,7 +1950,7 @@ pub(crate) fn interact(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<Option<String>> {
+) -> Result<ChatExit> {
     let record = matches!(engine, Engine::Standalone { record: true });
     let mut screen = ChatScreen::load_recording(
         state_dir,
@@ -1947,7 +1975,7 @@ pub(crate) fn interact_resumed(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<Option<String>> {
+) -> Result<ChatExit> {
     let store = session::Store::new(state_dir);
     let mut screen = match engine {
         // The server records; the screen only reads the session to start.
@@ -2015,7 +2043,7 @@ fn interact_screen(
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
-) -> Result<Option<String>> {
+) -> Result<ChatExit> {
     screen.workspace_root = screen
         .workspace_root
         .canonicalize()
@@ -2047,7 +2075,7 @@ fn interact_screen(
         match outcome {
             SessionEnd::Exit => {
                 screen.close_active_turn(backend)?;
-                return Ok(screen.finish_session(backend));
+                return Ok(screen.exit_output(backend));
             }
             SessionEnd::Login => {
                 let notice = match crate::tui::login::run(state_dir) {
@@ -2063,7 +2091,7 @@ fn interact_screen(
                     match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
                         PickerOutcome::Selected(next) => screen.set_selection(&next),
                         PickerOutcome::Back => {}
-                        PickerOutcome::Exit => return Ok(screen.finish_session(backend)),
+                        PickerOutcome::Exit => return Ok(screen.exit_output(backend)),
                     }
                 }
                 Ok(None) => screen.push_notice("Gateway discovery cancelled".to_string()),
@@ -2077,7 +2105,7 @@ fn interact_screen(
                 match reopen_picker(view, &screen.selection.gateway, None)? {
                     PickerOutcome::Selected(next) => screen.set_selection(&next),
                     PickerOutcome::Back => {}
-                    PickerOutcome::Exit => return Ok(screen.finish_session(backend)),
+                    PickerOutcome::Exit => return Ok(screen.exit_output(backend)),
                 }
             }
         }
@@ -2847,6 +2875,8 @@ mod tests {
         }
         screen.workspace_root = work;
         screen.push_header();
+        // Isolate the picker fixture from operator skills installed on the host.
+        screen.skill_menu.names.retain(|id| id.starts_with("repo/"));
         screen.skill_menu.names.push("operator/review-two".into());
         screen.set_input_text("before  after");
         for _ in 0..6 {
@@ -3372,7 +3402,7 @@ mod tests {
                 .trim_end()
                 .to_string()
         };
-        assert_eq!(line(1), " edit_file src/main.rs · +1 -1 · 0.4s");
+        assert_eq!(line(1), " ✓ edit_file src/main.rs · +1 -1 · 0.4s");
         assert_eq!(line(4), " 2   -old");
         assert_eq!(line(5), "   2 +new");
         assert_eq!(buffer[(6, 4)].fg, Color::Rgb(255, 160, 160));
@@ -3452,11 +3482,11 @@ mod tests {
         for (row, text, background) in [
             (1, " question", Color::Rgb(30, 45, 60)),
             (4, "before", Color::Reset),
-            (7, " read_file ok", Color::Rgb(30, 60, 45)),
+            (7, " ✓ read_file ok", Color::Rgb(30, 60, 45)),
             (10, "after more", Color::Reset),
             (
                 13,
-                " read_file failed (exit 2) · exit 2",
+                " × read_file failed (exit 2) · exit 2",
                 Color::Rgb(60, 30, 30),
             ),
         ] {
@@ -3468,6 +3498,8 @@ mod tests {
             assert_eq!(buffer[(0, row)].bg, background);
             assert_eq!(buffer[(59, row)].bg, background);
         }
+        assert_eq!(buffer[(1, 7)].fg, Color::LightGreen);
+        assert_eq!(buffer[(1, 13)].fg, Color::LightRed);
         for (content_row, background) in [
             (1, Color::Rgb(30, 45, 60)),
             (7, Color::Rgb(30, 60, 45)),

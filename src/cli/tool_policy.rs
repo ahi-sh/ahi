@@ -188,7 +188,7 @@ pub fn render_examples(name: Option<&str>, color: bool) -> std::result::Result<S
 /// line alone, which names `ahi tools init`. An invalid file is still
 /// shown, with its parse error after it, so the operator sees what to fix.
 pub fn render_current(root: &Path, color: bool) -> String {
-    let path = root.join(FILE_NAME);
+    let path = tool_policy::workspace_file(root);
     let mut out = String::new();
     if let Ok(text) = std::fs::read_to_string(&path) {
         out.push_str(&format!("== {}\n", path.display()));
@@ -260,7 +260,7 @@ fn delegate_via_line() -> String {
 }
 
 fn policy_lines(root: &Path) -> Vec<String> {
-    let path = root.join(FILE_NAME);
+    let path = tool_policy::workspace_file(root);
     match summary(root) {
         Ok(Some(summary)) => {
             let advertised = if summary.advertised.is_empty() {
@@ -389,6 +389,10 @@ pub(super) fn init(
             example.name
         );
         return ExitCode::from(0);
+    }
+    if Path::new(tool_policy::LEGACY_FILE_NAME).symlink_metadata().is_ok() {
+        eprintln!("error: migrate the existing ahi.tools.yaml before creating {FILE_NAME}");
+        return ExitCode::from(1);
     }
     if path.exists() && !force {
         eprintln!(
