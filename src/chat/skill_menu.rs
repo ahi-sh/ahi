@@ -179,7 +179,7 @@ impl SkillMenu {
                             " Skills [Operator] · Tab scope · Enter insert · Esc dismiss "
                         }
                     })
-                    .title_bottom(Line::raw(" Tool-policy approval required to invoke ")),
+                    .title_bottom(Line::raw(" Inserts into draft · active mode governs use ")),
             )
             .highlight_style(Style::default().bg(Color::Rgb(45, 65, 85)))
             .highlight_symbol("› ");

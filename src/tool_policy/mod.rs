@@ -22,7 +22,18 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub(crate) const FILE_NAME: &str = "ahi.tools.yaml";
+pub(crate) const FILE_NAME: &str = "ahi.modes.yaml";
+pub(crate) const LEGACY_FILE_NAME: &str = "ahi.tools.yaml";
+
+pub(crate) fn workspace_file(root: &Path) -> std::path::PathBuf {
+    let primary = root.join(FILE_NAME);
+    if primary.symlink_metadata().is_err() && root.join(LEGACY_FILE_NAME).symlink_metadata().is_ok()
+    {
+        root.join(LEGACY_FILE_NAME)
+    } else {
+        primary
+    }
+}
 /// The name this file had before 0.7.0. Its presence is an error, never silence.
 pub(crate) const RETIRED_FILE_NAME: &str = "ahi.actions.yaml";
 
@@ -86,6 +97,19 @@ pub(crate) enum Effect {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ActionPolicy {
     pub(crate) rules: Vec<ToolRule>,
+    pub(crate) default_mode: Option<String>,
+    pub(crate) named: std::collections::BTreeMap<String, Vec<ToolRule>>,
+}
+
+impl ActionPolicy {
+    pub(crate) fn select(mut self, mode: &ExecutionMode) -> crate::error::Result<Self> {
+        if let ExecutionMode::Named(name) = mode {
+            self.rules = self.named.remove(name).ok_or_else(|| {
+                crate::error::Error::new(format!("workspace mode `{name}` is unavailable"))
+            })?;
+        }
+        Ok(self)
+    }
 }
 
 /// The verdict from declared rules alone. Operator grants are applied by the
@@ -164,6 +188,71 @@ mod tests {
 
     fn policy(src: &str) -> ActionPolicy {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
+    }
+
+    #[test]
+    fn scoped_example_enforces_files_scripts_and_workers() {
+        let p = parse(
+            include_str!("../../examples/modes/scoped-development.yaml"),
+            "scoped-development",
+            &crate::tools::BUILTIN,
+        )
+        .unwrap();
+        assert!(matches!(
+            p.evaluate("write_file", "docs/draft", &[]),
+            Verdict::Approve { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("write_file", "docs/published/post", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("read_file", "src-other/file", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate_skill_command("repo/review", "scripts/check.sh", "crates/api", &[]),
+            Verdict::Ask { .. }
+        ));
+        assert!(matches!(
+            p.evaluate_skill_command("repo/review", "scripts/check.sh", "crates/cli", &[]),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate("delegate", "", &["reviewer".into()]),
+            Verdict::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn compact_commands_match_both_directory_and_argv_prefix() {
+        let src = "version: 2\ndefault_mode: review\nmodes:\n  review:\n    ask:\n      commands:\n        - argv_prefixes: [[cargo, test], [cargo, check]]\n          working_dirs: [crates/api, crates/cli]\n";
+        let policy = policy(src);
+        for (dir, subcommand, asks) in [
+            ("crates/api", "test", true),
+            ("crates/cli/src", "check", true),
+            ("crates/api-old", "test", false),
+            ("", "check", false),
+            ("crates/api", "publish", false),
+        ] {
+            let verdict = policy.evaluate(
+                "run_command",
+                dir,
+                &["cargo".into(), subcommand.into(), "--quiet".into()],
+            );
+            match (asks, verdict) {
+                (true, Verdict::Ask { .. }) | (false, Verdict::Deny { .. }) => {}
+                (_, unexpected) => panic!("{dir} cargo {subcommand}: {unexpected:?}"),
+            }
+        }
+        for invalid in ["[]", "['']", "[../elsewhere]", "null"] {
+            assert!(parse(
+                &src.replace("[crates/api, crates/cli]", invalid),
+                "fixture",
+                &TOOLS
+            )
+            .is_err());
+        }
     }
 
     fn error(src: &str) -> String {
@@ -349,7 +438,7 @@ mod tests {
     fn rejects_unknown_fields_kinds_tools_profiles_and_escaping_paths() {
         let rule = |body: &str| format!("version: 1\nrules:\n- {{id: r, {body}}}\n");
         for (src, expected) in [
-            ("version: 2\n".to_string(), "version 2 is not supported"),
+            ("version: 99\n".to_string(), "version 99 is not supported"),
             ("version: 1\ndefault: approve\n".into(), "default must be deny"),
             ("version: 1\nextra: 1\n".into(), "unknown field `extra`"),
             (
@@ -488,7 +577,7 @@ mod tests {
             let name = path.file_name().unwrap().to_str().unwrap();
             if name == "invalid-version.yaml" {
                 let error = result.unwrap_err().to_string();
-                assert!(error.contains("version 2 is not supported"), "{error}");
+                assert!(error.contains("version 99 is not supported"), "{error}");
                 assert!(error.contains(name), "origin names the file: {error}");
             } else {
                 let policy = result.unwrap_or_else(|err| panic!("{name}: {err}"));

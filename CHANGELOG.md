@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 0.24.0
+
+- `ahi.modes.yaml` groups tool permissions into named modes. `/mode` filters and selects them; standalone and service turns enforce the selected rules. Existing `ahi.tools.yaml` policies still work. Keep exactly one workspace policy file when migrating.
+- Read-only and Read-write offer discovered repo and operator skills on demand. Operator-installed directory links are supported; read-only still refuses commands, delegation and writes.
+- The chat shows compact tool results with outcome colors and symbols. Ctrl+O toggles captured stdout, stderr and other retained tool details without changing the draft. Both input rules use the selected mode color.
+- On normal TUI exit the operator and assistant conversation text is printed after terminal restoration, followed by the resume hint when available.
+
 ## 0.23.1 (2026-11-19)
 
 ### Changed

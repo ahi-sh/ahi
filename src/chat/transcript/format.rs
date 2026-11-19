@@ -22,6 +22,7 @@ const MAX_LINE_CHARS: usize = 400;
 pub(crate) struct Options<'a> {
     pub(crate) appearance: &'a crate::chat::appearance::Appearance,
     pub(crate) markdown: bool,
+    pub(crate) expanded_tools: bool,
     /// Whether a relative path names a real file in the workspace.
     pub(crate) exists: &'a dyn Fn(&str) -> bool,
 }
@@ -31,6 +32,7 @@ impl Options<'static> {
     /// No markdown, no file targets: what layout tests use.
     pub(crate) const PLAIN: Options<'static> = Options {
         markdown: false,
+        expanded_tools: true,
         appearance: &crate::chat::appearance::Appearance::DEFAULT,
         exists: &|_| false,
     };
@@ -41,7 +43,7 @@ pub(crate) fn paragraphs(message: &ChatMessage, options: &Options, width: usize)
     if message.text.is_empty() && message.tool.is_some() && message.detail.is_none() {
         return Vec::new();
     }
-    match message.role {
+    match message.display_role() {
         TranscriptRole::Tool { exit_code } => tool_result(message, exit_code, options),
         TranscriptRole::Assistant if options.markdown => {
             let mut out = Vec::new();
@@ -399,12 +401,14 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
     };
     let mut out = Vec::new();
     let mut header = Styled::default();
-    header.push(name, theme::tool_header());
+    let outcome = theme::tool_header(exit_code);
+    header.push(if exit_code == 0 { "✓ " } else { "× " }, outcome);
+    header.push(name, outcome);
     header.push(" ", Style::default());
     if (options.exists)(&target) && !target.is_empty() && target != "." {
         header.push_target(
             &target,
-            theme::tool_header().patch(theme::file_ref()),
+            theme::file_ref(),
             Target::File {
                 path: target.clone(),
                 line: None,
@@ -412,7 +416,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
             },
         );
     } else {
-        header.push(&target, theme::tool_header());
+        header.push(&target, Style::default());
     }
     let mut summary: Vec<String> = Vec::new();
     match &message.detail {
@@ -498,9 +502,17 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
     }
     for part in summary {
         header.push(" · ", theme::dim());
-        header.push(&part, theme::dim());
+        let style = if part.starts_with("exit ") || part == "killed" {
+            outcome
+        } else {
+            theme::dim()
+        };
+        header.push(&part, style);
     }
     out.push(header);
+    if !options.expanded_tools {
+        return out;
+    }
 
     match &message.detail {
         Some(ToolDetail::Write { before, after }) => {
@@ -784,6 +796,7 @@ mod tests {
     fn options() -> Options<'static> {
         Options {
             markdown: true,
+            expanded_tools: true,
             appearance: &crate::chat::appearance::Appearance::DEFAULT,
             exists: &exists,
         }
@@ -846,6 +859,7 @@ mod tests {
             &assistant("# Title\n**bold**"),
             &Options {
                 markdown: false,
+                expanded_tools: true,
                 appearance: &crate::chat::appearance::Appearance::DEFAULT,
                 exists: &exists,
             },
@@ -967,7 +981,7 @@ mod tests {
         assert_eq!(
             texts(&out),
             vec![
-                "read_file src/main.rs · lines 10–10 · 3.8s",
+                "✓ read_file src/main.rs · lines 10–10 · 3.8s",
                 "10 fn main() {}"
             ]
         );
@@ -987,7 +1001,7 @@ mod tests {
         let denied = tool("read_file", "read_file secret: denied by rule x", 126, None);
         assert_eq!(
             texts(&paragraphs(&denied, &options(), 80)),
-            vec!["read_file secret · denied by rule x · 3.8s"]
+            vec!["× read_file secret · denied by rule x · 3.8s"]
         );
 
         let run = tool(
@@ -1007,7 +1021,7 @@ mod tests {
         assert_eq!(
             texts(&out),
             vec![
-                "run_command . cargo test 'a b' · exit 1 · 3.8s",
+                "× run_command . cargo test 'a b' · exit 1 · 3.8s",
                 "stdout",
                 "  out line",
                 "stderr",
@@ -1035,7 +1049,7 @@ mod tests {
         let out = paragraphs(&search, &options(), 80);
         assert_eq!(
             out[0].text,
-            "search_files src · \"main\" · in *.rs · 2 matches · 3.8s"
+            "✓ search_files src · \"main\" · in *.rs · 2 matches · 3.8s"
         );
         assert_eq!(
             targets(&out[1]),
@@ -1065,7 +1079,7 @@ mod tests {
         let out = paragraphs(&message, &options(), 80);
         assert_eq!(
             out.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
-            ["run_command . · preview not retained · exit 1 · 3.8s"]
+            ["× run_command . · preview not retained · exit 1 · 3.8s"]
         );
     }
 
@@ -1128,7 +1142,7 @@ mod tests {
         assert_eq!(
             texts(&out),
             vec![
-                "edit_file src/main.rs · +2 -2 · 3.8s",
+                "✓ edit_file src/main.rs · +2 -2 · 3.8s",
                 "@@ -1,4 +1,4 @@",
                 "1 1  fn a() {",
                 "2   -    let x = 1;",
@@ -1163,7 +1177,7 @@ mod tests {
         assert_eq!(
             texts(&paragraphs(&created, &options(), 80)),
             vec![
-                "write_file docs/a.md · created · +1 -0 · 3.8s",
+                "✓ write_file docs/a.md · created · +1 -0 · 3.8s",
                 "@@ -0,0 +1,1 @@",
                 "  1 +# A",
             ]

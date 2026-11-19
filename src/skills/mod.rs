@@ -318,10 +318,15 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
     }
     let dir = root.join(name);
     let metadata = fs::symlink_metadata(&dir).map_err(|err| format!("cannot stat: {err}"))?;
-    if metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() && which != Root::Operator {
         return Err("the skill directory is a symbolic link".into());
     }
-    if !metadata.is_dir() {
+    // Resolve an operator-installed entry once, before reading any skill files.
+    // Keep using this directory even if the installer later retargets the link.
+    let dir = dir
+        .canonicalize()
+        .map_err(|err| format!("cannot resolve the skill directory: {err}"))?;
+    if !dir.is_dir() {
         return Err("not a directory".into());
     }
     let text = files::read(&dir, SKILL_FILE)?;
@@ -367,9 +372,6 @@ fn load(root: &Path, name: &str, which: Root) -> Result<Skill, String> {
         files::read(&dir, reference)
             .map_err(|reason| format!("reference `{reference}`: {reason}"))?;
     }
-    let dir = dir
-        .canonicalize()
-        .map_err(|err| format!("cannot resolve the skill directory: {err}"))?;
     Ok(Skill {
         name: name.to_string(),
         description: front.description,
@@ -464,6 +466,34 @@ mod tests {
             format!("---\n{front}---\n{body}"),
         )
         .unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn operator_link_is_resolved_once_but_repo_link_is_refused() {
+        let base =
+            crate::fixture_directory::create_unique_fixture_directory("linked-operator-skill");
+        let work = base.join("work");
+        let home = base.join("home");
+        let target = base.join("dotfiles");
+        skill(
+            &target,
+            "probe",
+            "name: probe\ndescription: An installed probe\n",
+            "original instructions",
+        );
+        for root in [work.join(REPO_ROOT), home.join(OPERATOR_ROOT)] {
+            fs::create_dir_all(&root).unwrap();
+            std::os::unix::fs::symlink(target.join("probe"), root.join("probe")).unwrap();
+        }
+        let catalog = enumerate(&work, Some(&home));
+        assert!(catalog.get("repo/probe").is_none());
+        fs::remove_file(home.join(OPERATOR_ROOT).join("probe")).unwrap();
+        assert_eq!(
+            read(catalog.get("operator/probe").unwrap(), None).unwrap(),
+            "original instructions"
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

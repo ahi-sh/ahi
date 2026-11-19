@@ -1,0 +1,32 @@
+---
+name: verify-live-harness
+description: Exercise ahi interactively after changes to tool schemas, permissions, skill loading, mode selection, streaming, or session exit. Verify model-chosen arguments, actual effects, and what the operator saw. Live inference requires separate authorization.
+references:
+  - command-cwd.md
+---
+
+# Verify a harness change with a real model
+
+Pick the smallest probe that would distinguish the new behavior from the old. Do not run the whole matrix by default. Use a disposable workspace, the checkout's freshly built binary, and an explicitly authorized model, turn count, and surface. Never send real project files, credentials, or user conversations as test data. For a picker-only change, exercise the picker without submitting a model turn.
+
+## Choose a probe
+
+| Change under test | Ask or do in the UI | Independent evidence |
+|---|---|---|
+| `read_file` | Seed a file with a fresh marker **not in the prompt**; ask what the file says. | Recorded path and tool content contain the expected file name and marker respectively. |
+| `list_dir`, `find_files`, `search_files` | Create nested files plus a decoy outside the requested root. Ask for a listing, a filename, or a distinctive line, naming the tool when testing its contract. | Inspect the selected tool, root, and result; check the expected relative paths and absence of the decoy. |
+| `write_file`, `edit_file` | Ask for one new fixture file or one replacement in a seeded file. | Compare exact bytes on disk; for an edit, check untouched surrounding lines. A success sentence is not evidence. |
+| `run_command` | Ask for one harmless process, no shell. | See [the cwd probe](command-cwd.md) for a runnable fixture and an offline call/result checker. |
+| `load_skill` | Create a temporary `repo/probe` skill with a hidden marker. Ask to load it; for manual-only behavior, explicitly select it in the skills picker. | Match scoped ID and returned marker. Seeing a catalog description is not loading the body; reading it is not script execution. |
+| `delegate` | Use only a specifically authorized disposable worker/connector. Without one, test refusal without connecting a worker. | Check the worker label and returned task/result or refusal. No remote execution claim without worker-side evidence. |
+| Mode selection and enforcement | In `/mode`, inspect entries, move the highlight, cancel, then reopen and select. Compare the **same** write request in Read-only and Read-write using separate fixtures. For custom modes, choose a tool/path that the modes treat differently. | Check the displayed selection, draft preservation, actual file state and recorded calls/results. A queued mode must not change a running turn. Don't claim an unimplemented picker or mode works. |
+| Ask/deny policy | Use a policy that asks for one harmless write. Decline it; with another authorized turn, accept in a fresh fixture. | Capture the approval interaction and compare disk state. If the model never calls a hidden tool, report “not invoked,” not “runtime denial verified.” Use a deterministic harness test for a forced denied call. |
+| Streaming and exit | Observe a wrapping, multiline answer on the terminal under test. Quit normally. | Compare live screen, stdout after restore, and saved assistant message separately. A clean recording cannot establish a clean Rex redraw. |
+
+## Run and report
+
+1. Run `cargo build --locked --bin ahi` from the repo; save the binary's absolute path before changing directory. Seed only the chosen fixtures. For policy tests put a narrowly scoped `--tools` file **outside** the workspace. For workspace policy discovery, put the intended `ahi.modes.yaml` **inside** it instead. Use only schema supported by the binary under test.
+2. From the fixture root, start the binary with `tui --standalone` (plus `--tools` if applicable). Keep recording enabled. Select the authorized model and intended mode. For service or Rex changes use that actual surface, explicitly noting the difference; don't substitute standalone or `exec` and call it an interactive pass.
+3. Submit a natural-language request. Don't supply the JSON template or the expected hidden value. Observe picker state, approval prompt, streaming, and exit only where relevant. On failure, don't broaden permissions or spend another turn without authorization.
+4. Inspect `ahi session show "$id" --json` with the same binary/state. Pair each assistant `calls[].id` with its tool `result.call_id`; inspect arguments, exit code and content/presentation. Compare against the fixture and the observed screen. Distinguish a malformed request, a policy decision, an execution error and a display-only failure.
+5. Report binary version, model, surface, requested/active mode, fixture, session ID and separate verdicts for invocation, effect and display. Mark unobserved layers **not tested**. Keep captures local, then remove only the disposable fixture.

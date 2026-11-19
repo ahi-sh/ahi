@@ -69,7 +69,8 @@ pub(crate) const BUILTIN: [&str; 9] = [
 /// Files the model may never change, whatever `ahi.tools.yaml` says: the
 /// policy files themselves, the hook configuration, the ignore file the walk
 /// trusts, and everything under `.git`. Matched on the normalized path.
-pub(crate) const PROTECTED: [&str; 7] = [
+pub(crate) const PROTECTED: [&str; 8] = [
+    crate::tool_policy::FILE_NAME,
     "ahi.tools.yaml",
     "ahi.hooks.yaml",
     "ahi.dev.yaml",

@@ -745,7 +745,7 @@ impl Turn {
                 .begin_turn_as(self.run_id.clone(), &self.request.prompt);
             live.fan_out_fresh(&self.session);
             lock(&self.backend).submit(ChatRequest {
-                mode: self.request.mode,
+                mode: self.request.mode.clone(),
                 skills: self.request.skills.clone(),
                 selection: self.selection.clone(),
                 thinking: self.thinking,

@@ -118,16 +118,17 @@ impl ToolRuntime {
         policy_file: Option<&Path>,
         turn: TurnContext,
     ) -> Result<Option<Self>> {
-        let mode = turn.mode;
+        let mode = turn.mode.clone();
         let installed = match policy_file {
             Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
             None => tool_policy::load(directory, &tools::BUILTIN)?,
         };
         let policy = match mode {
-            crate::tool_policy::ExecutionMode::ReadWrite => tool_policy::ActionPolicy::trusted(),
-            crate::tool_policy::ExecutionMode::ReadOnly => {
-                installed.unwrap_or_else(tool_policy::ActionPolicy::trusted)
-            }
+            crate::tool_policy::ExecutionMode::ReadWrite
+            | crate::tool_policy::ExecutionMode::ReadOnly => tool_policy::ActionPolicy::trusted(),
+            crate::tool_policy::ExecutionMode::Named(_) => installed
+                .ok_or_else(|| crate::error::Error::new("workspace modes file missing"))?
+                .select(&mode)?,
             crate::tool_policy::ExecutionMode::Policy => match installed {
                 Some(policy) => policy,
                 None => return Ok(None),
@@ -362,7 +363,7 @@ impl ToolRuntime {
             ))),
             Verdict::Deny { rule_id: None } => Plan::Done(Box::new(denied(
                 &prepared,
-                &format!("no {} rule allows this call", tool_policy::FILE_NAME),
+                "no policy rule allows this call",
             ))),
             Verdict::Approve { rule_id } => Plan::Run(prepared, rule_id),
             Verdict::Ask { rule_id } if self.granted(&prepared) => Plan::Run(prepared, rule_id),
@@ -382,7 +383,8 @@ impl ToolRuntime {
         let skill_script = matches!(prepared.arguments, Arguments::SkillCommand { .. });
         self.grants.lock().is_ok_and(|grants| {
             grants.iter().any(|grant| {
-                grant.root == self.workspace.root()
+                grant.mode == self.mode
+                    && grant.root == self.workspace.root()
                     && grant.gateway == self.gateway
                     && grant.destination == self.destination
                     && grant.tool == prepared.tool
@@ -470,6 +472,7 @@ impl ToolRuntime {
                         if let Ok(mut grants) = self.grants.lock() {
                             grants.push(SessionGrant {
                                 root: self.workspace.root().to_path_buf(),
+                                mode: self.mode.clone(),
                                 gateway: self.gateway.clone(),
                                 destination: self.destination.clone(),
                                 tool: prepared.tool.to_string(),

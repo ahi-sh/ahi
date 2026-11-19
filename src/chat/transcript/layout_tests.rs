@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 fn options() -> Options<'static> {
     Options {
         markdown: true,
+        expanded_tools: true,
         appearance: &crate::chat::appearance::Appearance::DEFAULT,
         exists: &|path| path == "src/main.rs",
     }

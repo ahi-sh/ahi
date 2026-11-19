@@ -62,6 +62,19 @@ pub(crate) enum ToolPayload {
 }
 
 impl ChatMessage {
+    /// A command can be delivered successfully but exit unsuccessfully.
+    pub(crate) fn display_role(&self) -> TranscriptRole {
+        match (&self.role, &self.detail) {
+            (
+                TranscriptRole::Tool { exit_code: 0 },
+                Some(ToolDetail::Command { exit_code, .. }),
+            ) => TranscriptRole::Tool {
+                exit_code: exit_code.unwrap_or(-1),
+            },
+            _ => self.role,
+        }
+    }
+
     pub(crate) fn new(role: TranscriptRole, text: impl Into<String>) -> Self {
         Self {
             role,

@@ -26,6 +26,7 @@ pub(crate) enum KeyAction {
     JumpToTop,
     JumpToBottom,
     CycleThinkingLevel,
+    ToggleToolOutput,
     CycleSkillScope,
     CopySelection,
     /// Ctrl+S: keyboard selection mode over the transcript.
@@ -131,6 +132,9 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         }
         KeyCode::Char('l' | 'L') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::JumpToBottom
+        }
+        KeyCode::Char('o' | 'O') if key.modifiers == KeyModifiers::CONTROL => {
+            KeyAction::ToggleToolOutput
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CycleThinkingLevel

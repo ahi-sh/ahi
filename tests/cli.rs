@@ -670,7 +670,7 @@ fn tui_tools_requires_a_valid_policy_file() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("provider lab"));
     // An invalid or missing file fails before anything opens, naming the file.
     for (file, expected) in [
-        ("invalid-version.yaml", "version 2 is not supported"),
+        ("invalid-version.yaml", "version 99 is not supported"),
         ("missing.yaml", "failed to read"),
     ] {
         let output = ahi()

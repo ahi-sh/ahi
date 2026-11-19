@@ -20,11 +20,21 @@ pub(crate) fn load(root: &Path, builtin_tools: &[&str]) -> Result<Option<ActionP
             retired.display()
         )));
     }
-    let path = root.join(FILE_NAME);
-    if !path.is_file() {
-        return Ok(None);
+    let path = super::workspace_file(root);
+    if root.join(FILE_NAME).symlink_metadata().is_ok()
+        && root
+            .join(super::LEGACY_FILE_NAME)
+            .symlink_metadata()
+            .is_ok()
+    {
+        return Err(Error::new(
+            "both ahi.modes.yaml and ahi.tools.yaml exist; keep exactly one workspace policy",
+        ));
     }
-    read(&path, FILE_NAME, builtin_tools).map(Some)
+    match path.symlink_metadata() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => load_file(&path, builtin_tools).map(Some),
+    }
 }
 
 /// Load the policy file the operator named (`ahi tui --tools`). Unlike the
@@ -67,7 +77,7 @@ struct RawRule {
     toolchain_env: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMatch {
     /// Required for `tool_call`; optional for `file_write` and `command`.
@@ -93,10 +103,25 @@ const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
 
 pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     check_config_yaml(src, origin)?;
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    let version: Version = crate::yaml_safe::typed(src, origin)?;
+    if version.version == 2 {
+        let file: compact::Modes = crate::yaml_safe::typed(src, origin)?;
+        return file.compile(origin, builtin_tools);
+    }
     let raw: RawPolicy = crate::yaml_safe::typed(src, origin)?;
+    compile_rules(raw, origin, builtin_tools)
+}
+
+mod compact;
+
+fn compile_rules(raw: RawPolicy, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     if raw.version != 1 {
         return Err(Error::new(format!(
-            "{origin}: {FILE_NAME} version {} is not supported (expected 1)",
+            "{origin}: {FILE_NAME} version {} is not supported (expected 1 or 2)",
             raw.version
         )));
     }
@@ -363,5 +388,8 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
             ask: rule.ask,
         });
     }
-    Ok(ActionPolicy { rules })
+    Ok(ActionPolicy {
+        rules,
+        ..Default::default()
+    })
 }

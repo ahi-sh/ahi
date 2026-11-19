@@ -223,7 +223,7 @@ impl TranscriptLayout {
             return false;
         }
         // Colored messages include decorative rows, not an extendable text tail.
-        if options.appearance.theme.background(message.role) != Color::Reset {
+        if options.appearance.theme.background(message.display_role()) != Color::Reset {
             return false;
         }
         let first_row = self.starts[messages.len() - 1];
@@ -271,7 +271,7 @@ fn layout_message(
     width: usize,
     options: &Options,
 ) {
-    let background = options.appearance.theme.background(message.role);
+    let background = options.appearance.theme.background(message.display_role());
     let colored = background != Color::Reset;
     let inset = if colored {
         usize::from(options.appearance.padding.horizontal).min(width.saturating_sub(1) / 2)
@@ -506,6 +506,33 @@ mod tests {
 
     fn message(role: TranscriptRole, text: &str) -> ChatMessage {
         ChatMessage::new(role, text)
+    }
+
+    #[test]
+    fn streamed_markdown_rows_match_each_prefix() {
+        let answer = "Cleaned up the README’s introduction and organization:\n\n- Summarized ahi’s three main functions in a scannable list and moved the glossary below the command reference.\n- Clarified the distinction between workspace modes, policy rules, and OS sandboxing.\n- Removed dated release notes and one-off testing history from the installation and catalog sections.\n\nNo tests were run; this was a documentation-only change.";
+        let options = Options {
+            markdown: true,
+            ..Options::PLAIN
+        };
+        for width in [40, 80, 100] {
+            let mut messages = [message(TranscriptRole::Assistant, "")];
+            let mut live = TranscriptLayout::new();
+            for ch in answer.chars() {
+                messages[0].text.push(ch);
+                live.sync(&messages, width, &mut Dirty::AppendedLast, &options);
+                let mut fresh = TranscriptLayout::new();
+                fresh.sync(&messages, width, &mut Dirty::From(0), &options);
+                assert!(
+                    live.rows()
+                        .iter()
+                        .map(|r| &r.text)
+                        .eq(fresh.rows().iter().map(|r| &r.text)),
+                    "width {width}, prefix {:?}",
+                    messages[0].text
+                );
+            }
+        }
     }
 
     #[test]

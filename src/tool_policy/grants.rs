@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionGrant {
     pub(crate) root: PathBuf,
+    pub(crate) mode: super::ExecutionMode,
     pub(crate) gateway: String,
     pub(crate) destination: String,
     pub(crate) tool: String,
