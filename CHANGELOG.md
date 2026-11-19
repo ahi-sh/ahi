@@ -4,6 +4,8 @@
 
 ### Added
 
+- Ctrl+Y in OpenAI's TUI login copies the raw authorization URL through the shared clipboard adapters without border characters, wrapping, or changes to the callback draft.
+
 - Streaming sessions checkpoint partial prose during generation. Quit cancels and closes the active turn, and resume shows interrupted prose without replaying it to the model. Commands record successful spawn separately from their result.
 - Opt-in policy selectors for operator skill reads and skill-relative commands; this checkout allows bundled scripts under both skill scopes without enumerating them.
 - Shared explicit skill loading for TUI, `exec`, headless, and session-service turns: a picker selection, `--skill SCOPE/NAME`, or the service's `skills` field loads approved instructions once before inference through the existing approval, audit, and replay path. The original prompt and its digest remain unchanged.
