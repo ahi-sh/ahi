@@ -56,7 +56,6 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 /// Rows per step while a drag holds a viewport edge: one row per frame.
 const AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const ACCENT: Color = Color::Cyan;
 
 /// How a key changed the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,9 +495,7 @@ impl ChatScreen {
                         self.modes.dialog = None;
                     }
                     (mode::Dialog::Choose, KeyCode::Char('2')) => {
-                        if self.modes.has_policy && !self.modes.bypass {
-                            self.modes.dialog = Some(mode::Dialog::Bypass);
-                        } else if !self.modes.trusted && !self.modes.bypass {
+                        if !self.modes.has_policy && !self.modes.trusted {
                             self.modes.dialog = Some(mode::Dialog::Trust);
                         } else {
                             self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
@@ -507,11 +504,6 @@ impl ChatScreen {
                     }
                     (mode::Dialog::Choose, KeyCode::Char('3')) if self.modes.has_policy => {
                         self.modes.selected = crate::tool_policy::ExecutionMode::Policy;
-                        self.modes.dialog = None;
-                    }
-                    (mode::Dialog::Bypass, KeyCode::Char('t')) => {
-                        self.modes.bypass = true;
-                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
                         self.modes.dialog = None;
                     }
                     _ => {}
@@ -1175,7 +1167,7 @@ impl ChatScreen {
         let activity_width = activity.chars().count().min(usize::from(chunks[1].width)) as u16;
         let header = Layout::horizontal([Constraint::Length(activity_width), Constraint::Min(0)])
             .split(chunks[1]);
-        let accent = Style::default().fg(ACCENT);
+        let accent = Style::default().fg(self.modes.color());
         frame.render_widget(Paragraph::new(activity).style(accent), header[0]);
         let context_rule = status::render_context_rule(header[1].width as usize, &self.meters);
         frame.render_widget(Paragraph::new(context_rule).style(accent), header[1]);
@@ -1446,7 +1438,6 @@ impl ChatScreen {
             ParsedCommand::RevokeTrust => {
                 mode::remember(&self.state_dir.state, &self.workspace_root, false)?;
                 self.modes.trusted = false;
-                self.modes.bypass = false;
                 self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
                 self.push_notice(
                     "Workspace trust revoked; read-only selected for the next turn.".into(),
@@ -3159,6 +3150,42 @@ mod tests {
     }
 
     #[test]
+    fn input_bars_follow_the_selected_mode_and_show_queued_changes() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-mode-colors");
+        let mut screen = screen_in(&state);
+        for (mode, color, label) in [
+            (
+                crate::tool_policy::ExecutionMode::Policy,
+                Color::Cyan,
+                "Policy",
+            ),
+            (
+                crate::tool_policy::ExecutionMode::ReadOnly,
+                Color::Blue,
+                "Read-only",
+            ),
+            (
+                crate::tool_policy::ExecutionMode::ReadWrite,
+                Color::Yellow,
+                "Read-write",
+            ),
+        ] {
+            screen.modes.selected = mode;
+            let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+            terminal.draw(|frame| screen.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 12)].fg, color);
+            assert_eq!(buffer[(0, 14)].fg, color);
+            let text: String = (0..120).map(|x| buffer[(x, 14)].symbol()).collect();
+            assert!(text.contains(label), "{text}");
+        }
+        screen.modes.active = Some(crate::tool_policy::ExecutionMode::ReadWrite);
+        screen.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
+        assert!(draw_lines(&mut screen, 120, 16)[14].contains("Read-write → Read-only next turn"));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn status_colors_separate_workspace_model_and_input_context() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-status-style");
         let mut screen = screen_in(&state);
@@ -3203,7 +3230,7 @@ mod tests {
             assert_eq!(buffer[(context_start, 12)].symbol(), "0");
             assert_eq!(buffer[(context_start, 12)].fg, Color::Indexed(103));
             assert!(buffer[(context_start, 12)].modifier.contains(Modifier::DIM));
-            assert_eq!(buffer[(width - 1, 12)].fg, ACCENT);
+            assert_eq!(buffer[(width - 1, 12)].fg, Color::Cyan);
             assert!(!buffer[(width - 1, 12)].modifier.contains(Modifier::DIM));
             let expected = "(openai) gpt-6.1-sol • medium";
             let start = width - expected.chars().count() as u16;

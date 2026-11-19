@@ -365,7 +365,7 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             _ => ToolSchema {
                 name: RUN_COMMAND,
-                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. For an approved bundled script, send skill, script and optional args instead of argv. Policy approves these two forms separately. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.".into(),
+                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. For an approved bundled script, send skill, script and optional args instead of argv. Use exactly one form and omit fields belonging to the other form. Policy approves these two forms separately. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -560,21 +560,28 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         }
         RUN_COMMAND => {
             only(no_paging && no_search && no_write)?;
-            let scoped = raw.skill.is_some() || raw.script.is_some() || raw.args.is_some();
+            // Models sometimes fill every optional schema field with empty
+            // placeholders. Only meaningful values select a command form;
+            // never merge two nonempty forms or discard real arguments.
+            let argv = raw.argv;
+            let skill = raw.skill.filter(|value| !value.is_empty());
+            let script = raw.script.filter(|value| !value.is_empty());
+            let args = raw.args.filter(|tokens| !tokens.is_empty());
+            let scoped = skill.is_some() || script.is_some() || args.is_some();
             let argv = if scoped {
-                if raw.argv.is_some() {
+                if argv.as_ref().is_some_and(|tokens| !tokens.is_empty()) {
                     return Err("use argv or skill/script/args, not both");
                 }
-                let skill = raw.skill.ok_or(INVALID)?;
-                let script = raw.script.ok_or(INVALID)?;
+                let skill = skill.ok_or(INVALID)?;
+                let script = script.ok_or(INVALID)?;
                 if !crate::skills::valid_id(&skill) || !crate::skills::valid_script(&script) {
                     return Err("expected a scoped skill ID and a relative file below scripts/");
                 }
                 let mut argv = vec![skill, script];
-                argv.extend(raw.args.unwrap_or_default());
+                argv.extend(args.unwrap_or_default());
                 argv
             } else {
-                raw.argv.ok_or(INVALID)?
+                argv.ok_or(INVALID)?
             };
             if argv.is_empty() || argv.len() > run_command::MAX_ARGV {
                 return Err("argv must have 1 to 64 elements");
@@ -1560,6 +1567,37 @@ mod tests {
             INVALID,
             "delegate keys belong to delegate"
         );
+    }
+
+    #[test]
+    fn command_forms_ignore_empty_placeholders_but_reject_real_ambiguity() {
+        for args in [
+            json!({"argv":["echo", "hello"], "skill":"", "script":"", "args":[]}),
+            json!({"argv":["echo", "hello"], "skill":null, "script":null, "args":[]}),
+        ] {
+            let prepared = prepare(&call("c", RUN_COMMAND, args)).unwrap();
+            assert!(matches!(prepared.arguments, Arguments::Command { .. }));
+            assert_eq!(prepared.argv(), ["echo", "hello"]);
+        }
+        let prepared = prepare(&call(
+            "c",
+            RUN_COMMAND,
+            json!({"argv":[], "skill":"repo/test", "script":"scripts/check", "args":["--verbose"]}),
+        ))
+        .unwrap();
+        assert!(matches!(prepared.arguments, Arguments::SkillCommand { .. }));
+        assert_eq!(prepared.argv(), ["repo/test", "scripts/check", "--verbose"]);
+        for other in [
+            json!({"skill":"repo/test", "script":"scripts/check"}),
+            json!({"args":["hello"]}),
+        ] {
+            let mut args = other;
+            args["argv"] = json!(["echo"]);
+            assert_eq!(
+                prepare(&call("c", RUN_COMMAND, args)),
+                Err("use argv or skill/script/args, not both")
+            );
+        }
     }
 
     #[test]

@@ -324,8 +324,10 @@ in **Policy** mode and keeps its rules authoritative.
 
 **Shift+Tab** cycles available modes without changing the draft. **`/mode`** opens
 the chooser. Read-only blocks writes, commands, bundled scripts, and delegation.
-With a custom policy, enabling Read-write requires explicit session-only bypass
-confirmation. Changes during generation are queued for the next turn, not applied
+With a custom policy, Shift+Tab cycles Policy → Read-only → Read-write; selecting
+Read-write explicitly bypasses custom rules for this session without changing
+the file. The bars are cyan for Policy, blue for Read-only, and amber for
+permissive Read-write. Changes during generation are queued for the next turn, not applied
 to an already running command. **`/mode revoke`** forgets workspace trust. See
 [Workspace trust](docs/WORKSPACE_TRUST.md) for persistence, service boundaries,
 and headless behavior.

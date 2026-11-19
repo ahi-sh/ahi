@@ -29,19 +29,25 @@ conversation stay intact when cycling. No denied action is automatically retried
   file selected with `--tools`. An existing policy chooses this mode at startup,
   even in a remembered trusted workspace. Invalid policies fail closed.
 
-With a policy, Shift+Tab initially cycles Policy/Read-only. Selecting Read-write
-in `/mode` asks for explicit confirmation that it bypasses the custom policy,
-including deny rules and approval prompts, for this session. Only after that
-confirmation does Read-write enter the cycle. This does not edit the policy or
-save a permanent bypass. A newly created workspace policy takes effect on the
-next turn; read-only remains read-only. A removed policy must be restored or
+With a policy, Shift+Tab cycles **Policy → Read-only → Read-write → Policy**.
+Selecting Read-write directly, with Shift+Tab or `/mode`, is the explicit choice
+to bypass the custom policy, including deny rules and approval prompts, for this
+session. There is no additional confirmation dialog. This does not edit the
+policy or save a permanent bypass. Startup still selects Policy.
+
+Both input bars indicate the selected mode: cyan for Policy, blue for Read-only,
+and yellow/amber for permissive Read-write. Text labels remain visible so color
+is not the only indicator. While a change is queued, the bar uses the next-turn
+color and the label shows both the active and next-turn modes.
+
+A newly created workspace policy takes effect on the next turn; read-only remains read-only. A removed policy must be restored or
 chat reopened to review trust, rather than silently granting broader access.
 
 Changes during an active turn are shown as **next turn**. Each admitted turn
 keeps an immutable mode snapshot; switching cannot stop an already running
 command. Use Esc to cancel the current turn separately. The next submitted
-prompt uses the queued mode. `/mode revoke` removes remembered workspace trust,
-clears the session bypass, and selects Read-only for the next turn.
+prompt uses the queued mode. `/mode revoke` removes remembered workspace trust
+and selects Read-only for the next turn.
 
 ## Service and headless boundaries
 
@@ -69,5 +75,5 @@ uv run --no-project scripts/smoke-model-picker.py --workspace-modes-only
 
 This uses disposable state and a loopback gateway, never real inference. It
 checks both engines: trust/cycle/draft preservation, blocked read-only writes,
-read-write effects, policy bypass confirmation, revocation, and mode changes
+read-write effects and commands, direct policy bypass cycling, revocation, and mode changes
 queued while a turn is still streaming.
