@@ -4435,7 +4435,9 @@ mod tests {
         screen.push_header();
         assert_eq!(screen.messages.len(), 1);
         assert_eq!(screen.messages[0].role, TranscriptRole::Notice);
-        let lines = draw_lines(&mut screen, 100, 12);
+        // Small catalogs list each skill; larger ones collapse to a summary.
+        // Keep the entire notice visible regardless of the installed catalog.
+        let lines = draw_lines(&mut screen, 100, 30);
         assert!(lines[0].starts_with(header::WORDMARK[0]));
         assert!(lines[0].contains(&format!("ahi {}", crate::VERSION)));
         assert!(lines[1].contains("gpt-4.1 via openai · thinking medium"));
