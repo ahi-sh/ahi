@@ -36,6 +36,8 @@ def main() -> None:
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
                          help="stop after the scoped skill picker and bracketed paste checks")
+    focused.add_argument("--workspace-modes-only", action="store_true",
+                         help="verify workspace trust, mode cycling, policy bypass and revocation")
     focused.add_argument("--login-copy-only", action="store_true",
                          help="verify raw OAuth URL clipboard copy and cancellation with disposable adapters")
     focused.add_argument("--stream-recovery-only", action="store_true",
@@ -84,6 +86,7 @@ def main() -> None:
             self.output = b""
             self.recent = b""
             self.dead = False
+            self.onboarded_read_only = False
 
         def read(self) -> None:
             if select.select([self.fd], [], [], 0.05)[0]:
@@ -103,9 +106,10 @@ def main() -> None:
             # instead of treating escape-stripped output as a complete screen.
             cells = [[" "] * self.columns for _ in range(self.rows)]
             row = col = 0
-            parts = re.split(
-                r"(\x1b\[[0-?]*[ -/]*[@-~])", self.output.decode(errors="replace")
-            )
+            # OSC title, clipboard and program-status payloads are terminal
+            # metadata, not cells. Ignore incomplete tails until the next read.
+            visible = re.sub(r"\x1b\].*?(?:\x07|\x1b\\|\Z)", "", self.output.decode(errors="replace"), flags=re.S)
+            parts = re.split(r"(\x1b\[[0-?]*[ -/]*[@-~])", visible)
             for part in parts:
                 if part.startswith("\x1b["):
                     if part.endswith(("H", "f")):
@@ -150,7 +154,15 @@ def main() -> None:
             end = time.monotonic() + 10
             while text not in self.screen() and time.monotonic() < end:
                 self.read()
+                # Non-onboarding fixtures explicitly choose the safe temporary
+                # mode. The modes-only scenario exercises the prompt itself.
+                if not args.workspace_modes_only and not self.onboarded_read_only and "Trust this workspace?" in self.screen():
+                    self.send("r")
+                    self.onboarded_read_only = True
             assert text in self.screen(), (text, self.screen())
+
+        def expect_borderless(self) -> None:
+            assert not any(char in self.screen() for char in "┌┐└┘│─"), self.screen()
 
         def resize(self, columns: int, rows: int) -> None:
             self.columns = columns
@@ -195,14 +207,157 @@ def main() -> None:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
 
+    if args.workspace_modes_only:
+        queue_release = threading.Event()
+
+        class ModeGateway(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                if body["messages"][-1].get("content") == "queue-turn":
+                    prefix = {"choices": [{"index": 0, "delta": {"content": "mode-stream-waiting"}}]}
+                    self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
+                    self.wfile.flush()
+                    queue_release.wait(10)
+                if body["messages"][-1]["role"] == "tool":
+                    delta = {"content": "mode-fixture-complete"}
+                    finish = "stop"
+                else:
+                    delta = {"tool_calls": [{"index": 0, "id": "write-mode", "type": "function",
+                             "function": {"name": "write_file", "arguments": json.dumps({"path": "marker", "content": "written"})}}]}
+                    finish = "tool_calls"
+                for item in [{"choices": [{"index": 0, "delta": delta}]},
+                             {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]:
+                    self.wfile.write(f"data: {json.dumps(item)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        gateway = ThreadingHTTPServer(("127.0.0.1", 0), ModeGateway)
+        worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+        worker.start()
+        try:
+            for engine in ("standalone", "service"):
+                with tempfile.TemporaryDirectory(prefix="ahi-modes-", dir="/tmp") as temp:
+                    state = Path(temp) / "state"
+                    work = Path(temp) / "work"
+                    state.mkdir()
+                    work.mkdir()
+                    sid = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+                    (state / "sessions").mkdir()
+                    (state / "sessions" / f"{sid}.jsonl").write_text(json.dumps(dict(
+                        type="session", schema=1, id=sid, host="fixture", cwd=str(work),
+                        ahi_version="0.22.0", gateway="local", model="fixture", thinking="off",
+                        started="2026-01-01T00:00:00Z")) + "\n")
+                    (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                        "baseUrl": f"http://127.0.0.1:{gateway.server_port}/v1", "api": "openai-completions",
+                        "models": [{"id": "fixture"}],
+                    }}}))
+                    sock = str(state / "run/serve.sock")
+                    options = ("--standalone",) if engine == "standalone" else ("--socket", sock)
+                    command = ("tui", "--session", sid, *options)
+                    chat = Session(state, cwd=work, columns=120, rows=35, command=command)
+                    try:
+                        chat.expect("Trust this workspace?")
+                        chat.send("r")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("draft-preserved")
+                        chat.send("\x1b[Z")
+                        chat.expect("Trust this workspace?")
+                        chat.send("t")
+                        chat.expect("Read-write · Shift+Tab")
+                        chat.expect("draft-preserved")
+                        assert len(list((state / "workspace-trust").iterdir())) == 1
+                        assert not (work / "ahi.tools.yaml").exists()
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("\r")
+                        chat.expect("mode-fixture-complete")
+                        assert not (work / "marker").exists()
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-write · Shift+Tab")
+                        chat.send("now write\r")
+                        chat.expect("write_file marker")
+                        deadline = time.monotonic() + 5
+                        while not (work / "marker").exists():
+                            chat.read()
+                            assert time.monotonic() < deadline
+                        assert (work / "marker").read_text() == "written"
+                        # Start another read-write turn, queue read-only while
+                        # streaming, and prove the already-admitted turn still writes.
+                        chat.send("/mode\r")
+                        chat.expect("Shift+Tab cycles available modes.")
+                        chat.send("\x1b")
+                        chat.absent("Shift+Tab cycles available modes.")
+                        (work / "marker").unlink()
+                        queue_release.clear()
+                        chat.send("queue-turn\r")
+                        chat.expect("mode-stream-waiting")
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-write → Read-only next turn")
+                        queue_release.set()
+                        deadline = time.monotonic() + 5
+                        while not (work / "marker").exists():
+                            chat.read()
+                            assert time.monotonic() < deadline
+                        chat.expect("Read-only · Shift+Tab")
+                        assert (work / "marker").read_text() == "written"
+                        chat.send("/mode revoke\r")
+                        chat.expect("Workspace trust revoked")
+                        assert not list((state / "workspace-trust").iterdir())
+                        chat.send("/quit\r")
+                        chat.finish()
+                    finally:
+                        chat.close()
+                    policy = "version: 1\nrules:\n- {id: reads, action: tool_call, match: {tool: read_file}, effect: approve}\n"
+                    (work / "ahi.tools.yaml").write_text(policy)
+                    chat = Session(state, cwd=work, columns=120, rows=35, command=command)
+                    try:
+                        chat.expect("Policy · Shift+Tab")
+                        chat.absent("Trust this workspace?")
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("\x1b[Z")
+                        chat.expect("Policy · Shift+Tab")
+                        chat.send("/mode\r")
+                        chat.expect("Shift+Tab cycles available modes.")
+                        chat.send("2")
+                        chat.expect("Bypass tool policy")
+                        chat.send("\x1b")
+                        chat.expect("Policy · Shift+Tab")
+                        chat.send("/mode\r2")
+                        chat.expect("Bypass tool policy")
+                        chat.send("t")
+                        chat.expect("Read-write · Shift+Tab")
+                        assert (work / "ahi.tools.yaml").read_text() == policy
+                        chat.send("/quit\r")
+                        chat.finish()
+                    finally:
+                        chat.close()
+                        if engine == "service":
+                            subprocess.run([binary, "--state-dir", state, "serve", "--socket", sock, "stop"],
+                                           capture_output=True, timeout=10, check=True)
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            worker.join()
+        print("PASS: trust, draft-preserving mode cycle, read-only enforcement, read-write effect, policy confirmation and revocation in both engines")
+        return
+
     if args.login_copy_only:
         with tempfile.TemporaryDirectory(prefix="ahi-login-copy-", dir="/tmp") as temp:
             state = Path(temp)
             helpers = state / "bin"
             helpers.mkdir()
+            model_id = "fixture/" + "long-model-name-" * 10
+            gateway_url = "https://fixture.invalid/" + "long-path/" * 20 + "?value=raw&other=unchanged"
             (state / "models.json").write_text(json.dumps({"providers": {"local": {
                 "baseUrl": "http://127.0.0.1:9/v1", "api": "openai-completions",
-                "models": [{"id": "fixture"}],
+                "models": [{"id": model_id}],
             }}}))
             authorization = state / "authorization"
             copied = state / "copied"
@@ -226,8 +381,27 @@ def main() -> None:
                                command=("tui", "--standalone"), environment=env)
                 try:
                     chat.expect("Models · Enter use model")
+                    chat.expect_borderless()
+                    chat.send("jjjy")
+                    chat.expect("No clipboard available" if mode == "unavailable" else "Copied")
+                    if mode == "native":
+                        assert copied.read_text() == model_id
+                    chat.send("/gateway\r")
+                    chat.expect("Gateway URL · editing")
+                    chat.expect_borderless()
+                    chat.send("\x1b[200~" + gateway_url + "\x1b[201~")
+                    chat.send("\x19")
+                    chat.expect("Clipboard unavailable" if mode == "unavailable" else "URL sent to clipboard")
+                    if mode == "native":
+                        assert copied.read_text() == gateway_url
+                    elif mode == "osc52":
+                        assert b"\x1b]52;c;" + base64.b64encode(gateway_url.encode()) + b"\x07" in chat.output
+                    chat.expect_borderless()
+                    chat.send("\x1b")
+                    chat.expect("Models · Enter use model")
                     chat.send("/login\r")
                     chat.expect("Ctrl+Y copy URL")
+                    chat.expect_borderless()
                     deadline = time.monotonic() + 5
                     while not authorization.exists():
                         assert time.monotonic() < deadline
@@ -254,7 +428,7 @@ def main() -> None:
                 finally:
                     chat.close()
             assert not (state / "credentials/openai.json").exists()
-        print("PASS: exact raw login URL copy, unavailable clipboard, OSC52 payload, callback preservation and cancel")
+        print("PASS: borderless model/gateway/login screens; exact raw model ID and URL copies, unavailable clipboard, OSC52 payload, callback preservation and cancel")
         return
 
     if args.stream_recovery_only:
@@ -506,7 +680,7 @@ def main() -> None:
         try:
             session.expect("Models · Enter use model")
             session.send("j\r")
-            session.expect("Skill: repo/review-one (not approved)")
+            session.expect("Skill: repo/review-one (available)")
             session.send("\x1b[200~before $operator/review-two after\x1b[201~")
             session.expect("before $operator/review-two after")
             session.absent("Skills [")
@@ -701,7 +875,8 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("/ commands ")
-            assert all(character == "─" for character in rows[-2][len("/ commands "):])
+            initial_mode = "Read-only" if session.onboarded_read_only else "Policy"
+            assert f"{initial_mode} · Shift+Tab · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # The configured inset is two cells; default vertical padding is one row.
@@ -1016,8 +1191,9 @@ def main() -> None:
             assert not credential_path.exists()
             assert not (login_state / "selection").exists()
 
-            credential_path.parent.mkdir()
+            credential_path.parent.mkdir(mode=0o700)
             credential_path.write_text('{"flow":"legacy-fixture","access_token":"preserved-fixture"}')
+            credential_path.chmod(0o600)
             original_credential = credential_path.read_bytes()
             session.send("j\r")
             session.expect("(openai) second • medium")
@@ -1412,6 +1588,10 @@ def main() -> None:
 
         metadata_state = state / "model-metadata"
         metadata_state.mkdir()
+        # These cases verify exact request-compatibility bytes without tools.
+        # Keep them in explicit Policy mode rather than implicitly selecting
+        # built-in Read-only tools at the new trust prompt.
+        (metadata_state / "ahi.tools.yaml").write_text("version: 1\nrules: []\n")
         server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
         origin = f"http://127.0.0.1:{server.server_port}"
         inference_url = origin + "/v1"
@@ -1707,12 +1887,12 @@ def main() -> None:
             server.server_close()
             server_thread.join(timeout=5)
 
-        # Tool calls: enabled only by ahi.actions.yaml in the working directory
+        # Tool calls: enabled only by ahi.tools.yaml in the working directory
         # (never the state directory), approved or denied by the operator.
         tool_workspace = state / "tool-workspace"
         (tool_workspace / "src").mkdir(parents=True)
         (tool_workspace / "src" / "lib.rs").write_text("pub fn tool_fixture() {}\n")
-        (tool_workspace / "ahi.actions.yaml").write_text(
+        (tool_workspace / "ahi.tools.yaml").write_text(
             "version: 1\ndefault: deny\nrules:\n"
             "  - id: read-sources\n    action: tool_call\n"
             "    match: {tool: read_file, path: src}\n"
@@ -1748,7 +1928,7 @@ def main() -> None:
             session.send("verify tool approval\r")
             session.expect("Tool approval · 1 call")
             session.expect("› 1. read_file src/lib.rs")
-            session.expect("y once · s session under src/")
+            session.expect("y once · n deny")
             session.capture("tool-approval-prompt")
             assert [tool["function"]["name"] for tool in gateway_requests[-1][2]["tools"]] == ["read_file"]
             assert len(gateway_requests) == 1
@@ -1786,7 +1966,7 @@ def main() -> None:
         "PASS: Pi-shaped catalog onboarding, authoritative /v1 Review and inference, metadata cache/restart/curation, "
         "provider/model overrides, capped output fields, reported paid usage without cached-input double counting, "
         "usage omission, reasoning Off and assistant replay, finish-reason fallback with truncation/tool safety, "
-        "ahi.actions.yaml-gated read_file with operator approve/deny, tool resubmission and cross-turn replay, "
+        "ahi.tools.yaml-gated read_file with operator approve/deny, tool resubmission and cross-turn replay, "
         "exact UTF-8 byte boundaries without rejected HTTP requests, model names/limits/context, "
         "ambiguous/exact/registered provider selection, cross-origin/invalid metadata retention, legacy caches/flat catalogs; "
         "/gateway URL entry/edit/validation, preview/cancel/register, catalog curation, real gateway streaming, "

@@ -196,12 +196,22 @@ impl ServiceBackend {
         request: &ChatRequest,
         prompt: &str,
     ) -> Result<(String, String), String> {
+        if request.mode != crate::tool_policy::ExecutionMode::Policy {
+            let health = self.call("health", json!({}))?;
+            if health["execution_modes"] != true {
+                return Err(
+                    "session service does not support execution modes; upgrade or restart it"
+                        .into(),
+                );
+            }
+        }
         if !request.skills.is_empty() {
             crate::service::wire::require_skill_selection(&self.call("health", json!({}))?)
                 .map_err(|err| err.message)?;
         }
         let session = self.prepare(request)?;
         let turn = TurnRequest {
+            mode: request.mode,
             prompt: prompt.to_string(),
             skills: request.skills.clone(),
             run_id: None,
@@ -477,6 +487,9 @@ fn follow(
                 result,
                 ..
             } if *id == run_id => {
+                if let Some(window) = result.get("context_window").and_then(Value::as_u64) {
+                    let _ = sender.send(ResponseEvent::ContextWindow(window));
+                }
                 if let Some(usage) = result.get("usage").filter(|usage| !usage.is_null()) {
                     let _ = sender.send(ResponseEvent::Usage {
                         input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
@@ -629,6 +642,7 @@ mod tests {
 
     fn request(prompt: &str) -> ChatRequest {
         ChatRequest {
+            mode: Default::default(),
             skills: Vec::new(),
             selection: super::super::parse_selection("local/vendor/model"),
             thinking: crate::chat::thinking::ThinkingLevel::Off,

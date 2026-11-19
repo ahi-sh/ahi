@@ -1,5 +1,5 @@
-use ahi_widgets::{Block, Borders, Clear, List, ListItem, ListState};
-use ratatui_core::layout::Rect;
+use ahi_widgets::{Clear, List, ListItem, ListState, Paragraph};
+use ratatui_core::layout::{Constraint, Layout, Rect};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::Line;
 
@@ -75,6 +75,22 @@ const COMMANDS: &[CommandDefinition] = &[
         aliases: &["/exit"],
         action: Some(CommonAction::Quit),
         contexts: COMMON_CONTEXTS,
+    },
+    CommandDefinition {
+        command: "/mode",
+        label: "Execution mode",
+        description: "Choose Read-write, Read-only or Policy; Shift+Tab cycles",
+        aliases: &[],
+        action: None,
+        contexts: CHAT_CONTEXTS,
+    },
+    CommandDefinition {
+        command: "/mode revoke",
+        label: "Revoke workspace trust",
+        description: "Forget trust and restrict the next turn to read-only",
+        aliases: &[],
+        action: None,
+        contexts: CHAT_CONTEXTS,
     },
     CommandDefinition {
         command: "/thinking off",
@@ -295,12 +311,6 @@ impl CommandMenu {
             })
             .collect::<Vec<_>>();
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Commands · ↑/↓ select · Enter apply · Esc dismiss ")
-                    .title_bottom(Line::raw(status.to_string())),
-            )
             .highlight_style(
                 Style::default()
                     .bg(Color::Rgb(45, 65, 85))
@@ -310,7 +320,19 @@ impl CommandMenu {
         let mut state =
             ListState::default().with_selected(Some(self.selected.min(commands.len() - 1)));
         frame.render_widget(Clear, popup);
-        frame.render_stateful_widget(list, popup, &mut state);
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+        frame.render_widget(
+            Paragraph::new("Commands · ↑/↓ select · Enter apply · Esc dismiss")
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+            rows[0],
+        );
+        frame.render_stateful_widget(list, rows[1], &mut state);
+        frame.render_widget(Paragraph::new(status), rows[2]);
     }
 }
 

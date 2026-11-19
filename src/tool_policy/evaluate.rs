@@ -63,8 +63,9 @@ impl ActionPolicy {
                 .as_ref()
                 .and_then(|argv| argv.first())
                 .is_some_and(|selector| {
-                    if selector == "operator/*" {
-                        name.starts_with("operator/")
+                    if matches!(selector.as_str(), "operator/*" | "repo/*") {
+                        name.split_once('/')
+                            .is_some_and(|(scope, _)| selector == &format!("{scope}/*"))
                     } else if rule.effect == Effect::Deny {
                         selector.eq_ignore_ascii_case(name)
                     } else {

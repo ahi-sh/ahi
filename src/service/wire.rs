@@ -209,7 +209,16 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
                 .collect::<ServiceResult<Vec<_>>>()?
         }
     };
+    let mode = params
+        .get("mode")
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| usage("mode must be policy, read-only or read-write"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(TurnRequest {
+        mode,
         prompt,
         skills,
         run_id,
@@ -242,6 +251,7 @@ pub(crate) fn turn_params(session: &str, request: &TurnRequest) -> Value {
     json!({
         "session": session,
         "prompt": request.prompt,
+        "mode": request.mode,
         "skills": request.skills,
         "run_id": request.run_id,
         "prompt_sha256": request.prompt_sha256,
@@ -282,6 +292,7 @@ pub(crate) fn dispatch(
             "store": service.store_dir().display().to_string(),
             "open_turns": service.open_turns(),
             "scoped_skill_selection": true,
+            "execution_modes": true,
         })),
         "session.list" => Ok(Value::Array(service.list_sessions()?)),
         "session.create" => {
@@ -413,6 +424,13 @@ mod tests {
         let plain = request(json!({})).unwrap();
         assert_eq!(plain.timeout, None);
         assert_eq!(plain.client, "");
+        assert_eq!(plain.mode, crate::tool_policy::ExecutionMode::Policy);
+        let selected = request(json!({"mode":"read-only"})).unwrap();
+        assert_eq!(turn_params("s", &selected)["mode"], "read-only");
+        assert_eq!(
+            request(json!({"mode":"unrestricted"})).unwrap_err().kind,
+            "usage"
+        );
         assert_eq!(
             request(json!({"timeout": 3600})).unwrap().timeout,
             Some(Duration::from_secs(3600))

@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
-use ahi_widgets::{Block, Borders, Paragraph, Wrap};
+use ahi_widgets::{Paragraph, Wrap};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
@@ -39,7 +39,22 @@ fn discovery_loop(
     let mut input = InputEditor::new();
     let mut discovery = DiscoveryState::Editing;
     let mut status = "Nothing is saved until you confirm in Review".to_string();
+    let mut copy_result: Option<Receiver<bool>> = None;
     loop {
+        if let Some(receiver) = &copy_result {
+            match receiver.try_recv() {
+                Ok(true) => {
+                    status = "URL sent to clipboard (terminal requests cannot confirm acceptance)."
+                        .into();
+                    copy_result = None;
+                }
+                Ok(false) | Err(TryRecvError::Disconnected) => {
+                    status = "Clipboard unavailable; Ctrl+Y retries.".into();
+                    copy_result = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         terminal
             .draw(|frame| {
                 let areas = Layout::vertical([
@@ -59,11 +74,13 @@ fn discovery_loop(
                     areas[0],
                 );
                 let editing = matches!(discovery, DiscoveryState::Editing);
-                let block = Block::default().borders(Borders::ALL)
-                    .border_style(Style::default().fg(if editing { Color::Cyan } else { Color::DarkGray }))
-                    .title(if editing { " Gateway URL · editing " } else { " Gateway URL " });
-                let field = block.inner(areas[1]);
-                frame.render_widget(block, areas[1]);
+                let field_areas = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(areas[1]);
+                frame.render_widget(
+                    Paragraph::new(if editing { "Gateway URL · editing" } else { "Gateway URL" })
+                        .style(Style::default().fg(if editing { Color::Cyan } else { Color::DarkGray })),
+                    field_areas[0],
+                );
+                let field = field_areas[1];
                 let viewport = input.viewport(field.width as usize, field.height as usize);
                 frame.render_widget(Paragraph::new(viewport.lines.join("\n")), field);
                 if matches!(discovery, DiscoveryState::Editing) && field.width > 0 && field.height > 0 {
@@ -85,9 +102,9 @@ fn discovery_loop(
                 let footer = Layout::vertical([Constraint::Length(2), Constraint::Length(2)]).split(areas[4]);
                 frame.render_widget(Paragraph::new(&*status).wrap(Wrap { trim: false }), footer[0]);
                 let controls = match discovery {
-                    DiscoveryState::Preview(_) => "Enter register → Catalog · e edit URL\nEsc/Ctrl+C cancel without saving",
+                    DiscoveryState::Preview(_) => "Enter register → Catalog · e edit URL · Ctrl+Y copy URL\nEsc/Ctrl+C cancel without saving",
                     DiscoveryState::Fetching(_) => "Loading… Esc/Ctrl+C cancel without saving",
-                    DiscoveryState::Editing => "Enter discover/retry · Ctrl+U clear URL\nEsc/Ctrl+C cancel without saving",
+                    DiscoveryState::Editing => "Enter discover/retry · Ctrl+U clear URL · Ctrl+Y copy URL\nEsc/Ctrl+C cancel without saving",
                 };
                 frame.render_widget(Paragraph::new(controls).wrap(Wrap { trim: false }), footer[1]);
             })
@@ -126,6 +143,18 @@ fn discovery_loop(
                 || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 return Ok(None);
+            }
+            if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if copy_result.is_none() {
+                    let url = input.contents();
+                    let (sender, receiver) = mpsc::channel();
+                    copy_result = Some(receiver);
+                    status = "Copying gateway URL…".into();
+                    std::thread::spawn(move || {
+                        let _ = sender.send(crate::clipboard::copy(&url));
+                    });
+                }
+                continue;
             }
             match (&discovery, key.code) {
                 (DiscoveryState::Preview(gateway), KeyCode::Enter) => {

@@ -57,6 +57,7 @@ const TEXT_CAP: usize = 64 * 1024;
 /// What a client asks of a session.
 #[derive(Debug, Clone)]
 pub(crate) struct TurnRequest {
+    pub(crate) mode: crate::tool_policy::ExecutionMode,
     pub(crate) prompt: String,
     pub(crate) skills: Vec<String>,
     /// Caller-chosen; generated when absent. Idempotent per session.
@@ -407,6 +408,16 @@ impl Service {
                         format!("run_id {run_id} was already used for a different prompt"),
                     ));
                 }
+                let recorded_mode = found
+                    .get("execution_mode")
+                    .cloned()
+                    .unwrap_or(json!("policy"));
+                if recorded_mode != json!(request.mode) {
+                    return Err(ServiceError::new(
+                        "conflict",
+                        format!("run_id {run_id} was already used with a different execution mode"),
+                    ));
+                }
                 let recorded_skills = found["requested_skills"]
                     .as_array()
                     .map(Vec::as_slice)
@@ -734,6 +745,7 @@ impl Turn {
                 .begin_turn_as(self.run_id.clone(), &self.request.prompt);
             live.fan_out_fresh(&self.session);
             lock(&self.backend).submit(ChatRequest {
+                mode: self.request.mode,
                 skills: self.request.skills.clone(),
                 selection: self.selection.clone(),
                 thinking: self.thinking,
@@ -743,6 +755,7 @@ impl Turn {
         let mut ledger = Ledger::default();
         let mut text = String::new();
         let mut usage = None;
+        let mut context_window = None;
         let mut timed_out = false;
         // Set when the turn was cancelled or timed out: the engine gets
         // `CANCEL_GRACE` to report, then the turn closes without it, since a
@@ -762,7 +775,14 @@ impl Turn {
                 .unwrap_or(Duration::from_secs(1))
                 .min(Duration::from_millis(250));
             match receiver.recv_timeout(wait) {
-                Ok(event) => self.handle(event, &mut ledger, &mut text, &mut usage, &mut outcome),
+                Ok(event) => self.handle(
+                    event,
+                    &mut ledger,
+                    &mut text,
+                    &mut usage,
+                    &mut context_window,
+                    &mut outcome,
+                ),
                 Err(RecvTimeoutError::Timeout) => {
                     let mut live = lock(&self.live);
                     live.recorder.checkpoint();
@@ -812,6 +832,7 @@ impl Turn {
             "client": self.request.client,
             "gateway": self.selection.gateway,
             "model": self.selection.model,
+            "execution_mode": self.request.mode,
         });
         if let Some((kind, message)) = &error {
             doc["error"] = json!({
@@ -821,6 +842,9 @@ impl Turn {
         }
         if let Some(usage) = &usage {
             doc["usage"] = usage.clone();
+        }
+        if let Some(window) = context_window {
+            doc["context_window"] = json!(window);
         }
         for (key, value) in ledger.to_json().as_object().into_iter().flatten() {
             doc[key] = value.clone();
@@ -859,6 +883,7 @@ impl Turn {
         ledger: &mut Ledger,
         text: &mut String,
         usage: &mut Option<Value>,
+        context_window: &mut Option<u64>,
         outcome: &mut Option<Result<(), (ErrorKind, String)>>,
     ) {
         let mut live = lock(&self.live);
@@ -964,9 +989,8 @@ impl Turn {
                     "cost_usd": cost_usd,
                 }));
             }
-            ResponseEvent::ToolCallReturned
-            | ResponseEvent::ContextWindow(_)
-            | ResponseEvent::Reconnecting { .. } => {}
+            ResponseEvent::ContextWindow(window) => *context_window = Some(window),
+            ResponseEvent::ToolCallReturned | ResponseEvent::Reconnecting { .. } => {}
             ResponseEvent::Completed => *outcome = Some(Ok(())),
             ResponseEvent::Failed { message, kind } => *outcome = Some(Err((kind, message))),
         }

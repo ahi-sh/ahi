@@ -8,6 +8,8 @@ use super::thinking::ThinkingLevel;
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ParsedCommand {
+    Mode,
+    RevokeTrust,
     ReopenModelPicker,
     OpenCatalog,
     Login,
@@ -50,6 +52,8 @@ pub(crate) fn parse(text: &str) -> ParsedCommand {
     let name = parts.next().unwrap_or(text);
     let rest: Vec<&str> = parts.collect();
     match (name, rest.as_slice()) {
+        ("/mode", []) => ParsedCommand::Mode,
+        ("/mode", ["revoke"]) => ParsedCommand::RevokeTrust,
         ("/clear", []) => ParsedCommand::Clear,
         ("/mouse", []) => ParsedCommand::ShowMouse,
         ("/mouse", ["on"]) => ParsedCommand::SetMouse(true),

@@ -9,6 +9,8 @@
 
 mod config;
 mod evaluate;
+mod mode;
+pub(crate) use mode::ExecutionMode;
 pub(crate) mod examples;
 pub(crate) mod grants;
 

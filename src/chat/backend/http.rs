@@ -243,6 +243,7 @@ fn complete(
             grants,
             actions,
             TurnContext {
+                mode: request.mode,
                 caller,
                 deadline,
                 cancel: Arc::clone(cancel),
@@ -257,6 +258,7 @@ fn complete(
         thinking,
         mut messages,
         skills: explicit,
+        mode: _,
     } = request;
     if !explicit.is_empty() {
         cancelled(cancel)?;

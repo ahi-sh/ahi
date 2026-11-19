@@ -13,6 +13,7 @@ mod header;
 pub(crate) mod input;
 mod key_binding;
 mod location;
+mod mode;
 mod open;
 mod preferences;
 mod scroll_navigation;
@@ -86,6 +87,7 @@ enum SessionEnd {
 
 /// Screen state, independent of the terminal.
 struct ChatScreen {
+    modes: mode::Modes,
     state_dir: Directories,
     selection: Selection,
     thinking: ThinkingLevel,
@@ -224,6 +226,7 @@ impl ChatScreen {
     ) -> Self {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
+            modes: mode::Modes::default(),
             recorder,
             actions_file: None,
             preferences: preferences::read(state_dir),
@@ -285,12 +288,23 @@ impl ChatScreen {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".to_string());
-        let tools = self.workspace_root.join("ahi.tools.yaml").is_file();
+        let tools = self.modes.selected != crate::tool_policy::ExecutionMode::Policy
+            || self.workspace_root.join("ahi.tools.yaml").is_file()
+            || self.actions_file.is_some();
         let policy = match &self.actions_file {
             Some(file) => crate::tool_policy::load_file(file, &crate::tools::BUILTIN).map(Some),
             None => crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN),
         };
         let policy = policy.ok().flatten();
+        let policy = match self.modes.selected {
+            crate::tool_policy::ExecutionMode::ReadWrite => {
+                Some(crate::tool_policy::ActionPolicy::trusted())
+            }
+            crate::tool_policy::ExecutionMode::ReadOnly => {
+                policy.or_else(|| Some(crate::tool_policy::ActionPolicy::trusted()))
+            }
+            crate::tool_policy::ExecutionMode::Policy => policy,
+        };
         let catalog =
             crate::skills::enumerate(&self.workspace_root, std::env::home_dir().as_deref());
         self.skill_menu.names = catalog.skills.iter().map(|skill| skill.id()).collect();
@@ -451,6 +465,65 @@ impl ChatScreen {
         event: Event,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
+        use crossterm::event::{KeyCode, KeyEventKind};
+        if let Some(dialog) = self.modes.dialog {
+            if let Event::Key(key) = event {
+                if key.kind != KeyEventKind::Press {
+                    return Ok(ScreenAction::Continue);
+                }
+                match (dialog, key.code) {
+                    (mode::Dialog::Trust, KeyCode::Esc) => return Ok(ScreenAction::Exit),
+                    (_, KeyCode::Char('c'))
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(ScreenAction::Exit)
+                    }
+                    (_, KeyCode::Esc) => self.modes.dialog = None,
+                    (mode::Dialog::Trust, KeyCode::Char('t')) => {
+                        mode::remember(&self.state_dir.state, &self.workspace_root, true)?;
+                        self.modes.trusted = true;
+                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
+                        self.modes.dialog = None;
+                    }
+                    (mode::Dialog::Trust, KeyCode::Char('r')) => {
+                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
+                        self.modes.dialog = None;
+                    }
+                    (mode::Dialog::Choose, KeyCode::Char('1')) => {
+                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
+                        self.modes.dialog = None;
+                    }
+                    (mode::Dialog::Choose, KeyCode::Char('2')) => {
+                        if self.modes.has_policy && !self.modes.bypass {
+                            self.modes.dialog = Some(mode::Dialog::Bypass);
+                        } else if !self.modes.trusted && !self.modes.bypass {
+                            self.modes.dialog = Some(mode::Dialog::Trust);
+                        } else {
+                            self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
+                            self.modes.dialog = None;
+                        }
+                    }
+                    (mode::Dialog::Choose, KeyCode::Char('3')) if self.modes.has_policy => {
+                        self.modes.selected = crate::tool_policy::ExecutionMode::Policy;
+                        self.modes.dialog = None;
+                    }
+                    (mode::Dialog::Bypass, KeyCode::Char('t')) => {
+                        self.modes.bypass = true;
+                        self.modes.selected = crate::tool_policy::ExecutionMode::ReadWrite;
+                        self.modes.dialog = None;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(ScreenAction::Continue);
+        }
+        if matches!(event, Event::Key(key) if key.code == KeyCode::BackTab && key.kind == KeyEventKind::Press)
+        {
+            self.modes.cycle();
+            return Ok(ScreenAction::Continue);
+        }
         // In mouse-off mode, native selection belongs to the terminal.
         // Ignore stale queued mouse reports after switching modes.
         if !self.mouse_capture && matches!(event, Event::Mouse(_)) {
@@ -634,7 +707,10 @@ impl ChatScreen {
                         .chosen(&text, CommandContext::Chat)
                         .expect("matched command");
                     if self.response_in_progress
-                        && !matches!(command::parse(command), ParsedCommand::Exit)
+                        && !matches!(
+                            command::parse(command),
+                            ParsedCommand::Exit | ParsedCommand::Mode | ParsedCommand::RevokeTrust
+                        )
                     {
                         return Ok(ScreenAction::Continue);
                     }
@@ -1129,7 +1205,22 @@ impl ChatScreen {
             ));
         }
         frame.render_widget(
-            Paragraph::new(rule_line(chunks[3].width as usize)).style(accent),
+            Paragraph::new(format!(
+                "/ commands · {} · Shift+Tab · /mode{}",
+                self.modes.status(),
+                if self.modes.has_policy {
+                    format!(
+                        " · {}",
+                        self.actions_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| crate::tool_policy::FILE_NAME.into())
+                    )
+                } else {
+                    String::new()
+                }
+            ))
+            .style(accent),
             chunks[3],
         );
 
@@ -1177,9 +1268,46 @@ impl ChatScreen {
         if let Some(query) = self.input.skill_query() {
             self.skill_menu.draw(frame, chunks[0], &query);
         }
+        self.modes.draw(
+            frame,
+            &self.workspace_root,
+            &self
+                .actions_file
+                .clone()
+                .unwrap_or_else(|| self.workspace_root.join(crate::tool_policy::FILE_NAME)),
+        );
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
+        if matches!(self.input.contents().trim(), "/mode" | "/mode revoke") {
+            let text = self.input.contents();
+            self.input.clear();
+            return self.dispatch_command(text.trim(), backend);
+        }
+        if !self.modes.has_policy
+            && self.modes.selected != crate::tool_policy::ExecutionMode::Policy
+            && self
+                .workspace_root
+                .join(crate::tool_policy::FILE_NAME)
+                .exists()
+        {
+            crate::tool_policy::load(&self.workspace_root, &crate::tools::BUILTIN)?;
+            self.modes.has_policy = true;
+            if self.modes.selected != crate::tool_policy::ExecutionMode::ReadOnly {
+                self.modes.selected = crate::tool_policy::ExecutionMode::Policy;
+            }
+            self.push_notice("New workspace policy detected; custom rules now apply.".into());
+        }
+        if self.modes.has_policy
+            && self.actions_file.is_none()
+            && !self
+                .workspace_root
+                .join(crate::tool_policy::FILE_NAME)
+                .is_file()
+        {
+            self.push_alert("Workspace policy is missing; restore it or reopen chat to review workspace trust. Draft kept.".into());
+            return Ok(ScreenAction::Continue);
+        }
         // Keep the draft intact until the active turn ends; never launch a second
         // billed request while discarding the first turn's receiver.
         if self.response_in_progress {
@@ -1239,7 +1367,9 @@ impl ChatScreen {
             );
             self.surface_recording_failure();
         }
+        self.modes.active = Some(self.modes.selected);
         let request = ChatRequest {
+            mode: self.modes.selected,
             // A retry whose history already contains tool results replays that
             // exchange, rather than recording the explicit loads a second time.
             skills: if prompt.is_some() {
@@ -1309,6 +1439,20 @@ impl ChatScreen {
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
         match command::parse(text) {
+            ParsedCommand::Mode => {
+                self.modes.dialog = Some(mode::Dialog::Choose);
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::RevokeTrust => {
+                mode::remember(&self.state_dir.state, &self.workspace_root, false)?;
+                self.modes.trusted = false;
+                self.modes.bypass = false;
+                self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
+                self.push_notice(
+                    "Workspace trust revoked; read-only selected for the next turn.".into(),
+                );
+                Ok(ScreenAction::Continue)
+            }
             ParsedCommand::ReopenModelPicker => Ok(ScreenAction::ReopenModelPicker),
             ParsedCommand::OpenCatalog => Ok(ScreenAction::OpenCatalog),
             ParsedCommand::Login => Ok(ScreenAction::Login),
@@ -1602,6 +1746,9 @@ impl ChatScreen {
                 .saturating_add(current_rows.saturating_sub(previous_rows));
         }
         self.surface_recording_failure();
+        if finished {
+            self.modes.active = None;
+        }
         finished
     }
 
@@ -1663,6 +1810,7 @@ impl ChatScreen {
     fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
         backend.cancel();
         self.recorder.cancel_turn();
+        self.modes.active = None;
         self.receiver = None;
         self.response_in_progress = false;
         self.approval = None;
@@ -1749,15 +1897,6 @@ impl ChatScreen {
             self.transcript_height,
         );
     }
-}
-
-fn rule_line(width: usize) -> String {
-    let hint = "/ commands ";
-    format!(
-        "{}{}",
-        hint.chars().take(width).collect::<String>(),
-        "─".repeat(width.saturating_sub(hint.len()))
-    )
 }
 
 /// Validate an explicit `--tools` policy file before any screen opens, so
@@ -1886,6 +2025,15 @@ fn interact_screen(
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<Option<String>> {
+    screen.workspace_root = screen
+        .workspace_root
+        .canonicalize()
+        .map_err(|e| Error::new(e.to_string()))?;
+    screen.modes = mode::Modes::startup(
+        &screen.workspace_root,
+        &state_dir.state,
+        screen.actions_file.as_deref(),
+    )?;
     screen.appearance = appearance;
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
@@ -2980,9 +3128,7 @@ mod tests {
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2].starts_with("/ commands "));
-        assert!(idle[idle.len() - 2]["/ commands ".len()..]
-            .chars()
-            .all(|character| character == '─'));
+        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab · /mode"));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()

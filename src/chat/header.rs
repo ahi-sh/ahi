@@ -32,7 +32,7 @@ pub(crate) fn text(
     let place_line = format!(
         "{directory} · {}",
         if tools_configured {
-            "tools approved by ahi.tools.yaml"
+            "tools enabled · /mode controls access"
         } else {
             "no ahi.tools.yaml: tools off"
         }

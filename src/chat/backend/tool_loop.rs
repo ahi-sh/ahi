@@ -54,6 +54,7 @@ impl Default for Caller {
 /// What one turn brings to the runtime besides policy: who is asking, how
 /// long the turn may take, and the flag that stops it.
 pub(super) struct TurnContext {
+    pub(super) mode: crate::tool_policy::ExecutionMode,
     pub(super) caller: Caller,
     /// The turn's deadline: no call starts past it and a command's own
     /// timeout is clamped to what remains. `None` is unbounded.
@@ -77,6 +78,7 @@ pub(super) struct ToolRuntime {
     skills: Vec<crate::skills::Skill>,
     /// Manual-only skills are available only after an explicit reference this turn.
     explicit_skills: Vec<String>,
+    mode: crate::tool_policy::ExecutionMode,
     gateway: String,
     destination: String,
     grants: SessionGrants,
@@ -116,12 +118,20 @@ impl ToolRuntime {
         policy_file: Option<&Path>,
         turn: TurnContext,
     ) -> Result<Option<Self>> {
-        let policy = match policy_file {
+        let mode = turn.mode;
+        let installed = match policy_file {
             Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
             None => tool_policy::load(directory, &tools::BUILTIN)?,
         };
-        let Some(policy) = policy else {
-            return Ok(None);
+        let policy = match mode {
+            crate::tool_policy::ExecutionMode::ReadWrite => tool_policy::ActionPolicy::trusted(),
+            crate::tool_policy::ExecutionMode::ReadOnly => {
+                installed.unwrap_or_else(tool_policy::ActionPolicy::trusted)
+            }
+            crate::tool_policy::ExecutionMode::Policy => match installed {
+                Some(policy) => policy,
+                None => return Ok(None),
+            },
         };
         let workspace = Workspace::open(directory, state)?;
         // Skills are enumerated once per turn from the turn's canonical
@@ -135,6 +145,7 @@ impl ToolRuntime {
             .cloned()
             .collect();
         let mut advertised = policy.advertised_tools();
+        advertised.retain(|tool| mode.allows(tool));
         if skills.is_empty() {
             advertised.retain(|tool| tool != tools::LOAD_SKILL);
         }
@@ -150,6 +161,7 @@ impl ToolRuntime {
             catalog,
             skills,
             explicit_skills: Vec::new(),
+            mode,
             gateway: gateway.to_string(),
             destination: destination.to_string(),
             grants,
@@ -310,6 +322,12 @@ impl ToolRuntime {
     }
 
     fn plan(&self, prepared: PreparedCall) -> Plan {
+        if !self.mode.allows(prepared.tool) {
+            return Plan::Done(Box::new(denied(
+                &prepared,
+                "read-only mode blocks writes, commands and delegation",
+            )));
+        }
         if prepared.tool == tools::LOAD_SKILL
             && self
                 .catalog

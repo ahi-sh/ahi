@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
-use ahi_widgets::{Block, Borders, Paragraph, Wrap};
+use ahi_widgets::{Paragraph, Wrap};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
@@ -48,17 +48,17 @@ fn login_loop(terminal: &mut crate::term::DefaultTerminal, state: &Directories) 
         }
         terminal
             .draw(|frame| {
-                let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(7)])
+                let areas = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(7)])
                     .split(frame.area());
+                frame.render_widget(Paragraph::new("OpenAI login").style(ratatui_core::style::Style::default().add_modifier(ratatui_core::style::Modifier::BOLD)), areas[0]);
                 frame.render_widget(
                     Paragraph::new(format!(
                         "Open this URL to sign in with ChatGPT:\n\n{}\n\nThe browser redirects to http://127.0.0.1:1455/auth/callback.\nLogin does not refresh catalogs or enable OpenAI inference.",
                         login.authorization_url()
                     ))
-                    .block(Block::default().borders(Borders::ALL).title(" OpenAI login "))
                     .wrap(Wrap { trim: false })
                     .scroll((scroll, 0)),
-                    areas[0],
+                    areas[1],
                 );
                 frame.render_widget(
                     Paragraph::new(format!(
@@ -66,7 +66,7 @@ fn login_loop(terminal: &mut crate::term::DefaultTerminal, state: &Directories) 
                         callback.chars().count()
                     ))
                     .wrap(Wrap { trim: false }),
-                    areas[1],
+                    areas[2],
                 );
             })
             .map_err(|error| Error::new(error.to_string()))?;

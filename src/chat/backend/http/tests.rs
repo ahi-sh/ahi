@@ -568,6 +568,7 @@ fn verify_responses_tool_requests() {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        mode: Default::default(),
         skills: Vec::new(),
         selection: parse_selection("local/vendor/model"),
         thinking: ThinkingLevel::Medium,
@@ -990,6 +991,79 @@ fn calls_stream(calls: &[(&str, &str, serde_json::Value)]) -> String {
         })
         .collect();
     stream(&tool_stream(&[json!(deltas)], "tool_calls"))
+}
+
+#[test]
+fn read_only_blocks_effects_even_under_a_permissive_policy_and_read_write_is_explicit() {
+    for mode in [
+        crate::tool_policy::ExecutionMode::ReadOnly,
+        crate::tool_policy::ExecutionMode::ReadWrite,
+    ] {
+        let mut calls = vec![
+            ("read", "read_file", json!({"path":"src/a.rs"})),
+            (
+                "write",
+                "write_file",
+                json!({"path":"src/new.rs", "content":"new"}),
+            ),
+            ("secret", "read_file", json!({"path":"secret"})),
+        ];
+        if mode == crate::tool_policy::ExecutionMode::ReadOnly {
+            calls.extend([
+                ("cmd", "run_command", json!({"argv":["echo", "hello"]})),
+                (
+                    "script",
+                    "run_command",
+                    json!({"skill":"operator/test", "script":"scripts/check"}),
+                ),
+                (
+                    "delegate",
+                    "delegate",
+                    json!({"worker":"unconfigured", "prompt":"change files"}),
+                ),
+            ]);
+        }
+        let (url, server) = server_sequence(vec![calls_stream(&calls), text_stream("done")]);
+        let effect = if mode == crate::tool_policy::ExecutionMode::ReadOnly {
+            "approve"
+        } else {
+            "deny"
+        };
+        let policy = format!("version: 1\nrules:\n- {{id: reads, action: tool_call, match: {{tool: read_file}}, effect: approve}}\n- {{id: secret, action: tool_call, match: {{tool: read_file, path: secret}}, effect: deny}}\n- {{id: edits, action: file_write, match: {{}}, effect: {effect}}}\n");
+        let fixture = ToolFixture::new(&url, &policy, json!({"id":"vendor/model"}));
+        let mut input = request();
+        input.mode = mode;
+        let (events, _) = collect_answering(&mut fixture.backend(), input, vec![]);
+        let outcomes = results(&events);
+        assert!(outcomes[0].2.contains("fn a() {}"));
+        if mode == crate::tool_policy::ExecutionMode::ReadOnly {
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .skip(1)
+                    .map(|result| result.1)
+                    .collect::<Vec<_>>(),
+                [126, 126, 126, 126, 126]
+            );
+            assert!(!fixture.workspace.join("src/new.rs").exists());
+        } else {
+            assert_eq!(
+                fs::read_to_string(fixture.workspace.join("src/new.rs")).unwrap(),
+                "new"
+            );
+            assert!(
+                outcomes[2].2.contains("secret-value"),
+                "explicit bypass ignores the custom deny"
+            );
+        }
+        let requests = server.join().unwrap();
+        let schemas = advertised_tools(&request_body(&requests[0]));
+        if mode == crate::tool_policy::ExecutionMode::ReadOnly {
+            assert_eq!(schemas, ["read_file"]);
+        } else {
+            assert!(schemas.contains(&"write_file".to_string()));
+        }
+    }
 }
 
 #[test]

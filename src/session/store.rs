@@ -945,6 +945,7 @@ mod tests {
             .submit(
                 &id,
                 crate::service::TurnRequest {
+                    mode: Default::default(),
                     skills: Vec::new(),
                     prompt: "more".into(),
                     run_id: None,
