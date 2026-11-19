@@ -313,6 +313,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
     let progress = options.headless || options.verbose;
     let timeout = Duration::from_secs(options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let request = TurnRequest {
+        mode: Default::default(),
         skills: options.skills.clone(),
         prompt,
         run_id: options.run_id.clone(),

@@ -36,6 +36,8 @@ def main() -> None:
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
                          help="stop after the scoped skill picker and bracketed paste checks")
+    focused.add_argument("--workspace-modes-only", action="store_true",
+                         help="verify workspace trust, mode cycling, policy bypass and revocation")
     focused.add_argument("--login-copy-only", action="store_true",
                          help="verify raw OAuth URL clipboard copy and cancellation with disposable adapters")
     focused.add_argument("--stream-recovery-only", action="store_true",
@@ -84,6 +86,7 @@ def main() -> None:
             self.output = b""
             self.recent = b""
             self.dead = False
+            self.onboarded_read_only = False
 
         def read(self) -> None:
             if select.select([self.fd], [], [], 0.05)[0]:
@@ -150,6 +153,11 @@ def main() -> None:
             end = time.monotonic() + 10
             while text not in self.screen() and time.monotonic() < end:
                 self.read()
+                # Non-onboarding fixtures explicitly choose the safe temporary
+                # mode. The modes-only scenario exercises the prompt itself.
+                if not args.workspace_modes_only and not self.onboarded_read_only and "Trust this workspace?" in self.screen():
+                    self.send("r")
+                    self.onboarded_read_only = True
             assert text in self.screen(), (text, self.screen())
 
         def resize(self, columns: int, rows: int) -> None:
@@ -194,6 +202,147 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    if args.workspace_modes_only:
+        queue_release = threading.Event()
+
+        class ModeGateway(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                if body["messages"][-1].get("content") == "queue-turn":
+                    prefix = {"choices": [{"index": 0, "delta": {"content": "mode-stream-waiting"}}]}
+                    self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
+                    self.wfile.flush()
+                    queue_release.wait(10)
+                if body["messages"][-1]["role"] == "tool":
+                    delta = {"content": "mode-fixture-complete"}
+                    finish = "stop"
+                else:
+                    delta = {"tool_calls": [{"index": 0, "id": "write-mode", "type": "function",
+                             "function": {"name": "write_file", "arguments": json.dumps({"path": "marker", "content": "written"})}}]}
+                    finish = "tool_calls"
+                for item in [{"choices": [{"index": 0, "delta": delta}]},
+                             {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]:
+                    self.wfile.write(f"data: {json.dumps(item)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        gateway = ThreadingHTTPServer(("127.0.0.1", 0), ModeGateway)
+        worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+        worker.start()
+        try:
+            for engine in ("standalone", "service"):
+                with tempfile.TemporaryDirectory(prefix="ahi-modes-", dir="/tmp") as temp:
+                    state = Path(temp) / "state"
+                    work = Path(temp) / "work"
+                    state.mkdir()
+                    work.mkdir()
+                    sid = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+                    (state / "sessions").mkdir()
+                    (state / "sessions" / f"{sid}.jsonl").write_text(json.dumps(dict(
+                        type="session", schema=1, id=sid, host="fixture", cwd=str(work),
+                        ahi_version="0.22.0", gateway="local", model="fixture", thinking="off",
+                        started="2026-01-01T00:00:00Z")) + "\n")
+                    (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                        "baseUrl": f"http://127.0.0.1:{gateway.server_port}/v1", "api": "openai-completions",
+                        "models": [{"id": "fixture"}],
+                    }}}))
+                    sock = str(state / "run/serve.sock")
+                    options = ("--standalone",) if engine == "standalone" else ("--socket", sock)
+                    command = ("tui", "--session", sid, *options)
+                    chat = Session(state, cwd=work, columns=120, rows=35, command=command)
+                    try:
+                        chat.expect("Trust this workspace?")
+                        chat.send("r")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("draft-preserved")
+                        chat.send("\x1b[Z")
+                        chat.expect("Trust this workspace?")
+                        chat.send("t")
+                        chat.expect("Read-write · Shift+Tab")
+                        chat.expect("draft-preserved")
+                        assert len(list((state / "workspace-trust").iterdir())) == 1
+                        assert not (work / "ahi.tools.yaml").exists()
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("\r")
+                        chat.expect("mode-fixture-complete")
+                        assert not (work / "marker").exists()
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-write · Shift+Tab")
+                        chat.send("now write\r")
+                        chat.expect("write_file marker")
+                        deadline = time.monotonic() + 5
+                        while not (work / "marker").exists():
+                            chat.read()
+                            assert time.monotonic() < deadline
+                        assert (work / "marker").read_text() == "written"
+                        # Start another read-write turn, queue read-only while
+                        # streaming, and prove the already-admitted turn still writes.
+                        chat.send("/mode\r")
+                        chat.expect("Shift+Tab cycles available modes.")
+                        chat.send("\x1b")
+                        chat.absent("Shift+Tab cycles available modes.")
+                        (work / "marker").unlink()
+                        queue_release.clear()
+                        chat.send("queue-turn\r")
+                        chat.expect("mode-stream-waiting")
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-write → Read-only next turn")
+                        queue_release.set()
+                        deadline = time.monotonic() + 5
+                        while not (work / "marker").exists():
+                            chat.read()
+                            assert time.monotonic() < deadline
+                        chat.expect("Read-only · Shift+Tab")
+                        assert (work / "marker").read_text() == "written"
+                        chat.send("/mode revoke\r")
+                        chat.expect("Workspace trust revoked")
+                        assert not list((state / "workspace-trust").iterdir())
+                        chat.send("/quit\r")
+                        chat.finish()
+                    finally:
+                        chat.close()
+                    policy = "version: 1\nrules:\n- {id: reads, action: tool_call, match: {tool: read_file}, effect: approve}\n"
+                    (work / "ahi.tools.yaml").write_text(policy)
+                    chat = Session(state, cwd=work, columns=120, rows=35, command=command)
+                    try:
+                        chat.expect("Policy · Shift+Tab")
+                        chat.absent("Trust this workspace?")
+                        chat.send("\x1b[Z")
+                        chat.expect("Read-only · Shift+Tab")
+                        chat.send("\x1b[Z")
+                        chat.expect("Policy · Shift+Tab")
+                        chat.send("/mode\r")
+                        chat.expect("Shift+Tab cycles available modes.")
+                        chat.send("2")
+                        chat.expect("Bypass tool policy")
+                        chat.send("\x1b")
+                        chat.expect("Policy · Shift+Tab")
+                        chat.send("/mode\r2")
+                        chat.expect("Bypass tool policy")
+                        chat.send("t")
+                        chat.expect("Read-write · Shift+Tab")
+                        assert (work / "ahi.tools.yaml").read_text() == policy
+                        chat.send("/quit\r")
+                        chat.finish()
+                    finally:
+                        chat.close()
+                        if engine == "service":
+                            subprocess.run([binary, "--state-dir", state, "serve", "--socket", sock, "stop"],
+                                           capture_output=True, timeout=10, check=True)
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            worker.join()
+        print("PASS: trust, draft-preserving mode cycle, read-only enforcement, read-write effect, policy confirmation and revocation in both engines")
+        return
 
     if args.login_copy_only:
         with tempfile.TemporaryDirectory(prefix="ahi-login-copy-", dir="/tmp") as temp:

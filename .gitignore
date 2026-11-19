@@ -28,4 +28,5 @@ rustc-ice-*.txt
 docs/*
 !docs/MODULE_STRUCTURE.md
 !docs/SKILLS.md
+!docs/WORKSPACE_TRUST.md
 

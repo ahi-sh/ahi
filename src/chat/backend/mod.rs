@@ -48,6 +48,7 @@ pub(crate) fn parse_selection(text: &str) -> Selection {
 /// What the screen asks a backend to complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatRequest {
+    pub(crate) mode: crate::tool_policy::ExecutionMode,
     pub skills: Vec<String>,
     pub(crate) selection: Selection,
     pub(crate) thinking: ThinkingLevel,

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Interactive workspace trust with Read-write, Read-only, and Policy modes; Shift+Tab cycles available modes and `/mode` opens the chooser. Policy bypass requires session-only confirmation, trust is stored outside the checkout and can be revoked, and mode changes are enforced at the per-turn execution boundary.
 - Ctrl+Y in OpenAI's TUI login copies the raw authorization URL through the shared clipboard adapters without border characters, wrapping, or changes to the callback draft.
 
 - Streaming sessions checkpoint partial prose during generation. Quit cancels and closes the active turn, and resume shows interrupted prose without replaying it to the model. Commands record successful spawn separately from their result.

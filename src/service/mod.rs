@@ -57,6 +57,7 @@ const TEXT_CAP: usize = 64 * 1024;
 /// What a client asks of a session.
 #[derive(Debug, Clone)]
 pub(crate) struct TurnRequest {
+    pub(crate) mode: crate::tool_policy::ExecutionMode,
     pub(crate) prompt: String,
     pub(crate) skills: Vec<String>,
     /// Caller-chosen; generated when absent. Idempotent per session.
@@ -407,6 +408,16 @@ impl Service {
                         format!("run_id {run_id} was already used for a different prompt"),
                     ));
                 }
+                let recorded_mode = found
+                    .get("execution_mode")
+                    .cloned()
+                    .unwrap_or(json!("policy"));
+                if recorded_mode != json!(request.mode) {
+                    return Err(ServiceError::new(
+                        "conflict",
+                        format!("run_id {run_id} was already used with a different execution mode"),
+                    ));
+                }
                 let recorded_skills = found["requested_skills"]
                     .as_array()
                     .map(Vec::as_slice)
@@ -734,6 +745,7 @@ impl Turn {
                 .begin_turn_as(self.run_id.clone(), &self.request.prompt);
             live.fan_out_fresh(&self.session);
             lock(&self.backend).submit(ChatRequest {
+                mode: self.request.mode,
                 skills: self.request.skills.clone(),
                 selection: self.selection.clone(),
                 thinking: self.thinking,
@@ -812,6 +824,7 @@ impl Turn {
             "client": self.request.client,
             "gateway": self.selection.gateway,
             "model": self.selection.model,
+            "execution_mode": self.request.mode,
         });
         if let Some((kind, message)) = &error {
             doc["error"] = json!({
