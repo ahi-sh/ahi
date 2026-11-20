@@ -404,6 +404,14 @@ fn follow(
             }
         };
         let done = match event {
+            Event::CommandStdout {
+                session: s,
+                run_id: id,
+                call_id,
+                bytes,
+            } if s == session && id == run_id => sender
+                .send(ResponseEvent::CommandStdout { call_id, bytes })
+                .is_err(),
             Event::Text {
                 run_id: ref id,
                 delta,

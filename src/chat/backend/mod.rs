@@ -60,6 +60,11 @@ pub(crate) struct ChatRequest {
 #[derive(Debug, PartialEq)]
 pub(crate) enum ResponseEvent {
     TextDelta(String),
+    /// Ephemeral, bounded stdout from a running tool, never assistant text.
+    CommandStdout {
+        call_id: String,
+        bytes: Vec<u8>,
+    },
     CommandStarted {
         call_id: String,
     },

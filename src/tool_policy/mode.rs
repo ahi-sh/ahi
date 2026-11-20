@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum ExecutionMode {
     #[default]
     Policy,
+    #[serde(rename = "plan", alias = "read-only")]
     ReadOnly,
+    #[serde(rename = "trusted", alias = "read-write")]
     ReadWrite,
     #[serde(untagged)]
     Named(String),
@@ -17,8 +19,8 @@ impl ExecutionMode {
     pub(crate) fn label(&self) -> &str {
         match self {
             Self::Policy => "Policy",
-            Self::ReadOnly => "Read-only",
-            Self::ReadWrite => "Read-write",
+            Self::ReadOnly => "Plan",
+            Self::ReadWrite => "Trusted",
             Self::Named(name) => name,
         }
     }
@@ -26,12 +28,25 @@ impl ExecutionMode {
         self != &Self::ReadOnly
             || matches!(
                 tool,
-                "read_file" | "list_dir" | "find_files" | "search_files" | "load_skill"
+                "read_file"
+                    | "list_dir"
+                    | "find_files"
+                    | "search_files"
+                    | "load_skill"
+                    | "git_inspect"
+                    | "plan_scratch"
             )
     }
 }
 
 impl ActionPolicy {
+    pub(crate) fn plan() -> Self {
+        let mut policy = Self::trusted();
+        policy
+            .rules
+            .retain(|r| r.tools.iter().all(|t| ExecutionMode::ReadOnly.allows(t)));
+        policy
+    }
     /// Explicit interactive trust grants ordinary tools without an argv prefix.
     /// Existing policy files are still parsed before this choice can be used.
     pub(crate) fn trusted() -> Self {

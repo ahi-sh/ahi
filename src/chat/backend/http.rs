@@ -43,6 +43,7 @@ pub(crate) struct HttpBackend {
     /// Bounds every tool call of a turn; `None` is the chat's unbounded turn.
     deadline: Option<Instant>,
     grants: SessionGrants,
+    scratch: crate::tools::Scratch,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
     agent: ureq::Agent,
@@ -61,6 +62,7 @@ impl HttpBackend {
             caller: Caller::default(),
             deadline: None,
             grants: SessionGrants::default(),
+            scratch: Default::default(),
             agent: ureq::Agent::config_builder()
                 .max_redirects(0)
                 .timeout_global(Some(Duration::from_secs(120)))
@@ -83,6 +85,11 @@ impl HttpBackend {
     /// directory.
     pub(crate) fn in_workspace(mut self, directory: PathBuf) -> Self {
         self.workspace = Some(directory);
+        self
+    }
+
+    pub(crate) fn with_scratch(mut self, scratch: crate::tools::Scratch) -> Self {
+        self.scratch = scratch;
         self
     }
 
@@ -118,6 +125,7 @@ impl CompletionBackend for HttpBackend {
         let workspace = self.workspace.clone();
         let actions = self.actions.clone();
         let grants = self.grants.clone();
+        let scratch = self.scratch.clone();
         let agent = self.agent.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Arc::clone(&cancel);
@@ -131,6 +139,7 @@ impl CompletionBackend for HttpBackend {
                     workspace: workspace.as_deref(),
                     actions: actions.as_deref(),
                     caller,
+                    scratch,
                     deadline,
                 },
                 grants,
@@ -156,6 +165,11 @@ impl CompletionBackend for HttpBackend {
         });
         self.worker = Some(handle.thread().clone());
         receiver
+    }
+
+    fn reset(&mut self) {
+        self.scratch = Default::default();
+        self.grants = Default::default();
     }
 
     fn cancel(&mut self) {
@@ -203,6 +217,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
 /// Where a turn's tool policy comes from: the workspace's `ahi.tools.yaml`
 /// unless an explicit `actions` file replaces it.
 struct ToolSource<'a> {
+    scratch: crate::tools::Scratch,
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
     actions: Option<&'a Path>,
@@ -229,6 +244,7 @@ fn complete(
         protocol::emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
     let ToolSource {
+        scratch,
         workspace,
         actions,
         caller,
@@ -243,6 +259,7 @@ fn complete(
             grants,
             actions,
             TurnContext {
+                scratch,
                 mode: request.mode,
                 caller,
                 deadline,

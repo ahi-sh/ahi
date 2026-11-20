@@ -1,29 +1,5 @@
-# Shells run as your account, not in a sandbox. Unlisted actions are denied.
+# This repository uses the two built-ins, not shell allowlists.
+# Plan: inspect files, skills and Git; draft privately without changing the tree.
+# Trusted: explicitly allow host commands, workspace edits and configured workers.
 version: 2
-default_mode: development
-modes:
-  development:
-    allow:
-      tools:
-        - read_file
-        - list_dir
-        - find_files
-        - search_files
-      write_files: true
-
-      skills:
-        - "operator/*"
-      skill_scripts:
-        - "operator/*"
-        - "repo/*"
-
-      commands:
-        - programs:
-            - sh
-            - bash
-          toolchain_env:
-            - CARGO_TARGET_DIR
-        - programs:
-            - pwsh
-            - powershell
-            - cmd
+default_mode: plan

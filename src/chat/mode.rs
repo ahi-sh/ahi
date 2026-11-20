@@ -17,6 +17,7 @@ pub(super) struct Modes {
     pub dialog: Option<Dialog>,
     pub has_policy: bool,
     pub trusted: bool,
+    legacy_policy: bool,
     named: Vec<ExecutionMode>,
     query: String,
     cursor: usize,
@@ -29,6 +30,7 @@ impl Default for Modes {
             dialog: None,
             has_policy: false,
             trusted: false,
+            legacy_policy: false,
             named: Vec::new(),
             query: String::new(),
             cursor: 0,
@@ -47,6 +49,7 @@ impl Modes {
         Ok(Self {
             has_policy,
             trusted,
+            legacy_policy: installed.as_ref().is_some_and(|p| p.default_mode.is_none()),
             named: installed
                 .iter()
                 .flat_map(|p| p.named.keys().cloned().map(ExecutionMode::Named))
@@ -54,13 +57,13 @@ impl Modes {
             selected: if has_policy {
                 installed
                     .and_then(|p| p.default_mode)
-                    .map_or(ExecutionMode::Policy, ExecutionMode::Named)
+                    .map_or(ExecutionMode::Policy, workspace_mode)
             } else if trusted {
                 ExecutionMode::ReadWrite
             } else {
                 ExecutionMode::ReadOnly
             },
-            dialog: (!has_policy && !trusted).then_some(Dialog::Trust),
+            dialog: None,
             ..Self::default()
         })
     }
@@ -75,12 +78,13 @@ impl Modes {
                 .cloned()
                 .unwrap_or(ReadOnly),
             Policy => ReadOnly,
-            ReadOnly if self.has_policy || self.trusted => ReadWrite,
+            ReadOnly if self.trusted => ReadWrite,
             ReadOnly => {
                 self.dialog = Some(Dialog::Trust);
                 ReadOnly
             }
-            ReadWrite if self.has_policy => self.named.first().cloned().unwrap_or(Policy),
+            ReadWrite if self.legacy_policy => Policy,
+            ReadWrite if self.has_policy => self.named.first().cloned().unwrap_or(ReadOnly),
             ReadWrite => ReadOnly,
         };
     }
@@ -102,7 +106,7 @@ impl Modes {
     }
     fn choices(&self) -> Vec<ExecutionMode> {
         let mut modes = vec![ExecutionMode::ReadOnly, ExecutionMode::ReadWrite];
-        if self.has_policy && self.named.is_empty() {
+        if self.legacy_policy {
             modes.push(ExecutionMode::Policy);
         }
         modes.extend(self.named.iter().cloned());
@@ -119,11 +123,12 @@ impl Modes {
             None => crate::tool_policy::load(root, &crate::tools::BUILTIN)?,
         };
         if let Some(policy) = installed {
+            self.legacy_policy = policy.default_mode.is_none();
             self.named = policy.named.into_keys().map(ExecutionMode::Named).collect();
             if !self.has_policy && self.selected != ExecutionMode::ReadOnly {
                 self.selected = policy
                     .default_mode
-                    .map_or(ExecutionMode::Policy, ExecutionMode::Named);
+                    .map_or(ExecutionMode::Policy, workspace_mode);
             }
             self.has_policy = true;
         } else if self.has_policy {
@@ -151,7 +156,7 @@ impl Modes {
             KeyCode::Down if len > 0 => self.cursor = (self.cursor + 1) % len,
             KeyCode::Enter => {
                 if let Some(mode) = choices.get(self.cursor) {
-                    if *mode == ExecutionMode::ReadWrite && !self.trusted && !self.has_policy {
+                    if *mode == ExecutionMode::ReadWrite && !self.trusted {
                         self.dialog = Some(Dialog::Trust);
                     } else {
                         self.selected = mode.clone();
@@ -182,14 +187,14 @@ impl Modes {
             area.height.saturating_sub(2),
         );
         let (title, body) = match dialog {
-            Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue read-only (no commands or writes)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
+            Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue in Plan (no workspace edits or host commands)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
             Dialog::Choose => {
                 use ahi_widgets::{List, ListItem, ListState};
                 use ratatui_core::style::{Color, Style};
                 let choices = self.choices();
                 let height = popup.height.min(8).min(choices.len().max(1) as u16 + 2);
                 let popup = Rect::new(popup.x, popup.bottom().saturating_sub(height), popup.width.min(80), height);
-                let mut items: Vec<_> = choices.iter().map(|m| ListItem::new(format!("{}{}", m.label(), if m == &self.selected { "  (selected)" } else { "" }))).collect();
+                let mut items: Vec<_> = choices.iter().map(|m| ListItem::new(format!("{}{}  {}", m.label(), if m == &self.selected { "  (selected)" } else { "" }, match m { ExecutionMode::ReadOnly => "Built-in · inspect Git and draft in scratch", ExecutionMode::ReadWrite => "Built-in · host commands; bypass workspace policy", _ => "Workspace policy" }))).collect();
                 if items.is_empty() {items.push(ListItem::new("No matching modes"));}
                 let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(" Modes · filter: {} · Enter select · Esc dismiss ",self.query))).highlight_symbol("› ").highlight_style(Style::default().bg(Color::Rgb(45,65,85)));
                 frame.render_widget(Clear,popup);
@@ -204,6 +209,13 @@ impl Modes {
                 .block(Block::default().borders(Borders::ALL).title(title)),
             popup,
         );
+    }
+}
+fn workspace_mode(name: String) -> ExecutionMode {
+    if name == "plan" {
+        ExecutionMode::ReadOnly
+    } else {
+        ExecutionMode::Named(name)
     }
 }
 fn trust_path(state: &Path, root: &Path) -> PathBuf {
@@ -258,10 +270,11 @@ mod tests {
         let state = dir.join("state");
         std::fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
-        assert!(matches!(
-            Modes::startup(&root, &state, None).unwrap().dialog,
-            Some(Dialog::Trust)
-        ));
+        let mut initial = Modes::startup(&root, &state, None).unwrap();
+        assert_eq!(initial.selected, ExecutionMode::ReadOnly);
+        assert!(initial.dialog.is_none());
+        initial.cycle();
+        assert!(matches!(initial.dialog, Some(Dialog::Trust)));
         remember(&state, &root, true).unwrap();
         let mut modes = Modes::startup(&root, &state, None).unwrap();
         assert_eq!(modes.selected, ExecutionMode::ReadWrite);
@@ -283,10 +296,10 @@ mod tests {
         assert!(Modes::startup(&root, &state, None).is_err());
         remember(&state, &root, false).unwrap();
         std::fs::remove_file(root.join("ahi.tools.yaml")).unwrap();
-        assert!(matches!(
-            Modes::startup(&root, &state, None).unwrap().dialog,
-            Some(Dialog::Trust)
-        ));
+        assert_eq!(
+            Modes::startup(&root, &state, None).unwrap().selected,
+            ExecutionMode::ReadOnly
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

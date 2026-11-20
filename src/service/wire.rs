@@ -69,6 +69,14 @@ pub(crate) fn response(id: &Value, result: ServiceResult<Value>) -> Value {
 impl Event {
     pub(crate) fn to_json(&self) -> Value {
         match self {
+            Self::CommandStdout {
+                session,
+                run_id,
+                call_id,
+                bytes,
+            } => {
+                json!({"event":"command_stdout","session":session,"run_id":run_id,"call_id":call_id,"bytes":bytes})
+            }
             Self::Entry { session, entry } => {
                 json!({"event": "entry", "session": session, "entry": entry})
             }
@@ -102,6 +110,12 @@ impl Event {
     pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let text = |key: &str| value[key].as_str().map(str::to_string);
         Some(match value["event"].as_str()? {
+            "command_stdout" => Self::CommandStdout {
+                session: text("session")?,
+                run_id: text("run_id")?,
+                call_id: text("call_id")?,
+                bytes: serde_json::from_value(value.get("bytes")?.clone()).ok()?,
+            },
             "entry" => Self::Entry {
                 session: text("session")?,
                 entry: value.get("entry")?.clone(),
@@ -430,7 +444,9 @@ mod tests {
         assert_eq!(plain.client, "");
         assert_eq!(plain.mode, crate::tool_policy::ExecutionMode::Policy);
         let selected = request(json!({"mode":"read-only"})).unwrap();
-        assert_eq!(turn_params("s", &selected)["mode"], "read-only");
+        assert_eq!(turn_params("s", &selected)["mode"], "plan");
+        let trusted = request(json!({"mode":"read-write"})).unwrap();
+        assert_eq!(turn_params("s", &trusted)["mode"], "trusted");
         assert_eq!(
             request(json!({"mode":"../invalid"})).unwrap_err().kind,
             "usage"
