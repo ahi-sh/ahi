@@ -162,6 +162,9 @@ impl ChatScreen {
             .iter()
             .filter_map(|message| {
                 let speaker = match message.role {
+                    TranscriptRole::Notice if message.text.starts_with("Switched model to ") => {
+                        "Session"
+                    }
                     TranscriptRole::Operator => "You",
                     TranscriptRole::Assistant if !message.text.is_empty() => "Assistant",
                     _ => return None,
@@ -203,7 +206,7 @@ impl ChatScreen {
     /// last success.
     fn load_resumed(state_dir: &Directories, stored: session::Session) -> Self {
         let settings = stored.settings();
-        let mut messages = stored.active_messages(None);
+        let mut messages = stored.display_messages();
         if let Some(partial) = stored.partial_notice() {
             messages.push(ChatMessage::new(TranscriptRole::Notice, partial));
         }
@@ -225,7 +228,7 @@ impl ChatScreen {
             &format!("{}/{}", settings.gateway, settings.model),
             session::recorder::Recorder::new(false, "tui"),
         );
-        let mut messages = stored.active_messages(None);
+        let mut messages = stored.display_messages();
         if let Some(partial) = stored.partial_notice() {
             messages.push(ChatMessage::new(TranscriptRole::Notice, partial));
         }
@@ -241,7 +244,7 @@ impl ChatScreen {
         if let Some(level) = thinking::ThinkingLevel::parse(&settings.thinking) {
             screen.thinking = level;
         }
-        let count = messages.len();
+        let count = messages.iter().filter(|m| !m.role.is_notice()).count();
         screen.messages.extend(messages);
         screen.dirty = transcript::render::Dirty::From(0);
         screen.push_notice(format!(
@@ -429,14 +432,35 @@ impl ChatScreen {
         self.layout.len()
     }
 
+    fn choose_model(&mut self, chosen: &str, backend: &mut dyn CompletionBackend) {
+        let next = parse_selection(chosen);
+        if next == self.selection {
+            return;
+        }
+        if let Err(problem) = backend.switch_model(&self.selection, &next, self.thinking.as_str()) {
+            self.push_alert(format!("Model switch not confirmed: {problem}"));
+            return;
+        }
+        self.recorder.ensure_session(
+            &session::Store::new(&self.state_dir),
+            &self.workspace_root,
+            &self.selection,
+            self.thinking.as_str(),
+        );
+        self.set_selection(chosen);
+        self.surface_recording_failure();
+    }
+
     fn set_selection(&mut self, selection: &str) {
         let selection = parse_selection(selection);
         if selection != self.selection {
             self.meters.context_tokens = None;
             self.meters.context_window = None;
-        }
-        if selection != self.selection {
             self.recorder.model_changed(&selection);
+            self.push_message(ChatMessage::model_change(
+                &selection.gateway,
+                &selection.model,
+            ));
         }
         if selection.gateway != self.selection.gateway {
             // The transcript follows the operator to the new provider; say so
@@ -2085,7 +2109,7 @@ fn interact_screen(
                     screen.push_notice(registration.notice.clone());
                     let provider = registration.provider_id.clone();
                     match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
-                        PickerOutcome::Selected(next) => screen.set_selection(&next),
+                        PickerOutcome::Selected(next) => screen.choose_model(&next, backend),
                         PickerOutcome::Back => {}
                         PickerOutcome::Exit => return Ok(screen.exit_output(backend)),
                     }
@@ -2099,7 +2123,7 @@ fn interact_screen(
                     _ => PickerView::Models,
                 };
                 match reopen_picker(view, &screen.selection.gateway, None)? {
-                    PickerOutcome::Selected(next) => screen.set_selection(&next),
+                    PickerOutcome::Selected(next) => screen.choose_model(&next, backend),
                     PickerOutcome::Back => {}
                     PickerOutcome::Exit => return Ok(screen.exit_output(backend)),
                 }
@@ -2759,15 +2783,17 @@ mod tests {
         let mut screen = screen_in(&state);
         // An empty transcript has nothing to disclose, at startup or later.
         screen.set_selection("home/qwen");
-        assert!(screen.messages().is_empty());
+        assert_eq!(screen.messages()[0].text, "Switched model to home/qwen");
         screen.push_message(ChatMessage::new(TranscriptRole::Operator, "hi".to_string()));
         screen.push_message(ChatMessage::new(
             TranscriptRole::Assistant,
             "hello".to_string(),
         ));
-        // Same provider, other model: nothing to disclose.
         screen.set_selection("home/llama");
-        assert_eq!(screen.messages().len(), 2);
+        assert_eq!(
+            screen.messages().last().unwrap().text,
+            "Switched model to home/llama"
+        );
         screen.set_selection("anthropic/claude-sonnet-4-5");
         let notice = screen.messages().last().unwrap();
         assert_eq!(notice.role, TranscriptRole::Notice);

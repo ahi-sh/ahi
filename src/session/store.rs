@@ -491,6 +491,37 @@ impl Session {
         ))
     }
 
+    /// Model selections are session-wide, including a switch after the last
+    /// completed turn. Interleave them with the active conversation for display
+    /// only; never replay failed-branch messages or notices into inference.
+    pub(crate) fn display_entries(&self) -> Vec<&Entry> {
+        let path = self.path_to_root(self.active_parent());
+        let mut active = path.iter().map(|entry| entry.seq).peekable();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                if active.next_if_eq(&entry.seq).is_some() {
+                    true
+                } else {
+                    matches!(entry.kind, Kind::ModelChange { .. })
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn display_messages(&self) -> Vec<ChatMessage> {
+        self.display_entries()
+            .into_iter()
+            .filter_map(|entry| match &entry.kind {
+                Kind::Message(m) => Some(m.to_chat(None)),
+                Kind::ModelChange { gateway, model } => {
+                    Some(ChatMessage::model_change(gateway, model))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The conversation a new turn continues: every message on the active
     /// path, as transcript messages for `protocol`.
     pub(crate) fn active_messages(&self, protocol: Option<Protocol>) -> Vec<ChatMessage> {

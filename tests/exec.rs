@@ -610,18 +610,22 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     drop(seats);
     let mut one = std::os::unix::net::UnixStream::connect(&socket).unwrap();
     let mut lines = BufReader::new(one.try_clone().unwrap()).lines();
-    let created: serde_json::Value = {
+    let mut kinds = Vec::new();
+    for n in 0..17 {
         writeln!(
             one,
             r#"{{"id": 1, "method": "session.create", "params": {{"cwd": "{}", "gateway": "local", "model": "vendor/model", "thinking": "off"}}}}"#,
             dir.join("work").display()
         )
         .unwrap();
-        serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
-    };
-    let sid = created["result"]["id"].as_str().unwrap().to_string();
-    let mut kinds = Vec::new();
-    for n in 0..17 {
+        let created: serde_json::Value = loop {
+            let msg: serde_json::Value =
+                serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            if msg.get("event").is_none() {
+                break msg;
+            }
+        };
+        let sid = created["result"]["id"].as_str().unwrap();
         writeln!(
             one,
             r#"{{"id": {n}, "method": "session.subscribe", "params": {{"session": "{sid}", "after": 0}}}}"#

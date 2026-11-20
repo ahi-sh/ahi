@@ -137,6 +137,17 @@ impl Recorder {
         thinking: &str,
         prompt: &str,
     ) {
+        self.ensure_session(store, cwd, selection, thinking);
+        self.begin_turn_as(super::run_id(), prompt);
+    }
+
+    pub(crate) fn ensure_session(
+        &mut self,
+        store: &Store,
+        cwd: &Path,
+        selection: &Selection,
+        thinking: &str,
+    ) {
         if !self.enabled || self.failed.is_some() {
             return;
         }
@@ -155,13 +166,9 @@ impl Recorder {
                     // announcements before the first turn have nothing to add.
                     self.pending.clear();
                 }
-                Err(err) => {
-                    self.failed = Some(err.to_string());
-                    return;
-                }
+                Err(err) => self.failed = Some(err.to_string()),
             }
         }
-        self.begin_turn_as(super::run_id(), prompt);
     }
 
     /// Open a turn with a caller's run id on a session that already exists.

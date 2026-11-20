@@ -135,11 +135,11 @@ impl ServiceBackend {
     }
 
     /// Make sure a session exists and its settings match the request.
-    fn prepare(&mut self, request: &ChatRequest) -> Result<String, String> {
+    fn prepare(&mut self, selection: &super::Selection, thinking: &str) -> Result<String, String> {
         let wanted = (
-            request.selection.gateway.clone(),
-            request.selection.model.clone(),
-            request.thinking.as_str().to_string(),
+            selection.gateway.clone(),
+            selection.model.clone(),
+            thinking.to_owned(),
         );
         let session = match &self.session {
             Some(id) => id.clone(),
@@ -209,7 +209,7 @@ impl ServiceBackend {
             crate::service::wire::require_skill_selection(&self.call("health", json!({}))?)
                 .map_err(|err| err.message)?;
         }
-        let session = self.prepare(request)?;
+        let session = self.prepare(&request.selection, request.thinking.as_str())?;
         let turn = TurnRequest {
             mode: request.mode.clone(),
             prompt: prompt.to_string(),
@@ -240,6 +240,18 @@ impl ServiceBackend {
 }
 
 impl CompletionBackend for ServiceBackend {
+    fn switch_model(
+        &mut self,
+        previous: &super::Selection,
+        next: &super::Selection,
+        thinking: &str,
+    ) -> Result<(), String> {
+        if self.session.is_none() {
+            self.prepare(previous, thinking)?;
+        }
+        self.prepare(next, thinking).map(|_| ())
+    }
+
     fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent> {
         let (sender, receiver) = mpsc::channel();
         let prompt = request

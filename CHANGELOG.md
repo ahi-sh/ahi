@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased — 0.24.0
+## 0.24.1 (2026-11-20)
+
+- Service-backed chat no longer displays a second or third copy of streamed text and tool events on successive turns. Subscribing again on the same connection replaces that session’s old event forwarder. See [#115](https://github.com/iancleary/ahi/issues/115) for the reproduction and root cause.
+- Model switches are recorded at picker selection, including switches within a gateway and switches immediately followed by quit. The TUI, exit transcript, and `ahi session show` identify the selected gateway/model; the human-readable session log also shows the switch time.
+
+## 0.24.0 (2026-11-19)
 
 - `ahi.modes.yaml` groups tool permissions into named modes. `/mode` filters and selects them; standalone and service turns enforce the selected rules. Existing `ahi.tools.yaml` policies still work. Keep exactly one workspace policy file when migrating.
 - Read-only and Read-write offer discovered repo and operator skills on demand. Operator-installed directory links are supported; read-only still refuses commands, delegation and writes.

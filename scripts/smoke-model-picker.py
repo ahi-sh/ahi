@@ -288,7 +288,7 @@ def main() -> None:
                     (repo / "SKILL.md").write_text("---\nname: repo-probe\ndescription: Repository fixture\n---\nHidden body\n")
                     advertised_skills.clear()
                     command = ("tui", "--session", sid, *options)
-                    chat = Session(state, cwd=work, columns=120, rows=35, command=command, environment={"HOME": str(home)})
+                    chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
                         chat.expect("Trust this workspace?")
                         chat.send("r")
@@ -301,6 +301,14 @@ def main() -> None:
                         chat.expect("Cleaned up the README’s introduction and organization:")
                         chat.expect("• Summarized the changes.")
                         assert chat.screen().count("Cleaned up") == 1
+                        # Reuse the same connection and model. Each subsequent
+                        # turn must add one reply, not another copy per subscriber.
+                        for turns in (2, 3):
+                            chat.send("redraw-probe\r")
+                            deadline = time.monotonic() + 8
+                            while chat.screen().count("• Summarized the changes.") < turns and time.monotonic() < deadline:
+                                chat.read()
+                            assert chat.screen().count("Cleaned up the README’s introduction and organization:") == turns, (engine, chat.screen())
                         chat.send("draft-preserved")
                         chat.send("\x1b[Z")
                         chat.expect("Trust this workspace?")
@@ -1033,6 +1041,11 @@ def main() -> None:
             session.send("/quit\r")
             output = session.finish()
             assert "Selected openai/vendor/model/variant; saved to" in output
+            restored = output.rsplit("\x1b[?1049l", 1)[-1]
+            assert "Session: Switched model to openai/fresh/from-disk" in restored
+            sid = re.search(r"Resume: ahi --session ([0-9a-f-]+)", restored).group(1)
+            shown = subprocess.check_output([binary, "--state-dir", state, "session", "show", sid], text=True)
+            assert "switched model to openai/fresh/from-disk" in shown  # quit without submitting another turn
             assert "provider openai origin" not in output
             (state / "models.json").write_bytes(original)
         finally:
