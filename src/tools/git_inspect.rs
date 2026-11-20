@@ -83,7 +83,7 @@ pub(super) fn run(
                 format!(
                     "branch {}\n",
                     head.as_ref()
-                        .and_then(|h| h.shorthand())
+                        .map(|h| h.shorthand().unwrap_or("(non-UTF-8 branch)"))
                         .unwrap_or("(unborn)")
                 )
                 .as_bytes(),
@@ -156,8 +156,16 @@ pub(super) fn run(
                 };
                 if path.is_empty() || oid(&c) != parent.as_ref().and_then(oid) {
                     found += 1;
-                    if !append(format!("{} {}\n", c.id(), c.summary().unwrap_or("")).as_bytes())
-                        || found == *count
+                    if !append(
+                        format!(
+                            "{} {}\n",
+                            c.id(),
+                            c.summary()
+                                .unwrap_or(Some("(non-UTF-8 summary)"))
+                                .unwrap_or("")
+                        )
+                        .as_bytes(),
+                    ) || found == *count
                     {
                         break;
                     }
