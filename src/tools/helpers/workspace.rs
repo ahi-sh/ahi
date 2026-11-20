@@ -13,6 +13,9 @@ pub(in crate::tools) struct OpenedRead {
 pub(crate) struct Workspace {
     pub(crate) scratch: crate::tools::Scratch,
     root: PathBuf,
+    host_paths: bool,
+    #[cfg(unix)]
+    volume: std::sync::OnceLock<std::result::Result<Box<Self>, &'static str>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     read_root: ahi_unix::directory::Directory,
     /// ahi's own state (credentials, `models.json`, catalogs). Never readable,
@@ -35,11 +38,64 @@ impl Workspace {
             .map_err(|_| Error::new("cannot open the working directory for tools"))?;
         Ok(Self {
             scratch: Default::default(),
+            host_paths: false,
+            #[cfg(unix)]
+            volume: Default::default(),
             root,
             excluded,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             read_root,
         })
+    }
+
+    pub(crate) fn allow_host_paths(&mut self) {
+        self.host_paths = true;
+    }
+
+    /// Project an absolute operand onto an existing confined volume
+    /// root. All opens, writes, walks and protected-directory checks below
+    /// continue to consume ordinary relative paths.
+    fn at_volume<T>(
+        &self,
+        path: &Path,
+        op: impl FnOnce(&Self, &str) -> std::result::Result<T, &'static str>,
+    ) -> std::result::Result<T, &'static str> {
+        if !self.host_paths
+            || !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("expected absolute path without parent traversal");
+        }
+        let volume = path.ancestors().last().ok_or("missing volume root")?;
+        let relative = path
+            .strip_prefix(volume)
+            .map_err(|_| "invalid volume path")?
+            .to_str()
+            .ok_or("invalid UTF-8")?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let open = || -> std::result::Result<Box<Self>, &'static str> {
+            let root = volume.canonicalize().map_err(|_| "cannot resolve volume")?;
+            Ok(Box::new(Self {
+                #[cfg(unix)]
+                volume: Default::default(),
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                read_root: ahi_unix::directory::Directory::open(&root)
+                    .map_err(|_| "cannot open volume")?,
+                root,
+                host_paths: false,
+                excluded: self.excluded.clone(),
+                scratch: self.scratch.clone(),
+            }))
+        };
+        // Unix has one volume anchor. Keep its no-follow descriptor across the
+        // whole turn, including parallel scans. Windows can name multiple drives.
+        #[cfg(unix)]
+        let view = self.volume.get_or_init(open).as_ref().map_err(|e| *e)?;
+        #[cfg(not(unix))]
+        let view = &open()?;
+        op(view, &relative)
     }
 
     /// Apply the shared path rules and open a regular file for reading.
@@ -50,6 +106,9 @@ impl Workspace {
         &self,
         relative: &str,
     ) -> std::result::Result<OpenedRead, &'static str> {
+        if Path::new(relative).is_absolute() {
+            return self.at_volume(Path::new(relative), Self::open_read);
+        }
         if relative.is_empty()
             || Path::new(relative)
                 .components()
@@ -114,6 +173,9 @@ impl Workspace {
         &self,
         normalized: &str,
     ) -> std::result::Result<(PathBuf, bool), &'static str> {
+        if Path::new(normalized).is_absolute() {
+            return self.at_volume(Path::new(normalized), Self::resolve_for_write);
+        }
         let (parent, name) = normalized
             .rsplit_once('/')
             .map_or(("", normalized), |(parent, name)| (parent, name));
@@ -151,6 +213,9 @@ impl Workspace {
         &self,
         normalized: &str,
     ) -> std::result::Result<PathBuf, &'static str> {
+        if Path::new(normalized).is_absolute() {
+            return self.at_volume(Path::new(normalized), Self::resolve);
+        }
         // Push components one at a time: a Windows verbatim (`\\?\`) root
         // keeps a joined `/` literally, which would never match canonically.
         let mut joined = self.root.clone();
@@ -161,7 +226,7 @@ impl Workspace {
             .canonicalize()
             .map_err(|_| "path does not exist or cannot be read")?;
         if canonical != joined || !canonical.starts_with(&self.root) {
-            return Err("path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused");
+            return Err("path must be spelled exactly as on disk; symbolic links and case variants are refused");
         }
         if self.excluded.iter().any(|dir| canonical.starts_with(dir)) {
             return Err("path is inside ahi's own directories, which tools cannot read");

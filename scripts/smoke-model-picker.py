@@ -236,7 +236,12 @@ def main() -> None:
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
                     self.wfile.flush()
                     queue_release.wait(10)
-                if prompt == "live-output":
+                if prompt == "write outside":
+                    destination = str((work.parent / "external-marker").resolve())
+                    args = json.dumps({"path": destination, "content": "confirmed outside write"})
+                    delta = {"tool_calls": [{"index": 0, "id": "external", "type": "function", "function": {"name": "write_file", "arguments": args}}]}
+                    finish = "tool_calls"
+                elif prompt == "live-output":
                     argv = ["/bin/sh", "-c", "printf 'live-%s\\n' first; while [ ! -f release-output ]; do sleep 0.05; done; printf 'live-%s\\n' last"]
                     delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
                     finish = "tool_calls"
@@ -360,6 +365,29 @@ def main() -> None:
                         chat.expect("live-last")
                         assert chat.screen().count("live-first") == 1
                         chat.send("\x0f")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("full\r")
+                        chat.expect("Full Access to this host?")
+                        chat.send("\x1b")
+                        chat.expect("Trusted · Shift+Tab")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("full\r")
+                        chat.expect("Full Access to this host?")
+                        chat.send("f")
+                        chat.expect("Full Access · Shift+Tab")
+                        chat.send("write outside\r")
+                        external = work.parent / "external-marker"
+                        deadline = time.monotonic() + 8
+                        while not external.exists() and time.monotonic() < deadline:
+                            chat.read()
+                            time.sleep(0.025)
+                        assert external.read_text() == "confirmed outside write"
+                        chat.send("\x1b[Z")
+                        chat.expect("Plan · Shift+Tab")
+                        chat.send("\x1b[Z")
+                        chat.expect("Trusted · Shift+Tab")
                         # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")

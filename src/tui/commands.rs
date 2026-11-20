@@ -79,7 +79,7 @@ const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         command: "/mode",
         label: "Execution mode",
-        description: "Choose built-in Plan, Trusted, or a workspace mode",
+        description: "Choose built-in Plan, Trusted, Full Access, or a workspace mode",
         aliases: &[],
         action: None,
         contexts: CHAT_CONTEXTS,

@@ -204,6 +204,12 @@ impl ServiceBackend {
                         .into(),
                 );
             }
+            // An older service would parse `full-access` as a workspace mode
+            // name and fail, or worse, a future one might read it differently.
+            // Refuse before submitting unless the service names the capability.
+            if request.mode.host_paths() {
+                crate::service::wire::require_full_access(&health).map_err(|err| err.message)?;
+            }
         }
         if !request.skills.is_empty() {
             crate::service::wire::require_skill_selection(&self.call("health", json!({}))?)

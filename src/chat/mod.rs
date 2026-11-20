@@ -335,7 +335,8 @@ impl ChatScreen {
         let policy = policy.ok().flatten();
         let policy = match self.modes.selected {
             crate::tool_policy::ExecutionMode::ReadWrite
-            | crate::tool_policy::ExecutionMode::ReadOnly => {
+            | crate::tool_policy::ExecutionMode::ReadOnly
+            | crate::tool_policy::ExecutionMode::FullAccess => {
                 Some(crate::tool_policy::ActionPolicy::trusted())
             }
             crate::tool_policy::ExecutionMode::Named(_) => {
@@ -550,6 +551,11 @@ impl ChatScreen {
                     (mode::Dialog::Trust, KeyCode::Char('r')) => {
                         self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
                         self.modes.dialog = None;
+                    }
+                    // Full Access is confirmed for this process only: nothing
+                    // is written to the trust store, so nothing to revoke.
+                    (mode::Dialog::FullAccess, KeyCode::Char('f')) => {
+                        self.modes.confirm_full_access();
                     }
                     (mode::Dialog::Choose, code) => self.modes.picker_key(code),
                     _ => {}

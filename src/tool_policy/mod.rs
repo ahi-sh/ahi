@@ -160,6 +160,59 @@ pub(crate) fn normalize_relative_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Lexically normalize an absolute host path to `/a/b/c` form (on Windows,
+/// `C:/a/b/c`). Only Full Access accepts these; every other mode never calls
+/// this. Refuses relative paths, `..` components, backslashes on
+/// Unix, NUL, control characters, and invisible formatting characters, for
+/// the same reasons as `normalize_relative_path`. Duplicate separators are
+/// collapsed. A policy key, not a containment proof: the caller still checks
+/// the canonical path before touching the filesystem.
+pub(crate) fn normalize_host_path(path: &str) -> Option<String> {
+    if path
+        .chars()
+        .any(|c| c.is_control() || is_invisible_format(c))
+    {
+        return None;
+    }
+    if cfg!(not(windows)) && path.contains('\\') {
+        return None;
+    }
+    let mut components = Path::new(path).components();
+    let mut out = String::new();
+    match components.next()? {
+        Component::RootDir if !cfg!(windows) => {}
+        #[cfg(windows)]
+        Component::Prefix(prefix) => {
+            use std::path::Prefix;
+            let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+                return None;
+            };
+            out.push(char::from(drive));
+            out.push(':');
+            if !matches!(components.next(), Some(Component::RootDir)) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    for part in components {
+        let Component::Normal(name) = part else {
+            return None;
+        };
+        let name = name.to_str()?;
+        #[cfg(windows)]
+        if name.contains([':', '/', '\\']) || name.ends_with(['.', ' ']) {
+            return None;
+        }
+        out.push('/');
+        out.push_str(name);
+    }
+    if out.is_empty() || (cfg!(windows) && out.ends_with(':')) {
+        out.push('/');
+    }
+    Some(out)
+}
+
 /// Bidirectional controls, zero-width characters, and similar `Cf` code points.
 fn is_invisible_format(c: char) -> bool {
     matches!(c,
@@ -544,6 +597,45 @@ mod tests {
         }
         assert!(path_within("", "anything"));
         assert!(path_within("src", "src"));
+        #[cfg(unix)]
+        assert_eq!(normalize_host_path("/").as_deref(), Some("/"));
+        #[cfg(unix)]
+        for same in ["//etc///hosts/", "/etc/./hosts"] {
+            assert_eq!(normalize_host_path(same).as_deref(), Some("/etc/hosts"));
+        }
+        for bad in [
+            "",
+            "etc/hosts",
+            "./x",
+            "/etc/../shadow",
+            "/a\0b",
+            "/a\nb",
+            "/a\u{202E}b",
+            "/\u{200B}x",
+        ] {
+            assert_eq!(normalize_host_path(bad), None, "{bad:?}");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(normalize_host_path("/a\\b"), None);
+        #[cfg(windows)]
+        {
+            assert_eq!(normalize_host_path(r"C:\").as_deref(), Some("C:/"));
+            assert_eq!(
+                normalize_host_path(r"C:\work\todo").as_deref(),
+                Some("C:/work/todo")
+            );
+            for bad in [
+                r"C:relative",
+                r"\rooted",
+                r"\\server\share\f",
+                r"\\.\pipe\f",
+                r"C:\work\f:stream",
+            ] {
+                assert_eq!(normalize_host_path(bad), None);
+            }
+        }
+        assert!(path_within("/etc", "/etc/hosts"));
+        assert!(!path_within("/etc", "/etcx/hosts"));
         assert!(path_within("src", "src/a"));
         assert!(!path_within("src", "srcx/a"));
     }

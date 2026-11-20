@@ -1068,6 +1068,63 @@ fn read_only_blocks_effects_even_under_a_permissive_policy_and_read_write_is_exp
 }
 
 #[test]
+fn full_access_alone_lets_file_tools_name_host_paths_and_says_so_in_schemas() {
+    let outside = crate::fixture_directory::create_unique_fixture_directory("chat-host")
+        .canonicalize()
+        .unwrap();
+    fs::write(outside.join("notes.txt"), "host-only\n").unwrap();
+    let outside_file = outside.join("notes.txt").to_str().unwrap().to_string();
+    for mode in [
+        crate::tool_policy::ExecutionMode::ReadWrite,
+        crate::tool_policy::ExecutionMode::FullAccess,
+    ] {
+        let calls = vec![
+            ("inside", "read_file", json!({"path":"src/a.rs"})),
+            ("outside", "read_file", json!({"path": outside_file})),
+            (
+                "dotdot",
+                "read_file",
+                json!({"path": "/definitely/../nowhere"}),
+            ),
+        ];
+        let (url, server) = server_sequence(vec![calls_stream(&calls), text_stream("done")]);
+        // Both built-ins bypass the custom rules the same way; the only
+        // difference under test is the path contract.
+        let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id":"vendor/model"}));
+        let mut input = request();
+        input.mode = mode.clone();
+        let (events, _) = collect_answering(&mut fixture.backend(), input, vec![]);
+        let outcomes = results(&events);
+        assert!(outcomes[0].2.contains("fn a() {}"), "{mode:?}");
+        if mode == crate::tool_policy::ExecutionMode::FullAccess {
+            assert_eq!(outcomes[1].1, 0, "{mode:?}: {}", outcomes[1].2);
+            assert!(outcomes[1].2.contains("host-only"));
+        } else {
+            assert_eq!(outcomes[1].1, 1, "{mode:?}: {}", outcomes[1].2);
+            assert!(outcomes[1].2.contains("relative to the working directory"));
+        }
+        // An absolute path the lexical step cannot normalize fails the same
+        // way in both; nothing on disk is consulted for it.
+        assert_eq!(outcomes[2].1, 1);
+        let requests = server.join().unwrap();
+        let tools = request_body(&requests[0])["tools"].clone();
+        let read_file = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "read_file")
+            .unwrap();
+        let description = read_file["function"]["description"].as_str().unwrap();
+        assert_eq!(
+            description.contains("absolute host path"),
+            mode == crate::tool_policy::ExecutionMode::FullAccess,
+            "{mode:?}: {description}"
+        );
+    }
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
 fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());

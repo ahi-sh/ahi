@@ -78,13 +78,7 @@ pub(super) fn run(
     let files: Vec<&str> = tree
         .files()
         .filter(|path| match &glob {
-            Some(glob) => {
-                let below = path
-                    .strip_prefix(relative)
-                    .and_then(|r| r.strip_prefix('/'))
-                    .unwrap_or(path);
-                glob.matches(below)
-            }
+            Some(glob) => glob.matches(walk::below(path, relative)),
             None => true,
         })
         .collect();
