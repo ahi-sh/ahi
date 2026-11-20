@@ -187,6 +187,17 @@ pub(in crate::tools) fn walk(
     Ok(tree)
 }
 
+/// The part of a walked `path` below the searched directory `base`, so a
+/// glob written for `src/` matches the same from the root, from `src`, and
+/// under Full Access from an absolute directory including `/` itself.
+pub(in crate::tools) fn below<'a>(path: &'a str, base: &str) -> &'a str {
+    match path.strip_prefix(base) {
+        Some(rest) if base.is_empty() || base.ends_with('/') => rest,
+        Some(rest) => rest.strip_prefix('/').unwrap_or(path),
+        None => path,
+    }
+}
+
 struct Child {
     rel: String,
     abs: PathBuf,
@@ -301,9 +312,14 @@ fn read_children(
     Ok(())
 }
 
+/// `base` is the walked directory as the model names it: `""` for the
+/// workspace root, a relative prefix, or under Full Access an absolute host
+/// path, where the filesystem root `/` already ends with the separator.
 fn join(base: &str, rest: &str) -> String {
     if base.is_empty() {
         rest.to_string()
+    } else if base.ends_with('/') {
+        format!("{base}{rest}")
     } else {
         let mut joined = String::with_capacity(base.len() + 1 + rest.len());
         joined.push_str(base);
@@ -355,5 +371,18 @@ mod tests {
         tree.append(other);
         assert_eq!(tree.len(), 4);
         assert_eq!(tree.entries().last().unwrap().relative, "z");
+    }
+
+    #[test]
+    fn join_handles_the_root_prefixes_the_tools_pass() {
+        assert_eq!(join("", "a"), "a");
+        assert_eq!(join("src", "a"), "src/a");
+        assert_eq!(join("/", "etc"), "/etc");
+        assert_eq!(join("/etc", "hosts"), "/etc/hosts");
+        assert_eq!(below("src/a.rs", ""), "src/a.rs");
+        assert_eq!(below("src/deep/a.rs", "src"), "deep/a.rs");
+        assert_eq!(below("srcx/a.rs", "src"), "srcx/a.rs");
+        assert_eq!(below("/etc/hosts", "/"), "etc/hosts");
+        assert_eq!(below("/etc/ssh/config", "/etc"), "ssh/config");
     }
 }

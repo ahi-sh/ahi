@@ -26,11 +26,7 @@ pub(super) fn run(
     for entry in tree.entries() {
         // Match against the path below the searched directory, so a pattern
         // written for `src/` works the same from the root and from `src`.
-        let below = entry
-            .relative
-            .strip_prefix(relative)
-            .and_then(|r| r.strip_prefix('/'))
-            .unwrap_or(entry.relative);
+        let below = walk::below(entry.relative, relative);
         if !glob.matches(below) {
             continue;
         }

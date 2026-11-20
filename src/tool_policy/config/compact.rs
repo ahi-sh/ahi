@@ -80,7 +80,7 @@ impl Modes {
             if !crate::precommit::policy::valid_rule_id(&name)
                 || matches!(
                     name.as_str(),
-                    "plan" | "trusted" | "read-only" | "read-write" | "policy"
+                    "plan" | "trusted" | "full-access" | "read-only" | "read-write" | "policy"
                 )
             {
                 return Err(Error::new(format!(

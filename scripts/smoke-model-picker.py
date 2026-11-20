@@ -236,7 +236,12 @@ def main() -> None:
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
                     self.wfile.flush()
                     queue_release.wait(10)
-                if prompt == "live-output":
+                if prompt == "write outside":
+                    destination = str((work.parent / "external-marker").resolve())
+                    args = json.dumps({"path": destination, "content": "confirmed outside write"})
+                    delta = {"tool_calls": [{"index": 0, "id": "external", "type": "function", "function": {"name": "write_file", "arguments": args}}]}
+                    finish = "tool_calls"
+                elif prompt == "live-output":
                     argv = ["/bin/sh", "-c", "printf 'live-%s\\n' first; while [ ! -f release-output ]; do sleep 0.05; done; printf 'live-%s\\n' last"]
                     delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
                     finish = "tool_calls"
@@ -294,7 +299,7 @@ def main() -> None:
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
-                        chat.expect("Plan · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab to review trust")
                         chat.absent("Trust this workspace?")
                         redraw_release.clear()
                         chat.send("redraw-probe\r")
@@ -316,18 +321,18 @@ def main() -> None:
                         chat.send("\x1b[Z")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Shift+Tab")
+                        chat.expect("Trusted · Shift+Tab for Plan")
                         chat.expect("draft-preserved")
                         assert len(list((state / "workspace-trust").iterdir())) == 1
                         assert not (work / "ahi.tools.yaml").exists()
                         chat.send("\x1b[Z")
-                        chat.expect("Plan · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab for Trusted")
                         chat.send("\r")
                         chat.expect("mode-fixture-complete")
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
                         chat.send("\x1b[Z")
-                        chat.expect("Trusted · Shift+Tab")
+                        chat.expect("Trusted · Shift+Tab for Plan")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
                         deadline = time.monotonic() + 5
@@ -360,6 +365,29 @@ def main() -> None:
                         chat.expect("live-last")
                         assert chat.screen().count("live-first") == 1
                         chat.send("\x0f")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("full\r")
+                        chat.expect("Full Access to this host?")
+                        chat.send("\x1b")
+                        chat.expect("Trusted · Shift+Tab for Plan")
+                        chat.send("/mode\r")
+                        chat.expect("Enter select · Esc dismiss")
+                        chat.send("full\r")
+                        chat.expect("Full Access to this host?")
+                        chat.send("f")
+                        chat.expect("Full Access · Shift+Tab for Plan")
+                        chat.send("write outside\r")
+                        external = work.parent / "external-marker"
+                        deadline = time.monotonic() + 8
+                        while not external.exists() and time.monotonic() < deadline:
+                            chat.read()
+                            time.sleep(0.025)
+                        assert external.read_text() == "confirmed outside write"
+                        chat.send("\x1b[Z")
+                        chat.expect("Plan · Shift+Tab for Trusted")
+                        chat.send("\x1b[Z")
+                        chat.expect("Trusted · Shift+Tab for Plan")
                         # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
@@ -377,7 +405,7 @@ def main() -> None:
                         while not (work / "marker").exists():
                             chat.read()
                             assert time.monotonic() < deadline
-                        chat.expect("Plan · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab for Trusted")
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
@@ -393,16 +421,21 @@ def main() -> None:
                     (work / "ahi.modes.yaml").write_text(policy)
                     chat = Session(state, cwd=work, columns=120, rows=35, command=command)
                     try:
-                        chat.expect("review · Shift+Tab")
+                        chat.expect("review · Shift+Tab for Plan")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")
-                        chat.expect("Plan · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab to review trust")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("\x1b[Z")
                         chat.expect("Trust this workspace?")
+                        chat.send("\x1b")
+                        chat.absent("Trust this workspace?")
+                        chat.expect("Plan · Shift+Tab to review trust")
+                        chat.send("\x1b[Z")
+                        chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Shift+Tab")
+                        chat.expect("Trusted · Shift+Tab for editing")
                         chat.absent("Bypass tool policy")
                         chat.send("permissive policy bypass\r")
                         deadline = time.monotonic() + 5
@@ -412,15 +445,15 @@ def main() -> None:
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("\x1b[Z")
-                        chat.expect("editing · Shift+Tab")
+                        chat.expect("editing · Shift+Tab for review")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("review\r")
-                        chat.expect("review · Shift+Tab")
+                        chat.expect("review · Shift+Tab for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("edit\r")
-                        chat.expect("editing · Shift+Tab")
+                        chat.expect("editing · Shift+Tab for review")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("named permission check\r")
@@ -971,8 +1004,7 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("─ / commands ")
-            initial_mode = "Plan"
-            assert f"{initial_mode} · Shift+Tab · /mode" in rows[-2]
+            assert "Plan · Shift+Tab to review trust · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # The configured inset is two cells; default vertical padding is one row.

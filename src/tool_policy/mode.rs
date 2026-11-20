@@ -11,6 +11,11 @@ pub(crate) enum ExecutionMode {
     ReadOnly,
     #[serde(rename = "trusted", alias = "read-write")]
     ReadWrite,
+    /// Trusted, plus file tools on absolute host paths. Built in, never the
+    /// startup default, never remembered, never cycled into: the picker
+    /// confirms it for this process only.
+    #[serde(rename = "full-access")]
+    FullAccess,
     #[serde(untagged)]
     Named(String),
 }
@@ -21,8 +26,15 @@ impl ExecutionMode {
             Self::Policy => "Policy",
             Self::ReadOnly => "Plan",
             Self::ReadWrite => "Trusted",
+            Self::FullAccess => "Full Access",
             Self::Named(name) => name,
         }
+    }
+    /// Whether file tools may name absolute paths outside the working
+    /// directory. Only Full Access does; every other mode keeps the
+    /// workspace-relative contract.
+    pub(crate) fn host_paths(&self) -> bool {
+        matches!(self, Self::FullAccess)
     }
     pub(crate) fn allows(&self, tool: &str) -> bool {
         self != &Self::ReadOnly
@@ -100,6 +112,35 @@ impl ActionPolicy {
         Self {
             rules,
             ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_access_is_a_distinct_built_in_mode_on_the_wire() {
+        let mode: ExecutionMode = serde_json::from_value(serde_json::json!("full-access")).unwrap();
+        assert_eq!(mode, ExecutionMode::FullAccess);
+        assert_eq!(serde_json::to_value(&mode).unwrap(), "full-access");
+        assert_eq!(mode.label(), "Full Access");
+        assert!(mode.host_paths());
+        assert!(mode.allows("write_file") && mode.allows("run_command"));
+        for other in [
+            ExecutionMode::Policy,
+            ExecutionMode::ReadOnly,
+            ExecutionMode::ReadWrite,
+            ExecutionMode::Named("full_access".into()),
+        ] {
+            assert!(!other.host_paths(), "{other:?}");
+        }
+        // Legacy aliases never resolve to Full Access.
+        for legacy in ["read-write", "trusted"] {
+            let mode: ExecutionMode =
+                serde_json::from_value(serde_json::Value::String(legacy.into())).unwrap();
+            assert_eq!(mode, ExecutionMode::ReadWrite, "{legacy}");
         }
     }
 }

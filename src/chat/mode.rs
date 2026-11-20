@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 pub(super) enum Dialog {
     Trust,
     Choose,
+    /// Confirms the built-in Full Access choice for this process only. It is
+    /// reached from the picker alone: never from startup, Shift+Tab, or a
+    /// policy, and confirming it records nothing on disk.
+    FullAccess,
 }
 
 pub(super) struct Modes {
@@ -67,9 +71,10 @@ impl Modes {
             ..Self::default()
         })
     }
-    pub fn cycle(&mut self) {
+    // None means the next key opens the trust prompt, not a mode switch.
+    fn cycle_target(&self) -> Option<ExecutionMode> {
         use ExecutionMode::*;
-        self.selected = match &self.selected {
+        Some(match &self.selected {
             Named(_) => self
                 .named
                 .iter()
@@ -79,14 +84,25 @@ impl Modes {
                 .unwrap_or(ReadOnly),
             Policy => ReadOnly,
             ReadOnly if self.trusted => ReadWrite,
-            ReadOnly => {
-                self.dialog = Some(Dialog::Trust);
-                ReadOnly
-            }
+            ReadOnly => return None,
             ReadWrite if self.legacy_policy => Policy,
             ReadWrite if self.has_policy => self.named.first().cloned().unwrap_or(ReadOnly),
             ReadWrite => ReadOnly,
-        };
+            // Leaving Full Access is one key; entering it never is.
+            FullAccess => ReadOnly,
+        })
+    }
+    pub fn cycle_hint(&self) -> String {
+        self.cycle_target().map_or_else(
+            || "Shift+Tab to review trust".into(),
+            |mode| format!("Shift+Tab for {}", mode.label()),
+        )
+    }
+    pub fn cycle(&mut self) {
+        match self.cycle_target() {
+            Some(target) => self.selected = target,
+            None => self.dialog = Some(Dialog::Trust),
+        }
     }
     pub fn color(&self) -> ratatui_core::style::Color {
         use ratatui_core::style::Color;
@@ -94,6 +110,15 @@ impl Modes {
             ExecutionMode::Policy | ExecutionMode::Named(_) => Color::Cyan,
             ExecutionMode::ReadOnly => Color::Blue,
             ExecutionMode::ReadWrite => Color::Yellow,
+            ExecutionMode::FullAccess => Color::Red,
+        }
+    }
+    /// The picker's Full Access confirmation was accepted. Selected for the
+    /// next turn of this process; nothing is remembered.
+    pub fn confirm_full_access(&mut self) {
+        if matches!(self.dialog, Some(Dialog::FullAccess)) {
+            self.selected = ExecutionMode::FullAccess;
+            self.dialog = None;
         }
     }
     pub fn status(&self) -> String {
@@ -105,7 +130,11 @@ impl Modes {
         }
     }
     fn choices(&self) -> Vec<ExecutionMode> {
-        let mut modes = vec![ExecutionMode::ReadOnly, ExecutionMode::ReadWrite];
+        let mut modes = vec![
+            ExecutionMode::ReadOnly,
+            ExecutionMode::ReadWrite,
+            ExecutionMode::FullAccess,
+        ];
         if self.legacy_policy {
             modes.push(ExecutionMode::Policy);
         }
@@ -158,6 +187,10 @@ impl Modes {
                 if let Some(mode) = choices.get(self.cursor) {
                     if *mode == ExecutionMode::ReadWrite && !self.trusted {
                         self.dialog = Some(Dialog::Trust);
+                    } else if *mode == ExecutionMode::FullAccess {
+                        // Always confirmed, even when already selected or
+                        // the workspace is trusted: trust is not host access.
+                        self.dialog = Some(Dialog::FullAccess);
                     } else {
                         self.selected = mode.clone();
                         self.dialog = None;
@@ -188,13 +221,14 @@ impl Modes {
         );
         let (title, body) = match dialog {
             Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue in Plan (no workspace edits or host commands)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
+            Dialog::FullAccess => (" Full Access to this host? ", format!("{}\n\nFile tools may read and change files outside this workspace on the host running the turn. File contents may be sent to the model provider. Commands have the same host access as in Trusted.\n\n[f] Use Full Access for this session (not remembered)\n[Esc] Cancel\n\nNothing is stored; Shift+Tab or /mode leaves it.", root.display())),
             Dialog::Choose => {
                 use ahi_widgets::{List, ListItem, ListState};
                 use ratatui_core::style::{Color, Style};
                 let choices = self.choices();
                 let height = popup.height.min(8).min(choices.len().max(1) as u16 + 2);
                 let popup = Rect::new(popup.x, popup.bottom().saturating_sub(height), popup.width.min(80), height);
-                let mut items: Vec<_> = choices.iter().map(|m| ListItem::new(format!("{}{}  {}", m.label(), if m == &self.selected { "  (selected)" } else { "" }, match m { ExecutionMode::ReadOnly => "Built-in · inspect Git and draft in scratch", ExecutionMode::ReadWrite => "Built-in · host commands; bypass workspace policy", _ => "Workspace policy" }))).collect();
+                let mut items: Vec<_> = choices.iter().map(|m| ListItem::new(format!("{}{}  {}", m.label(), if m == &self.selected { "  (selected)" } else { "" }, match m { ExecutionMode::ReadOnly => "Built-in · inspect Git and draft in scratch", ExecutionMode::ReadWrite => "Built-in · host commands; bypass workspace policy", ExecutionMode::FullAccess => "Built-in · Trusted plus files anywhere on this host; confirm each session", _ => "Workspace policy" }))).collect();
                 if items.is_empty() {items.push(ListItem::new("No matching modes"));}
                 let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(" Modes · filter: {} · Enter select · Esc dismiss ",self.query))).highlight_symbol("› ").highlight_style(Style::default().bg(Color::Rgb(45,65,85)));
                 frame.render_widget(Clear,popup);
@@ -300,6 +334,104 @@ mod tests {
             Modes::startup(&root, &state, None).unwrap().selected,
             ExecutionMode::ReadOnly
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_names_the_next_available_mode_or_the_trust_prompt() {
+        use ExecutionMode::*;
+        let mut modes = Modes {
+            selected: ReadOnly,
+            ..Default::default()
+        };
+        assert_eq!(modes.cycle_hint(), "Shift+Tab to review trust");
+        modes.cycle();
+        assert!(matches!(modes.dialog, Some(Dialog::Trust)));
+        modes.trusted = true;
+        modes.dialog = None;
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Trusted");
+        modes.cycle();
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
+        modes.has_policy = true;
+        modes.named = vec![Named("dev".into()), Named("review".into())];
+        for (hint, target) in [
+            ("Shift+Tab for dev", Named("dev".into())),
+            ("Shift+Tab for review", Named("review".into())),
+            ("Shift+Tab for Plan", ReadOnly),
+        ] {
+            assert_eq!(modes.cycle_hint(), hint);
+            modes.cycle();
+            assert_eq!(modes.selected, target);
+        }
+        modes.selected = FullAccess;
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
+    }
+
+    #[test]
+    fn full_access_is_picked_and_confirmed_never_cycled_defaulted_or_remembered() {
+        use crossterm::event::KeyCode;
+        let dir = crate::fixture_directory::create_unique_fixture_directory("full-access-mode");
+        let root = dir.join("work");
+        let state = dir.join("state");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        // Trust is remembered; Full Access still needs its own confirmation.
+        remember(&state, &root, true).unwrap();
+        let mut modes = Modes::startup(&root, &state, None).unwrap();
+        assert_eq!(modes.selected, ExecutionMode::ReadWrite);
+        // Shift+Tab never lands on Full Access, from any mode.
+        for _ in 0..6 {
+            modes.cycle();
+            assert_ne!(modes.selected, ExecutionMode::FullAccess);
+        }
+        // The picker lists it after the two other built-ins, and Enter opens
+        // the confirmation instead of selecting.
+        modes.open_picker();
+        assert_eq!(
+            modes.choices(),
+            [
+                ExecutionMode::ReadOnly,
+                ExecutionMode::ReadWrite,
+                ExecutionMode::FullAccess
+            ]
+        );
+        for c in "full".chars() {
+            modes.picker_key(KeyCode::Char(c));
+        }
+        assert_eq!(modes.choices(), [ExecutionMode::FullAccess]);
+        modes.picker_key(KeyCode::Enter);
+        assert!(matches!(modes.dialog, Some(Dialog::FullAccess)));
+        assert_ne!(modes.selected, ExecutionMode::FullAccess);
+        // Cancelling (the screen clears the dialog on Esc) leaves it unselected,
+        // and confirming without the dialog open is a no-op.
+        modes.dialog = None;
+        modes.confirm_full_access();
+        assert_eq!(modes.selected, ExecutionMode::ReadWrite);
+        // The cursor opens on the selected mode (Trusted); one step down.
+        modes.open_picker();
+        modes.picker_key(KeyCode::Down);
+        modes.picker_key(KeyCode::Enter);
+        assert!(matches!(modes.dialog, Some(Dialog::FullAccess)));
+        modes.confirm_full_access();
+        assert_eq!(modes.selected, ExecutionMode::FullAccess);
+        assert!(modes.dialog.is_none());
+        assert_eq!(modes.status(), "Full Access");
+        assert_eq!(modes.color(), ratatui_core::style::Color::Red);
+        // One Shift+Tab leaves it, and a fresh start never selects it: only
+        // workspace trust was stored.
+        modes.cycle();
+        assert_eq!(modes.selected, ExecutionMode::ReadOnly);
+        assert_eq!(
+            Modes::startup(&root, &state, None).unwrap().selected,
+            ExecutionMode::ReadWrite
+        );
+        // A workspace policy cannot name the built-in as a mode.
+        std::fs::write(
+            root.join("ahi.modes.yaml"),
+            "version: 2\ndefault_mode: full-access\nmodes:\n  full-access:\n    allow:\n      tools: [read_file]\n",
+        )
+        .unwrap();
+        assert!(Modes::startup(&root, &state, None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

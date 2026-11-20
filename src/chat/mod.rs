@@ -335,7 +335,8 @@ impl ChatScreen {
         let policy = policy.ok().flatten();
         let policy = match self.modes.selected {
             crate::tool_policy::ExecutionMode::ReadWrite
-            | crate::tool_policy::ExecutionMode::ReadOnly => {
+            | crate::tool_policy::ExecutionMode::ReadOnly
+            | crate::tool_policy::ExecutionMode::FullAccess => {
                 Some(crate::tool_policy::ActionPolicy::trusted())
             }
             crate::tool_policy::ExecutionMode::Named(_) => {
@@ -532,7 +533,6 @@ impl ChatScreen {
                     return Ok(ScreenAction::Continue);
                 }
                 match (dialog, key.code) {
-                    (mode::Dialog::Trust, KeyCode::Esc) => return Ok(ScreenAction::Exit),
                     (_, KeyCode::Char('c'))
                         if key
                             .modifiers
@@ -550,6 +550,11 @@ impl ChatScreen {
                     (mode::Dialog::Trust, KeyCode::Char('r')) => {
                         self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
                         self.modes.dialog = None;
+                    }
+                    // Full Access is confirmed for this process only: nothing
+                    // is written to the trust store, so nothing to revoke.
+                    (mode::Dialog::FullAccess, KeyCode::Char('f')) => {
+                        self.modes.confirm_full_access();
                     }
                     (mode::Dialog::Choose, code) => self.modes.picker_key(code),
                     _ => {}
@@ -1251,8 +1256,9 @@ impl ChatScreen {
             ));
         }
         let footer = format!(
-            "─ / commands · {} · Shift+Tab · /mode{} · Ctrl+O tools",
+            "─ / commands · {} · {} · /mode{} · Ctrl+O tools",
             self.modes.status(),
+            self.modes.cycle_hint(),
             if self.modes.has_policy {
                 format!(
                     " · {}",
@@ -3227,7 +3233,7 @@ mod tests {
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2].starts_with("─ / commands "));
-        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab · /mode"));
+        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab for Plan · /mode"));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()

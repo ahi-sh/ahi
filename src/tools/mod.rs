@@ -8,6 +8,10 @@
 //! are atomic, never follow a symbolic link, and are confined to the working
 //! directory; a few paths are protected from the model whatever the rules
 //! say, because a model that could edit its own policy would have none.
+//!
+//! Under the built-in Full Access mode alone, the six file tools also accept
+//! an absolute host path. The same spelling, symlink, protected-name, state
+//! exclusion, and output rules apply there; only the anchor differs.
 
 pub(crate) mod delegate;
 mod edit_file;
@@ -42,8 +46,9 @@ pub(crate) struct ToolCall {
     pub(crate) arguments: serde_json::Map<String, Value>,
 }
 
-use crate::tool_policy::normalize_relative_path;
+use crate::tool_policy::{normalize_host_path, normalize_relative_path};
 use ahi_durable::ToolDetail;
+use std::path::Path;
 
 pub(crate) const READ_FILE: &str = "read_file";
 pub(crate) const LIST_DIR: &str = "list_dir";
@@ -85,11 +90,44 @@ pub(crate) const PROTECTED: [&str; 8] = [
     ".gitignore",
 ];
 
+/// The file tools that accept an absolute host path under Full Access.
+/// Commands keep a workspace working directory; Git inspection and the
+/// scratch draft take no host path at all.
+const FILE_TOOLS: [&str; 6] = [
+    READ_FILE,
+    LIST_DIR,
+    FIND_FILES,
+    SEARCH_FILES,
+    EDIT_FILE,
+    WRITE_FILE,
+];
+
 fn protected(path: &str) -> bool {
+    // An absolute write must not sidestep a protected name on a
+    // case-insensitive volume (including a not-yet-created file).
+    let folded;
+    let path = if Path::new(path).is_absolute() {
+        folded = path.to_ascii_lowercase();
+        &folded
+    } else {
+        path
+    };
     let name = path.rsplit('/').next().unwrap_or(path);
-    PROTECTED.contains(&name)
+    (Path::new(path).is_absolute() && matches!(name, ".agents" | ".ahi"))
+        || PROTECTED.contains(&name)
         || path.split('/').any(|part| part == ".git")
         || crate::skills::protected_write(path)
+        || (Path::new(path).is_absolute() && host_skill_root(path))
+}
+
+/// An absolute path at or below any `.agents/skills` or `.ahi/skills`
+/// directory, such as the operator's own skill root: a model with host
+/// access must not author a skill it later loads, either.
+fn host_skill_root(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts
+        .windows(2)
+        .any(|pair| matches!(pair, [".agents" | ".ahi", "skills"]))
 }
 
 /// Arguments beyond the path, already validated.
@@ -252,10 +290,31 @@ pub(crate) struct ToolSchema {
 
 /// Schemas for the enabled builtins, in builtin order. `skills` are the
 /// approved, valid skills the `load_skill` description lists: the only
-/// skill text in a request before a load.
-pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Vec<ToolSchema> {
+/// skill text in a request before a load. `host_paths` is Full Access: the
+/// file tools then say they also take an absolute host path.
+pub(super) fn schemas(
+    enabled: &[String],
+    skills: &[crate::skills::Skill],
+    host_paths: bool,
+) -> Vec<ToolSchema> {
     let string = |description: &str| json!({"type": "string", "description": description});
     let integer = |description: &str, minimum: usize| json!({"type": "integer", "minimum": minimum, "description": description});
+    // Where a file tool may point, for the descriptions below.
+    let inside = if host_paths {
+        "inside the working directory or at an absolute host path"
+    } else {
+        "inside the working directory"
+    };
+    let file_path = if host_paths {
+        "File path relative to the working directory, or an absolute host path spelled exactly as on disk"
+    } else {
+        "File path relative to the working directory"
+    };
+    let dir_path = if host_paths {
+        "Directory relative to the working directory, or an absolute host path; defaults to '.'"
+    } else {
+        "Directory relative to the working directory; defaults to '.'"
+    };
     BUILTIN
         .iter()
         .filter(|name| enabled.iter().any(|tool| tool == *name))
@@ -277,11 +336,11 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             READ_FILE => ToolSchema {
                 name: READ_FILE,
-                description: "Read a UTF-8 text file inside the working directory, whole or a window of lines. Output is capped at 64 KiB; a tail line names the next offset when more remains.".into(),
+                description: format!("Read a UTF-8 text file {inside}, whole or a window of lines. Output is capped at 64 KiB; a tail line names the next offset when more remains.").into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": string("File path relative to the working directory"),
+                        "path": string(file_path),
                         "offset": integer("First line to return, 1-based", 1),
                         "limit": integer("Maximum number of lines to return", 1)
                     },
@@ -291,10 +350,10 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             LIST_DIR => ToolSchema {
                 name: LIST_DIR,
-                description: "List a directory inside the working directory. Directories end with '/', symbolic links with '@'. At most 500 entries.".into(),
+                description: format!("List a directory {inside}. Directories end with '/', symbolic links with '@'. At most 500 entries.").into(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {"path": string("Directory relative to the working directory; defaults to '.'")},
+                    "properties": {"path": string(dir_path)},
                     "additionalProperties": false
                 }),
             },
@@ -305,7 +364,7 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
                     "type": "object",
                     "properties": {
                         "pattern": string("Glob: '*', '**', '?', '[abc]'"),
-                        "path": string("Directory relative to the working directory; defaults to '.'"),
+                        "path": string(dir_path),
                         "limit": integer("Maximum results", 1)
                     },
                     "required": ["pattern"],
@@ -319,7 +378,7 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
                     "type": "object",
                     "properties": {
                         "pattern": string("Regular expression, or exact text when literal is true"),
-                        "path": string("Directory relative to the working directory; defaults to '.'"),
+                        "path": string(dir_path),
                         "glob": string("Only files matching this glob, e.g. '*.rs'"),
                         "literal": {"type": "boolean", "description": "Treat pattern as exact text"},
                         "ignore_case": {"type": "boolean", "description": "Case-insensitive match"},
@@ -331,11 +390,11 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             EDIT_FILE => ToolSchema {
                 name: EDIT_FILE,
-                description: "Replace text in a UTF-8 file inside the working directory. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.".into(),
+                description: format!("Replace text in a UTF-8 file {inside}. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.").into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": string("File path relative to the working directory"),
+                        "path": string(file_path),
                         "old": string("Exact text to replace"),
                         "new": string("Replacement text"),
                         "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one"}
@@ -346,11 +405,11 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
             },
             WRITE_FILE => ToolSchema {
                 name: WRITE_FILE,
-                description: "Create a UTF-8 file inside the working directory with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.".into(),
+                description: format!("Create a UTF-8 file {inside} with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.").into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": string("File path relative to the working directory"),
+                        "path": string(file_path),
                         "content": string("Entire file content"),
                         "overwrite": {"type": "boolean", "description": "Replace an existing file"}
                     },
@@ -459,8 +518,20 @@ struct RawArguments {
 
 const INVALID: &str = "invalid tool arguments";
 
-/// Parse a call's arguments. Errors never repeat the arguments.
+/// Parse a call's arguments with the workspace-relative path contract every
+/// mode but Full Access uses. Errors never repeat the arguments.
+#[cfg(test)]
 pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
+    prepare_scoped(call, false)
+}
+
+/// Parse a call's arguments. With `host_paths` (Full Access only) the file
+/// tools also accept an absolute host path, normalized lexically like a
+/// relative one; no other tool does, and nothing on disk is consulted.
+pub(super) fn prepare_scoped(
+    call: &ToolCall,
+    host_paths: bool,
+) -> Result<PreparedCall, &'static str> {
     let tool = BUILTIN
         .into_iter()
         .find(|name| *name == call.name)
@@ -476,6 +547,12 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
     let path = match (tool, raw.path) {
         (READ_FILE, None) => return Err(INVALID),
         (_, None) => String::new(),
+        (_, Some(path))
+            if host_paths && FILE_TOOLS.contains(&tool) && Path::new(&path).is_absolute() =>
+        {
+            normalize_host_path(&path)
+                .ok_or("an absolute path must be spelled plainly, without `.` or `..`")?
+        }
         (_, Some(path)) => normalize_relative_path(&path)
             .ok_or("path must be relative to the working directory, without `..`")?,
     };
@@ -1069,6 +1146,7 @@ mod tests {
             schemas(
                 &enabled.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 &[],
+                false,
             )
             .into_iter()
             .map(|schema| schema.name.to_string())
@@ -1262,7 +1340,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err("path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused")
+                    Err("path must be spelled exactly as on disk; symbolic links and case variants are refused")
                         | Err("path does not exist or cannot be read")
                 ),
                 "{path}: {result:?}"
@@ -1277,7 +1355,7 @@ mod tests {
         {
             let listing = list(&workspace, "").unwrap();
             assert_eq!(listing, "big\nbinary\ninner@\nlink@\nsrc/\nstate/");
-            let escaped = "path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused";
+            let escaped = "path must be spelled exactly as on disk; symbolic links and case variants are refused";
             assert_eq!(read(&workspace, "link"), Err(escaped));
             assert_eq!(read(&workspace, "inner/main.rs"), Err(escaped));
         }
@@ -1623,6 +1701,238 @@ mod tests {
             Some("path is inside ahi's own directories, which tools cannot read")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_access_extends_file_tools_to_host_paths_with_the_same_rules() {
+        let (root, mut workspace) = fixture("tools-host");
+        fs::write(root.join("inside.txt"), "inside\n").unwrap();
+        let outside = crate::fixture_directory::create_unique_fixture_directory("tools-host-out")
+            .canonicalize()
+            .unwrap();
+        fs::create_dir(outside.join("sub")).unwrap();
+        fs::write(outside.join("sub/notes.txt"), "outside text\n").unwrap();
+        fs::write(outside.join("sub/data.bin"), [0u8, 1, 2]).unwrap();
+        let base = normalize_host_path(outside.to_str().unwrap()).unwrap();
+        let abs = |rel: &str| {
+            if rel.is_empty() {
+                base.clone()
+            } else {
+                format!("{base}/{rel}")
+            }
+        };
+        let state = format!(
+            "{}/state/models.json",
+            normalize_host_path(workspace.root().to_str().unwrap()).unwrap()
+        );
+        let relative_only = "path must be relative to the working directory, without `..`";
+        #[cfg(unix)]
+        let spelling =
+            "path must be spelled exactly as on disk; symbolic links and case variants are refused";
+
+        // Preparation: every other mode keeps refusing absolute paths, and
+        // under Full Access only the six file tools take one.
+        assert_eq!(
+            prepare(&call("c", READ_FILE, json!({"path": abs("sub/notes.txt")}))),
+            Err(relative_only)
+        );
+        let host = |name: &str, args: Value| prepare_scoped(&call("c", name, args), true);
+        assert_eq!(
+            host(READ_FILE, json!({"path": abs("sub//notes.txt")}))
+                .unwrap()
+                .path,
+            abs("sub/notes.txt")
+        );
+        assert_eq!(
+            host(RUN_COMMAND, json!({"argv": ["true"], "path": abs("sub")})),
+            Err(relative_only),
+            "commands keep a workspace working directory"
+        );
+        assert_eq!(
+            host(
+                "git_inspect",
+                json!({"operation": "status", "path": abs("sub")})
+            ),
+            Err(INVALID)
+        );
+        assert_eq!(
+            host(READ_FILE, json!({"path": abs("sub/../etc")})),
+            Err("an absolute path must be spelled plainly, without `.` or `..`")
+        );
+        for protected_path in [
+            abs(".gitignore"),
+            abs("ahi.modes.yaml"),
+            abs("repo/.git/config"),
+            abs("repo/.GiT/config"),
+            abs("repo/AHI.MODES.YAML"),
+            abs("home/.agents/skills/x/SKILL.md"),
+            abs("home/.ahi/skills/y"),
+        ] {
+            let error =
+                host(WRITE_FILE, json!({"path": protected_path, "content": "x"})).unwrap_err();
+            assert!(
+                error.starts_with("path is protected"),
+                "{protected_path}: {error}"
+            );
+        }
+        assert!(host(
+            READ_FILE,
+            json!({"path": abs("home/.agents/skills/x/SKILL.md")})
+        )
+        .is_ok());
+
+        // Execution: a workspace that was not unlocked never resolves an
+        // absolute path, even for a call prepared with host paths.
+        let read_abs = |workspace: &Workspace, path: &str| read(workspace, path);
+        assert!(read_abs(&workspace, &abs("sub/notes.txt")).is_err());
+        assert!(list(&workspace, &abs("sub")).is_err());
+        workspace.allow_host_paths();
+        assert_eq!(
+            read_abs(&workspace, &abs("sub/notes.txt")).unwrap(),
+            "outside text\n"
+        );
+        assert_eq!(
+            read(&workspace, "inside.txt").unwrap(),
+            "inside\n",
+            "relative paths still work"
+        );
+        assert_eq!(
+            list(&workspace, &abs("sub")).unwrap(),
+            "data.bin\nnotes.txt"
+        );
+        assert_eq!(read_abs(&workspace, &abs("sub")), Err("not a regular file"));
+        assert_eq!(
+            read_abs(&workspace, &abs("sub/missing")),
+            Err("path does not exist or cannot be read")
+        );
+        assert_eq!(
+            read_abs(&workspace, &state),
+            Err("path is inside ahi's own directories, which tools cannot read"),
+            "ahi's state stays excluded by absolute path too"
+        );
+        let find = run_text(
+            &PreparedCall {
+                tool: FIND_FILES,
+                path: abs(""),
+                arguments: Arguments::Find {
+                    pattern: "*.txt".into(),
+                    limit: 200,
+                },
+            },
+            &workspace,
+        );
+        assert_eq!(find.unwrap(), abs("sub/notes.txt"));
+        let search = run_text(
+            &PreparedCall {
+                tool: SEARCH_FILES,
+                path: abs("sub"),
+                arguments: Arguments::Search {
+                    pattern: "outside".into(),
+                    literal: true,
+                    ignore_case: false,
+                    glob: None,
+                    limit: 100,
+                },
+            },
+            &workspace,
+        );
+        assert_eq!(
+            search.unwrap(),
+            format!(
+                "{}:1:outside text\n[1 binary or oversized files skipped]",
+                abs("sub/notes.txt")
+            )
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("sub/notes.txt"), outside.join("link"))
+                .unwrap();
+            std::os::unix::fs::symlink(outside.join("sub"), outside.join("linkdir")).unwrap();
+            assert_eq!(read_abs(&workspace, &abs("link")), Err(spelling));
+            assert_eq!(
+                read_abs(&workspace, &abs("linkdir/notes.txt")),
+                Err(spelling),
+                "a link in an ancestor is refused too"
+            );
+            assert_eq!(list(&workspace, &abs("linkdir")), Err(spelling));
+        }
+        let write = |path: &str, content: &str, overwrite| {
+            run_text(
+                &PreparedCall {
+                    tool: WRITE_FILE,
+                    path: path.into(),
+                    arguments: Arguments::Write {
+                        content: content.into(),
+                        overwrite,
+                    },
+                },
+                &workspace,
+            )
+        };
+        assert_eq!(
+            write(&abs("sub/new.txt"), "fresh\n", false).unwrap(),
+            "created new.txt: 1 lines"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("sub/new.txt")).unwrap(),
+            "fresh\n"
+        );
+        assert_eq!(
+            write(&abs("missing/x.txt"), "x", false),
+            Err("path does not exist or cannot be read")
+        );
+        assert_eq!(
+            write(&abs("sub"), "x", true),
+            Err("path is not a regular file")
+        );
+        assert_eq!(
+            write(&state, "{}", true),
+            Err("path is inside ahi's own directories, which tools cannot read")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            write(&abs("link"), "x", true),
+            Err("path is a symbolic link; writes never follow links")
+        );
+        let edited = run_text(
+            &PreparedCall {
+                tool: EDIT_FILE,
+                path: abs("sub/notes.txt"),
+                arguments: Arguments::Edit {
+                    old: "outside".into(),
+                    new: "host".into(),
+                    replace_all: false,
+                },
+            },
+            &workspace,
+        );
+        assert_eq!(
+            edited.unwrap(),
+            "edited notes.txt: 1 replacement, +1 -1 lines"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("sub/notes.txt")).unwrap(),
+            "host text\n"
+        );
+        // The schemas say so only under Full Access.
+        let describe = |host_paths| {
+            schemas(
+                &[READ_FILE.to_string(), LIST_DIR.to_string()],
+                &[],
+                host_paths,
+            )
+            .into_iter()
+            .map(|schema| schema.description.into_owned())
+            .collect::<Vec<_>>()
+        };
+        assert!(describe(true)
+            .iter()
+            .all(|d| d.contains("absolute host path")));
+        assert!(describe(false)
+            .iter()
+            .all(|d| !d.contains("absolute host path")));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

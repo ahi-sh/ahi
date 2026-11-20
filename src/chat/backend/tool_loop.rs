@@ -126,7 +126,8 @@ impl ToolRuntime {
         };
         let policy = match mode {
             crate::tool_policy::ExecutionMode::ReadWrite
-            | crate::tool_policy::ExecutionMode::ReadOnly => tool_policy::ActionPolicy::trusted(),
+            | crate::tool_policy::ExecutionMode::ReadOnly
+            | crate::tool_policy::ExecutionMode::FullAccess => tool_policy::ActionPolicy::trusted(),
             crate::tool_policy::ExecutionMode::Named(_) => installed
                 .ok_or_else(|| crate::error::Error::new("workspace modes file missing"))?
                 .select(&mode)?,
@@ -137,6 +138,11 @@ impl ToolRuntime {
         };
         let mut workspace = Workspace::open(directory, state)?;
         workspace.scratch = turn.scratch.clone();
+        // Only the explicitly confirmed built-in mode unlocks host paths;
+        // a workspace policy cannot name it and trust never implies it.
+        if mode.host_paths() {
+            workspace.allow_host_paths();
+        }
         // Skills are enumerated once per turn from the turn's canonical
         // working directory (never a session header's `cwd`) and the
         // operator root; only approved names that validate are offered.
@@ -188,7 +194,7 @@ impl ToolRuntime {
             .filter(|tool| tool.as_str() != tools::LOAD_SKILL || !skills.is_empty())
             .cloned()
             .collect();
-        tools::schemas(&enabled, &skills)
+        tools::schemas(&enabled, &skills, self.mode.host_paths())
     }
 
     /// Explicit user requests are real, audited local loads before inference,
@@ -264,10 +270,12 @@ impl ToolRuntime {
     ) -> Result<Vec<ChatMessage>> {
         let mut plans: Vec<Plan> = calls
             .iter()
-            .map(|call| match tools::prepare(call) {
-                Err(message) => Plan::Done(Box::new(error(&call.name, None, message))),
-                Ok(prepared) => self.plan(prepared),
-            })
+            .map(
+                |call| match tools::prepare_scoped(call, self.mode.host_paths()) {
+                    Err(message) => Plan::Done(Box::new(error(&call.name, None, message))),
+                    Ok(prepared) => self.plan(prepared),
+                },
+            )
             .collect();
         let cancelled = self.ask(calls, &mut plans, sender)?;
         let mut messages = Vec::with_capacity(calls.len());

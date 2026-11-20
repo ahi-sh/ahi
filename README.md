@@ -296,6 +296,8 @@ boundaries.
 
 New workspaces open in **Plan** without a prompt. Plan can read the checkout, inspect Git status/diff/log, and keep one private temporary draft. It cannot edit the checkout, run commands or scripts, or delegate. **Trusted** enables those actions with your account's access, not in a sandbox; selecting it asks for trust unless already remembered. A workspace policy takes startup precedence (`default_mode` in v2, **Policy** in v1).
 
+**Full Access** is Trusted plus file tools on absolute host paths (`read_file`, `list_dir`, `find_files`, `search_files`, `edit_file`, `write_file` accept `/absolute/paths` spelled exactly as on disk). It is only reachable from `/mode`, asks for confirmation every time, is never remembered, and Shift+Tab never cycles into it. Symbolic links, ahi's own directories, protected files and output caps are enforced the same way outside the workspace; commands keep a workspace working directory.
+
 **Shift+Tab** cycles modes without changing your draft. **`/mode`** searches built-in and workspace choices. Selecting Trusted bypasses custom rules without changing the policy file. Changes during generation apply to the next turn, not an already running command. While a command runs, its stdout appears in one updating transcript block. The final result replaces that block; Ctrl+O expands captured stdout/stderr and the full write diff. **`/mode revoke`** forgets workspace trust. See
 [Workspace trust](docs/WORKSPACE_TRUST.md) for persistence, service boundaries,
 and headless behavior.

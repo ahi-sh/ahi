@@ -264,6 +264,19 @@ pub(crate) fn require_skill_selection(health: &Value) -> ServiceResult<()> {
     }
 }
 
+/// Full Access is a distinct service capability, separate from execution
+/// modes: a service that lacks it must never receive a `full-access` turn.
+pub(crate) fn require_full_access(health: &Value) -> ServiceResult<()> {
+    if health["full_access"] == true {
+        Ok(())
+    } else {
+        Err(ServiceError {
+            kind: "config",
+            message: "the session service does not support Full Access; upgrade or restart it, or choose Trusted".into(),
+        })
+    }
+}
+
 /// Encode a `TurnRequest` as `turn.submit` params.
 pub(crate) fn turn_params(session: &str, request: &TurnRequest) -> Value {
     json!({
@@ -311,6 +324,7 @@ pub(crate) fn dispatch(
             "open_turns": service.open_turns(),
             "scoped_skill_selection": true,
             "execution_modes": true,
+            "full_access": true,
         })),
         "session.list" => Ok(Value::Array(service.list_sessions()?)),
         "session.create" => {
@@ -447,6 +461,11 @@ mod tests {
         assert_eq!(turn_params("s", &selected)["mode"], "plan");
         let trusted = request(json!({"mode":"read-write"})).unwrap();
         assert_eq!(turn_params("s", &trusted)["mode"], "trusted");
+        let full = request(json!({"mode":"full-access"})).unwrap();
+        assert_eq!(full.mode, crate::tool_policy::ExecutionMode::FullAccess);
+        assert_eq!(turn_params("s", &full)["mode"], "full-access");
+        assert!(require_full_access(&json!({"execution_modes": true})).is_err());
+        assert!(require_full_access(&json!({"full_access": true})).is_ok());
         assert_eq!(
             request(json!({"mode":"../invalid"})).unwrap_err().kind,
             "usage"
