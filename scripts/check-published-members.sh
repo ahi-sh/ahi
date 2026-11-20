@@ -10,8 +10,8 @@
 #
 # For each member: read its version; if the sparse index lists it, download
 # the published .crate and compare it file by file with `cargo package`'s
-# output, ignoring the two files cargo generates (the normalized Cargo.toml
-# and .cargo_vcs_info.json). Any difference is an error naming the fix. An
+# output, ignoring Cargo's normalized manifest and VCS info, and the root
+# lockfile only for library-only packages. Any other difference is an error. An
 # unpublished version passes: it will be published. No token is needed.
 #
 # Runs in CI on every push, in cut-release.sh before anything is tagged, and
@@ -69,49 +69,7 @@ for member in "${members[@]}"; do
   cargo package --quiet --allow-dirty --no-verify --package "$name" \
     --target-dir "$work/target" >/dev/null
   local_crate="$work/target/package/${name}-${version}.crate"
-  if ! run_python "$name" "$version" "$published" "$local_crate" <<'PY'
-import hashlib
-import sys
-import tarfile
-
-name, version, published_path, local_path = sys.argv[1:5]
-prefix = f"{name}-{version}/"
-# cargo writes these two itself; everything else is the author's.
-generated = {prefix + "Cargo.toml", prefix + ".cargo_vcs_info.json"}
-
-
-def digests(path):
-    out = {}
-    with tarfile.open(path, "r:gz") as tar:
-        for member in tar.getmembers():
-            if not member.isfile() or member.name in generated:
-                continue
-            data = tar.extractfile(member).read()
-            out[member.name] = hashlib.sha256(data).hexdigest()
-    return out
-
-
-published = digests(published_path)
-local = digests(local_path)
-if published == local:
-    print(f"{name} {version}: published crate matches the tree")
-    raise SystemExit(0)
-print(f"{name} {version} is on crates.io but differs from the tree:", file=sys.stderr)
-for file in sorted(set(published) | set(local)):
-    if file not in published:
-        print(f"  added    {file}", file=sys.stderr)
-    elif file not in local:
-        print(f"  removed  {file}", file=sys.stderr)
-    elif published[file] != local[file]:
-        print(f"  changed  {file}", file=sys.stderr)
-print(
-    f"  bump `version` in crates/{name}/Cargo.toml and ahi's `{name} = {{ ..., version = \"=...\" }}` pin,\n"
-    f"  then `cargo update -p {name} --offline`; the publish script uploads the new version before ahi.",
-    file=sys.stderr,
-)
-raise SystemExit(1)
-PY
-  then
+  if ! run_python "$name" "$version" "$published" "$local_crate" < scripts/compare_published_member.py; then
     status=1
   fi
   rm -rf "$work"
