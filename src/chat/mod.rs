@@ -533,7 +533,6 @@ impl ChatScreen {
                     return Ok(ScreenAction::Continue);
                 }
                 match (dialog, key.code) {
-                    (mode::Dialog::Trust, KeyCode::Esc) => return Ok(ScreenAction::Exit),
                     (_, KeyCode::Char('c'))
                         if key
                             .modifiers
@@ -1257,8 +1256,9 @@ impl ChatScreen {
             ));
         }
         let footer = format!(
-            "─ / commands · {} · Shift+Tab · /mode{} · Ctrl+O tools",
+            "─ / commands · {} · {} · /mode{} · Ctrl+O tools",
             self.modes.status(),
+            self.modes.cycle_hint(),
             if self.modes.has_policy {
                 format!(
                     " · {}",
@@ -3233,7 +3233,7 @@ mod tests {
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2].starts_with("─ / commands "));
-        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab · /mode"));
+        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab for Plan · /mode"));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()

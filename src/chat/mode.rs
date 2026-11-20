@@ -71,9 +71,10 @@ impl Modes {
             ..Self::default()
         })
     }
-    pub fn cycle(&mut self) {
+    // None means the next key opens the trust prompt, not a mode switch.
+    fn cycle_target(&self) -> Option<ExecutionMode> {
         use ExecutionMode::*;
-        self.selected = match &self.selected {
+        Some(match &self.selected {
             Named(_) => self
                 .named
                 .iter()
@@ -83,16 +84,25 @@ impl Modes {
                 .unwrap_or(ReadOnly),
             Policy => ReadOnly,
             ReadOnly if self.trusted => ReadWrite,
-            ReadOnly => {
-                self.dialog = Some(Dialog::Trust);
-                ReadOnly
-            }
+            ReadOnly => return None,
             ReadWrite if self.legacy_policy => Policy,
             ReadWrite if self.has_policy => self.named.first().cloned().unwrap_or(ReadOnly),
             ReadWrite => ReadOnly,
             // Leaving Full Access is one key; entering it never is.
             FullAccess => ReadOnly,
-        };
+        })
+    }
+    pub fn cycle_hint(&self) -> String {
+        self.cycle_target().map_or_else(
+            || "Shift+Tab to review trust".into(),
+            |mode| format!("Shift+Tab for {}", mode.label()),
+        )
+    }
+    pub fn cycle(&mut self) {
+        match self.cycle_target() {
+            Some(target) => self.selected = target,
+            None => self.dialog = Some(Dialog::Trust),
+        }
     }
     pub fn color(&self) -> ratatui_core::style::Color {
         use ratatui_core::style::Color;
@@ -325,6 +335,36 @@ mod tests {
             ExecutionMode::ReadOnly
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_names_the_next_available_mode_or_the_trust_prompt() {
+        use ExecutionMode::*;
+        let mut modes = Modes {
+            selected: ReadOnly,
+            ..Default::default()
+        };
+        assert_eq!(modes.cycle_hint(), "Shift+Tab to review trust");
+        modes.cycle();
+        assert!(matches!(modes.dialog, Some(Dialog::Trust)));
+        modes.trusted = true;
+        modes.dialog = None;
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Trusted");
+        modes.cycle();
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
+        modes.has_policy = true;
+        modes.named = vec![Named("dev".into()), Named("review".into())];
+        for (hint, target) in [
+            ("Shift+Tab for dev", Named("dev".into())),
+            ("Shift+Tab for review", Named("review".into())),
+            ("Shift+Tab for Plan", ReadOnly),
+        ] {
+            assert_eq!(modes.cycle_hint(), hint);
+            modes.cycle();
+            assert_eq!(modes.selected, target);
+        }
+        modes.selected = FullAccess;
+        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
     }
 
     #[test]
