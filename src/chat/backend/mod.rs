@@ -127,6 +127,15 @@ pub(crate) trait CompletionBackend {
     /// proceeds, and the connection is dropped at the next read. The screen
     /// drops the receiver as well, so the turn's final event goes nowhere.
     fn cancel(&mut self) {}
+    /// Persist a picker change before another turn (or quit).
+    fn switch_model(
+        &mut self,
+        _previous: &Selection,
+        _next: &Selection,
+        _thinking: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Graceful quit: a remote turn owner must confirm its terminal record.
     fn cancel_on_exit(&mut self) -> Result<(), String> {
         self.cancel();

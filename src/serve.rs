@@ -422,10 +422,12 @@ mod unix {
             Ok(writer) => writer,
             Err(_) => return,
         }));
-        let closed = Arc::new(AtomicBool::new(false));
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
-        let mut subscriptions = 0usize;
+        // One event stream per (connection, session). A new cursor replaces
+        // the old forwarder; otherwise every turn adds another copy of each delta.
+        let mut subscriptions =
+            std::collections::HashMap::<String, (Arc<AtomicBool>, thread::JoinHandle<()>)>::new();
         loop {
             line.clear();
             match (&mut reader)
@@ -486,9 +488,13 @@ mod unix {
                 );
                 break;
             }
-            if request.method == "session.subscribe" {
-                if subscriptions >= MAX_SUBSCRIPTIONS {
-                    let _ = write_line(
+            if request.method == "session.subscribe"
+                && subscriptions.len() >= MAX_SUBSCRIPTIONS
+                && !request.params["session"]
+                    .as_str()
+                    .is_some_and(|id| subscriptions.contains_key(id))
+            {
+                let _ = write_line(
                         &writer,
                         &wire::response(
                             &request.id,
@@ -500,9 +506,7 @@ mod unix {
                             }),
                         ),
                     );
-                    continue;
-                }
-                subscriptions += 1;
+                continue;
             }
             if request.method == "shutdown" {
                 let _ = write_line(&writer, &wire::response(&request.id, Ok(json!({}))));
@@ -510,19 +514,26 @@ mod unix {
                 break;
             }
             let forward_to = Arc::clone(&writer);
-            let closed_flag = Arc::clone(&closed);
             let mut subscribe = |session: &str, receiver: Receiver<Event>| {
+                if let Some((stop, old)) = subscriptions.remove(session) {
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = old.join();
+                }
                 let writer = Arc::clone(&forward_to);
-                let closed = Arc::clone(&closed_flag);
-                let session = session.to_string();
-                thread::spawn(move || forward(session, receiver, writer, closed));
+                let stop = Arc::new(AtomicBool::new(false));
+                let closed = Arc::clone(&stop);
+                let id = session.to_owned();
+                let handle = thread::spawn(move || forward(id, receiver, writer, closed));
+                subscriptions.insert(session.to_owned(), (stop, handle));
             };
             let answer = wire::dispatch(&service, &request, &mut subscribe);
             if write_line(&writer, &wire::response(&request.id, answer)).is_err() {
                 break;
             }
         }
-        closed.store(true, Ordering::Relaxed);
+        for (stop, _) in subscriptions.into_values() {
+            stop.store(true, Ordering::Relaxed);
+        }
         drop(writer);
     }
 

@@ -62,6 +62,12 @@ pub(crate) enum ToolPayload {
 }
 
 impl ChatMessage {
+    pub(crate) fn model_change(gateway: &str, model: &str) -> Self {
+        Self::new(
+            TranscriptRole::Notice,
+            format!("Switched model to {gateway}/{model}"),
+        )
+    }
     /// A command can be delivered successfully but exit unsuccessfully.
     pub(crate) fn display_role(&self) -> TranscriptRole {
         match (&self.role, &self.detail) {

@@ -77,7 +77,11 @@ pub fn show(state: &Directories, target: &str, json: bool, branch: Option<u64>) 
         }
         None => session.active_parent(),
     };
-    let path = session.path_to_root(from);
+    let path = if branch.is_none() && !json {
+        session.display_entries()
+    } else {
+        session.path_to_root(from)
+    };
     let mut out = String::new();
     if json {
         out.push_str(&session.header().to_json().to_string());
@@ -150,7 +154,10 @@ fn render(entry: &Entry) -> String {
             turn.status.as_str(),
             entry.timestamp
         ),
-        Kind::ModelChange { gateway, model } => format!("— model {gateway}/{model}\n"),
+        Kind::ModelChange { gateway, model } => format!(
+            "— {} switched model to {gateway}/{model}\n",
+            entry.timestamp
+        ),
         Kind::ThinkingChange { level } => format!("— thinking {level}\n"),
         Kind::SkillLoad {
             name,
