@@ -25,9 +25,9 @@ path = "src/main.rs"
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
 git2 = { version = "=0.21.0", default-features = false }
-tempfile = "=3.23.0"
+tempfile = "=3.27.0"
 ahi-durable = { path = "crates/ahi-durable", version = "=0.1.0" }
-clap = { version = "=4.6.7", features = ["derive"] }
+clap = { version = "=4.6.9", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.11"
 getrandom = "=0.4.3"
@@ -41,7 +41,7 @@ ratatui-crossterm = { version = "=0.1.2", default-features = false, features = [
 ahi-widgets = { path = "crates/ahi-widgets", version = "=0.1.1" }
 # In-repo POSIX signal and process-group calls; stubs on other platforms.
 ahi-unix = { path = "crates/ahi-unix", version = "=0.4.0" }
-regex = "=1.13.1"
+regex = "=1.13.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
@@ -50,7 +50,7 @@ toml = "=1.2.1"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.3"
 ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
-yaml-rust2 = "=0.13.0"
+yaml-rust2 = "=0.13.1"
 
 # In-repo Win32 clipboard; with ahi-unix, the only unsafe code in the workspace.
 [target.'cfg(windows)'.dependencies]
