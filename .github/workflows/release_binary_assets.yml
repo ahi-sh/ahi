@@ -245,6 +245,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            architecture: macos-aarch64
+            binary_name: ahi
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
             architecture: windows-x86_64
@@ -293,7 +297,7 @@ jobs:
           archive_name="ahi-${VERSION}-${ARCHITECTURE}.tar.gz"
           mkdir -p stage release_assets
           cp "source_tree/target/${TARGET}/release/${BINARY_NAME}" "stage/${BINARY_NAME}"
-          tar -cf - -C stage "${BINARY_NAME}" | gzip -n > "release_assets/${archive_name}"
+          COPYFILE_DISABLE=1 tar -cf - -C stage "${BINARY_NAME}" | gzip -n > "release_assets/${archive_name}"
 
       - name: verify packaged binary
         shell: bash
@@ -319,7 +323,7 @@ jobs:
             echo "### ${{ matrix.target }}"
             echo
             echo '```'
-            sha256sum "release_assets/ahi-"*"-${ARCHITECTURE}.tar.gz"
+            if [[ "$RUNNER_OS" == macOS ]]; then shasum -a 256 release_assets/*.tar.gz; else sha256sum release_assets/*.tar.gz; fi
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -361,7 +365,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-sha256sums
-          path: release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-sha256sums.txt
+          path: release_assets/*-sha256sums.txt
           if-no-files-found: error
 
   attach_release_assets:
@@ -398,6 +402,7 @@ jobs:
           set -euo pipefail
           cd release_assets
           sha256sum --check "ahi-${VERSION}-sha256sums.txt"
+          sha256sum --check "ahi-${VERSION}-macos-sha256sums.txt"
 
       - name: compare existing release assets
         env:
@@ -420,6 +425,8 @@ jobs:
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-x86_64.tar.gz
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-aarch64.tar.gz
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-windows-x86_64.tar.gz
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-macos-aarch64.tar.gz
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-macos-sha256sums.txt
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-sha256sums.txt
 
       - name: upload missing release assets

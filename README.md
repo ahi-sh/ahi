@@ -17,7 +17,7 @@ cargo install ahi --locked
 ahi --version
 ```
 
-Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS prebuilt archives are not currently available.
+Run the same command again to update. Linux, Windows, and Apple Silicon Macs can skip Cargo and use the prebuilt, attested archives below.
 
 ### Linux
 
@@ -55,7 +55,15 @@ An **x86_64** archive is on the [latest release](https://github.com/iancleary/ah
 
 ### macOS
 
-Use `cargo install ahi --locked`, above. Prebuilt macOS archives and `ahi update` are deferred while GitHub-hosted ARM64 runners lack capacity; `ahi update` on macOS prints that pointer and makes no network request.
+On **Apple Silicon**, install GitHub CLI and run `gh auth login`. From the release checkout, run `bash scripts/install-macos.sh`. Or download the installer from the same tag you intend to install:
+
+```sh
+tag=v0.26.1
+curl -fLsS "https://raw.githubusercontent.com/iancleary/ahi/$tag/scripts/install-macos.sh" -o install-macos.sh
+bash install-macos.sh "$tag"
+```
+
+The script verifies GitHub attestations and the checksum before installing to `~/.local/bin/ahi` without sudo. Set `AHI_INSTALL_DIR` to override the destination. Run `command -v ahi` to check that your shell selects this copy, then use `ahi update` for later releases. On Intel Macs, continue using `cargo install ahi --locked`.
 
 ## Getting started
 
@@ -245,7 +253,7 @@ Exit 1. They are the hook shim commands and are not implemented. Top-level `inst
 
 ### ahi update
 
-Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`.
+Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, windows-x86_64, and macos-aarch64; other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`.
 
 Installation and the manual verification steps are under [Installation](#installation) and [Verifying downloads](#verifying-downloads).
 
@@ -531,14 +539,16 @@ On Unix every `ahi` directory ahi creates is mode `0700`, and every file it writ
 
 ## Verifying downloads
 
-A published GitHub release for tag `v<version>` carries four assets. `<version>` is the SemVer string without the leading `v` (tag `v0.6.0` uses `0.6.0`).
+A published GitHub release for tag `v<version>` with Apple Silicon support carries six assets. `<version>` is the SemVer string without the leading `v` (tag `v0.6.0` uses `0.6.0`).
 
 - `ahi-<version>-linux-x86_64.tar.gz`
 - `ahi-<version>-linux-aarch64.tar.gz`
 - `ahi-<version>-windows-x86_64.tar.gz`
-- `ahi-<version>-sha256sums.txt`
+- `ahi-<version>-sha256sums.txt` (Linux and Windows)
+- `ahi-<version>-macos-aarch64.tar.gz`
+- `ahi-<version>-macos-sha256sums.txt` (Apple Silicon only)
 
-Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the Windows archive is built natively and is not promised to be bit-reproducible. On macOS use `cargo install ahi` until native updates are restored. The sums file is `sha256sum` output for those three archives in the order listed above.
+Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the Windows and macOS archives are built natively and are not promised to be bit-reproducible. Both checksum manifests use `sha256sum` format.
 
 From the directory that contains the downloaded files, for release `0.6.0`:
 

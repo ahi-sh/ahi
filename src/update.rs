@@ -36,7 +36,7 @@ const TARGET_SUFFIXES: [&str; 3] = ["linux-x86_64", "linux-aarch64", "windows-x8
 
 /// Run `ahi update`.
 pub fn run() -> Result<()> {
-    let artifact = artifact_for(std::env::consts::OS, std::env::consts::ARCH)?;
+    let suffix = target_suffix(std::env::consts::OS, std::env::consts::ARCH)?;
     println!("Resolving the latest ahi release...");
     let release = latest_release()?;
     let tag = release.tag_name.clone();
@@ -51,7 +51,13 @@ pub fn run() -> Result<()> {
         println!("ahi {VERSION} is up to date (latest release {tag})");
         return Ok(());
     }
-    for name in [&artifact, &format!("ahi-{latest}-sha256sums.txt")] {
+    let artifact = format!("ahi-{latest}-{suffix}.tar.gz");
+    let sums_name = if suffix == "macos-aarch64" {
+        format!("ahi-{latest}-macos-sha256sums.txt")
+    } else {
+        format!("ahi-{latest}-sha256sums.txt")
+    };
+    for name in [&artifact, &sums_name] {
         if !release.assets.iter().any(|asset| asset.name == *name) {
             return Err(Error::new(format!(
                 "release {tag} does not publish `{name}`"
@@ -60,16 +66,21 @@ pub fn run() -> Result<()> {
     }
     println!("Preparing ahi {latest} ({artifact})...");
     let scratch = scratch_dir()?;
-    let result = install(&tag, latest, &artifact, &scratch);
+    let result = install(&tag, latest, &artifact, &sums_name, &scratch);
     let _ = fs::remove_dir_all(&scratch);
     result
 }
 
-fn install(tag: &str, version: &str, artifact: &str, scratch: &Path) -> Result<()> {
-    let sums_name = format!("ahi-{version}-sha256sums.txt");
+fn install(
+    tag: &str,
+    version: &str,
+    artifact: &str,
+    sums_name: &str,
+    scratch: &Path,
+) -> Result<()> {
     println!("[1/6] Fetching {sums_name}...");
-    let sums_path = scratch.join(&sums_name);
-    download_file(&asset_url(tag, &sums_name), &sums_path, SHA256SUMS_CAP)?;
+    let sums_path = scratch.join(sums_name);
+    download_file(&asset_url(tag, sums_name), &sums_path, SHA256SUMS_CAP)?;
 
     println!("[2/6] Verifying the sha256sums attestation with gh...");
     verify_attestation(tag, &sums_path)?;
@@ -207,21 +218,22 @@ fn asset_url(tag: &str, name: &str) -> String {
     format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{name}")
 }
 
-fn artifact_for(os: &str, arch: &str) -> Result<String> {
+fn target_suffix(os: &str, arch: &str) -> Result<&'static str> {
     let suffix = match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
         ("windows", "x86_64") => "windows-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
         _ => {
             return Err(Error::new(format!(
-                "no published archive for {}-{}; published targets: {}. On this platform install with `cargo install ahi --locked`",
+                "no published archive for {}-{}; published targets: {}, macos-aarch64. On this platform install with `cargo install ahi --locked`",
                 os,
                 arch,
                 TARGET_SUFFIXES.join(", ")
             )));
         }
     };
-    Ok(format!("ahi-{suffix}.tar.gz"))
+    Ok(suffix)
 }
 
 fn binary_member_name() -> &'static str {
@@ -255,7 +267,12 @@ fn parse_version(value: &str) -> Result<(u64, u64, u64)> {
 }
 
 fn expected_sha256(body: &str, version: &str, artifact: &str) -> Result<String> {
-    let expected = TARGET_SUFFIXES
+    let suffixes: &[&str] = if artifact == format!("ahi-{version}-macos-aarch64.tar.gz") {
+        &["macos-aarch64"]
+    } else {
+        &TARGET_SUFFIXES
+    };
+    let expected = suffixes
         .iter()
         .map(|suffix| format!("ahi-{version}-{suffix}.tar.gz"))
         .collect::<std::collections::BTreeSet<_>>();
@@ -555,23 +572,22 @@ mod tests {
 
     #[test]
     fn artifact_names_follow_the_release_contract() {
+        assert_eq!(target_suffix("linux", "x86_64").unwrap(), "linux-x86_64");
+        assert_eq!(target_suffix("linux", "aarch64").unwrap(), "linux-aarch64");
         assert_eq!(
-            artifact_for("linux", "x86_64").unwrap(),
-            "ahi-linux-x86_64.tar.gz"
+            target_suffix("windows", "x86_64").unwrap(),
+            "windows-x86_64"
         );
+        assert_eq!(target_suffix("macos", "aarch64").unwrap(), "macos-aarch64");
+        let mac = "ahi-0.26.1-macos-aarch64.tar.gz";
+        let hash = "a".repeat(64);
         assert_eq!(
-            artifact_for("linux", "aarch64").unwrap(),
-            "ahi-linux-aarch64.tar.gz"
+            expected_sha256(&format!("{hash}  {mac}\n"), "0.26.1", mac).unwrap(),
+            hash
         );
-        let err = artifact_for("macos", "aarch64").unwrap_err();
-        assert!(err.to_string().contains("`cargo install ahi --locked`"));
-        assert_eq!(
-            artifact_for("windows", "x86_64").unwrap(),
-            "ahi-windows-x86_64.tar.gz"
-        );
-        let err = artifact_for("macos", "x86_64").unwrap_err();
+        let err = target_suffix("macos", "x86_64").unwrap_err();
         assert!(err.to_string().contains("no published archive"));
-        let err = artifact_for("freebsd", "x86_64").unwrap_err();
+        let err = target_suffix("freebsd", "x86_64").unwrap_err();
         assert!(err.to_string().contains("`cargo install ahi --locked`"));
     }
 

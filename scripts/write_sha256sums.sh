@@ -9,12 +9,14 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/write_sha256sums.sh --version <semver> --directory <path>
 
-The directory must contain the three published archives:
+The directory must contain the four published archives:
   ahi-<version>-linux-x86_64.tar.gz
   ahi-<version>-linux-aarch64.tar.gz
   ahi-<version>-windows-x86_64.tar.gz
 
-The sums file lists them in that order.
+  ahi-<version>-macos-aarch64.tar.gz
+
+The original sums file lists Linux and Windows; macOS has a separate manifest.
 USAGE
 }
 
@@ -66,6 +68,8 @@ done
   cd "$directory"
   sha256sum "${names[@]}" >"$sums_name"
   sha256sum --check "$sums_name"
+  sha256sum "ahi-${version}-macos-aarch64.tar.gz" > "ahi-${version}-macos-sha256sums.txt"
+  sha256sum --check "ahi-${version}-macos-sha256sums.txt"
 )
 
 run_python "$directory/$sums_name" "${names[@]}" <<'PY'

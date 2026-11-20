@@ -78,6 +78,8 @@ names=(
   "ahi-${version}-linux-x86_64.tar.gz"
   "ahi-${version}-linux-aarch64.tar.gz"
   "ahi-${version}-windows-x86_64.tar.gz"
+  "ahi-${version}-macos-aarch64.tar.gz"
+  "ahi-${version}-macos-sha256sums.txt"
   "ahi-${version}-sha256sums.txt"
 )
 

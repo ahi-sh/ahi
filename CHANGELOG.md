@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.26.1
+
+- Publish an attested Apple Silicon archive and separate checksum manifest. `scripts/install-macos.sh` bootstraps the first installation without Cargo or sudo; `ahi update` uses versioned archive names for subsequent updates.
+
+## 0.26.0
 
 - Add the built-in **Full Access** mode: Trusted plus `read_file`, `list_dir`, `find_files`, `search_files`, `edit_file` and `write_file` on absolute host paths. It is selected only from `/mode` and confirmed with **f** each process; it is never the startup default, never remembered, never reachable with Shift+Tab, and `ahi.modes.yaml` cannot name it. Symbolic links, case variants, ahi's own directories, protected files and skill roots, and output caps are enforced for host paths exactly as inside the workspace. `turn.submit` accepts `full-access`; `health` reports the distinct `full_access` capability and the chat client refuses to send the mode to a service without it. Other modes are unchanged. See [Workspace trust](docs/WORKSPACE_TRUST.md).
 
