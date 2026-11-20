@@ -294,18 +294,9 @@ boundaries.
 
 #### Workspace trust and execution modes
 
-On entering chat without a policy, ahi asks whether you trust the workspace.
-**t** enables Read-write and remembers trust outside the checkout; **r** continues
-Read-only without saving trust; **Esc** cancels. Commands run with your account's
-access, not in a sandbox. With a version 2 `ahi.modes.yaml`, chat starts in its `default_mode`; a version 1 policy starts in **Policy** mode.
+New workspaces open in **Plan** without a prompt. Plan can read the checkout, inspect Git status/diff/log, and keep one private temporary draft. It cannot edit the checkout, run commands or scripts, or delegate. **Trusted** enables those actions with your account's access, not in a sandbox; selecting it asks for trust unless already remembered. A workspace policy takes startup precedence (`default_mode` in v2, **Policy** in v1).
 
-**Shift+Tab** cycles available modes without changing the draft. **`/mode`** opens
-a searchable picker. Read-only blocks writes, commands, bundled scripts, and delegation.
-Shift+Tab cycles the built-in and configured modes; selecting
-Read-write explicitly bypasses custom rules for this session without changing
-the file. The bars are cyan for Policy, blue for Read-only, and amber for
-permissive Read-write. Changes during generation are queued for the next turn, not applied
-to an already running command. **`/mode revoke`** forgets workspace trust. See
+**Shift+Tab** cycles modes without changing your draft. **`/mode`** searches built-in and workspace choices. Selecting Trusted bypasses custom rules without changing the policy file. Changes during generation apply to the next turn, not an already running command. While a command runs, its stdout appears in one updating transcript block. The final result replaces that block; Ctrl+O expands captured stdout/stderr and the full write diff. **`/mode revoke`** forgets workspace trust. See
 [Workspace trust](docs/WORKSPACE_TRUST.md) for persistence, service boundaries,
 and headless behavior.
 

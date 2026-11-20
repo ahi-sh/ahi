@@ -124,7 +124,8 @@ struct ChatScreen {
     location_receiver: Option<Receiver<(String, Option<location::GitStatus>)>>,
     /// The backend is between connection attempts: (next attempt, of).
     reconnecting: Option<(u8, u8)>,
-    command_running: bool,
+    /// Call id, transient transcript row, and raw prefix (UTF-8 may split between reads).
+    live_command: Option<(String, usize, Vec<u8>)>,
     expanded_tools: bool,
     /// The last turn failed before the gateway was reached, so Enter on a
     /// blank input sends the same transcript again.
@@ -303,7 +304,7 @@ impl ChatScreen {
             location_dirty: false,
             location_receiver: None,
             reconnecting: None,
-            command_running: false,
+            live_command: None,
             expanded_tools: false,
             resend_available: false,
             turn_skills: Vec::new(),
@@ -1194,7 +1195,7 @@ impl ChatScreen {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             let verb = match self.reconnecting {
                 Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
-                None if self.command_running => "Running command".to_string(),
+                None if self.live_command.is_some() => "Running command".to_string(),
                 None => "Working".to_string(),
             };
             let clock = self
@@ -1423,7 +1424,7 @@ impl ChatScreen {
         self.meters.context_window = None;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
-        self.command_running = false;
+        self.live_command = None;
         self.assistant_open = false;
         self.turn_started = Some(Instant::now());
         self.report_status(crate::program_status::State::Working, "");
@@ -1488,7 +1489,7 @@ impl ChatScreen {
                 self.modes.trusted = false;
                 self.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
                 self.push_notice(
-                    "Workspace trust revoked; read-only selected for the next turn.".into(),
+                    "Workspace trust revoked; Plan selected for the next turn.".into(),
                 );
                 Ok(ScreenAction::Continue)
             }
@@ -1506,6 +1507,7 @@ impl ChatScreen {
                 }
                 self.recorder.reset();
                 backend.reset();
+                self.live_command = None;
                 self.messages.clear();
                 self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
@@ -1690,9 +1692,30 @@ impl ChatScreen {
                 false
             }
             ResponseEvent::CommandStarted { call_id } => {
-                self.command_running = true;
+                let index = self.messages.len();
+                self.push_notice("Running command …".into());
+                self.live_command = Some((call_id.clone(), index, Vec::new()));
                 self.recorder.command_started(call_id);
                 self.report_status(crate::program_status::State::Working, "running command");
+                false
+            }
+            ResponseEvent::CommandStdout { call_id, bytes } => {
+                if let Some((id, row, prefix)) = &mut self.live_command {
+                    if id == &call_id {
+                        let room = (32usize * 1024).saturating_sub(prefix.len());
+                        prefix.extend_from_slice(&bytes[..room.min(bytes.len())]);
+                        let text: String = String::from_utf8_lossy(prefix)
+                            .chars()
+                            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                            .collect();
+                        let index = *row;
+                        if !self.is_live_command_row(index) {
+                            return false;
+                        }
+                        self.messages[index].text = format!("Running command · stdout\n{text}");
+                        self.mark_dirty(index);
+                    }
+                }
                 false
             }
             ResponseEvent::ToolCallReturned => {
@@ -1711,7 +1734,11 @@ impl ChatScreen {
                 elapsed,
                 record,
             } => {
-                self.command_running = false;
+                let replace = self
+                    .live_command
+                    .take()
+                    .filter(|(id, _, _)| id == &call_id)
+                    .map(|(_, row, _)| row);
                 let presentation = ahi_durable::ToolPresentation::new(detail, elapsed);
                 self.recorder.tool_result(
                     &call_id,
@@ -1732,7 +1759,12 @@ impl ChatScreen {
                 });
                 message.detail = presentation.detail;
                 message.elapsed = Some(presentation.elapsed);
-                self.push_message(message);
+                if let Some(row) = replace.filter(|row| self.is_live_command_row(*row)) {
+                    self.messages[row] = message;
+                    self.mark_dirty(row);
+                } else {
+                    self.push_message(message);
+                }
                 self.assistant_open = false;
                 false
             }
@@ -1751,6 +1783,7 @@ impl ChatScreen {
                 true
             }
             ResponseEvent::Failed { message, kind } => {
+                self.interrupt_command();
                 self.approval = None;
                 self.recorder
                     .fail_turn(&format!("{kind:?}").to_ascii_lowercase(), &message);
@@ -1846,7 +1879,30 @@ impl ChatScreen {
     /// message that never received text is removed so no provider sees an
     /// empty turn. The receiver is dropped at once: the worker stops at its
     /// next read, request, or tool round and closes the connection.
+    fn is_live_command_row(&self, index: usize) -> bool {
+        self.messages.get(index).is_some_and(|row| {
+            row.role == TranscriptRole::Notice
+                && (row.text == "Running command …"
+                    || row.text.starts_with("Running command · stdout\n"))
+        })
+    }
+
+    fn interrupt_command(&mut self) {
+        if let Some((_, row, _)) = self
+            .live_command
+            .take()
+            .filter(|(_, row, _)| self.is_live_command_row(*row))
+        {
+            self.messages[row].text =
+                self.messages[row]
+                    .text
+                    .replacen("Running command", "Command interrupted", 1);
+            self.mark_dirty(row);
+        }
+    }
+
     fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
+        self.interrupt_command();
         backend.cancel();
         self.recorder.cancel_turn();
         self.modes.active = None;
@@ -3214,12 +3270,12 @@ mod tests {
             (
                 crate::tool_policy::ExecutionMode::ReadOnly,
                 Color::Blue,
-                "Read-only",
+                "Plan",
             ),
             (
                 crate::tool_policy::ExecutionMode::ReadWrite,
                 Color::Yellow,
-                "Read-write",
+                "Trusted",
             ),
         ] {
             screen.modes.selected = mode;
@@ -3233,7 +3289,7 @@ mod tests {
         }
         screen.modes.active = Some(crate::tool_policy::ExecutionMode::ReadWrite);
         screen.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
-        assert!(draw_lines(&mut screen, 120, 16)[14].contains("Read-write → Read-only next turn"));
+        assert!(draw_lines(&mut screen, 120, 16)[14].contains("Trusted → Plan next turn"));
         fs::remove_dir_all(state).unwrap();
     }
 

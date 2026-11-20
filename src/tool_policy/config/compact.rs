@@ -8,6 +8,7 @@ pub(super) struct Modes {
     #[serde(rename = "version")]
     _version: u32,
     default_mode: String,
+    #[serde(default)]
     modes: BTreeMap<String, Mode>,
 }
 
@@ -77,7 +78,10 @@ impl Modes {
         let mut named = BTreeMap::new();
         for (name, mode) in self.modes {
             if !crate::precommit::policy::valid_rule_id(&name)
-                || matches!(name.as_str(), "read-only" | "read-write" | "policy")
+                || matches!(
+                    name.as_str(),
+                    "plan" | "trusted" | "read-only" | "read-write" | "policy"
+                )
             {
                 return Err(Error::new(format!(
                     "{origin}: invalid or reserved mode name `{name}`"
@@ -250,12 +254,16 @@ impl Modes {
             )?;
             named.insert(name, policy.rules);
         }
-        let rules = named.get(&self.default_mode).cloned().ok_or_else(|| {
-            Error::new(format!(
-                "{origin}: unknown default_mode `{}`",
-                self.default_mode
-            ))
-        })?;
+        let rules = if self.default_mode == "plan" {
+            ActionPolicy::plan().rules
+        } else {
+            named.get(&self.default_mode).cloned().ok_or_else(|| {
+                Error::new(format!(
+                    "{origin}: unknown default_mode `{}`",
+                    self.default_mode
+                ))
+            })?
+        };
         Ok(ActionPolicy {
             rules,
             default_mode: Some(self.default_mode),

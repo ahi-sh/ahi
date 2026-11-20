@@ -88,13 +88,18 @@ pub(super) fn skill_argv(path: &Path, args: &[String]) -> Result<Vec<String>, &'
 /// child leads its own process group on Unix, and a kill takes the whole
 /// group, so a program that spawned helpers cannot leave them holding the
 /// output pipes open.
+pub(crate) enum CommandUpdate {
+    Started,
+    Stdout(Vec<u8>),
+}
+
 pub(super) fn run(
     argv: &[String],
     cwd: &Path,
     timeout_secs: u64,
     toolchain_env: &[String],
     cancel: &AtomicBool,
-    command_started: impl FnOnce(),
+    mut report: impl FnMut(CommandUpdate),
 ) -> Result<(String, CommandReport, CommandOutput), RunError> {
     let (program, args) = argv
         .split_first()
@@ -133,18 +138,31 @@ pub(super) fn run(
     let mut child = command
         .spawn()
         .map_err(|_| RunError::before("cannot start the program (not found or not executable)"))?;
-    command_started();
+    report(CommandUpdate::Started);
+    let (send, pending) = std::sync::mpsc::channel();
     let stdout = child
         .stdout
         .take()
-        .map(|pipe| thread::spawn(move || drain(pipe)));
+        .map(|pipe| thread::spawn(move || drain(pipe, Some(send))));
     let stderr = child
         .stderr
         .take()
-        .map(|pipe| thread::spawn(move || drain(pipe)));
+        .map(|pipe| thread::spawn(move || drain(pipe, None)));
+    // Coalesce tiny writes. The drain sends only the bounded retained prefix.
+    let mut flush = || {
+        let bytes: Vec<u8> = pending.try_iter().flatten().collect();
+        if !bytes.is_empty() {
+            report(CommandUpdate::Stdout(bytes));
+        }
+    };
+    let mut next_update = Instant::now();
     let deadline = started + Duration::from_secs(timeout_secs);
     let mut cancelled = false;
     let status = loop {
+        if Instant::now() >= next_update {
+            flush();
+            next_update = Instant::now() + Duration::from_millis(80);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if cancel.load(Ordering::Relaxed) => {
@@ -169,6 +187,7 @@ pub(super) fn run(
             .unwrap_or((Vec::new(), false))
     };
     let (out, out_cut) = join(stdout);
+    flush();
     let (err, err_cut) = join(stderr);
     let duration_ms = started.elapsed().as_millis();
     let Some(status) = status else {
@@ -220,7 +239,7 @@ fn kill_tree(child: &mut Child) {
 /// Read a pipe to its end, keeping the first `MAX_STREAM_BYTES` and noting
 /// whether more arrived. The pipe is drained fully so the child never
 /// blocks on a full buffer.
-fn drain(mut pipe: impl Read) -> (Vec<u8>, bool) {
+fn drain(mut pipe: impl Read, live: Option<std::sync::mpsc::Sender<Vec<u8>>>) -> (Vec<u8>, bool) {
     let mut kept = Vec::new();
     let mut cut = false;
     let mut buffer = [0u8; 8192];
@@ -232,7 +251,13 @@ fn drain(mut pipe: impl Read) -> (Vec<u8>, bool) {
                 if n > room {
                     cut = true;
                 }
-                kept.extend_from_slice(&buffer[..n.min(room)]);
+                let part = &buffer[..n.min(room)];
+                kept.extend_from_slice(part);
+                if let Some(sender) = &live {
+                    if !part.is_empty() {
+                        let _ = sender.send(part.to_vec());
+                    }
+                }
             }
         }
     }

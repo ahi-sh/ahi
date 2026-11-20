@@ -54,6 +54,7 @@ impl Default for Caller {
 /// What one turn brings to the runtime besides policy: who is asking, how
 /// long the turn may take, and the flag that stops it.
 pub(super) struct TurnContext {
+    pub(super) scratch: crate::tools::Scratch,
     pub(super) mode: crate::tool_policy::ExecutionMode,
     pub(super) caller: Caller,
     /// The turn's deadline: no call starts past it and a command's own
@@ -134,7 +135,8 @@ impl ToolRuntime {
                 None => return Ok(None),
             },
         };
-        let workspace = Workspace::open(directory, state)?;
+        let mut workspace = Workspace::open(directory, state)?;
+        workspace.scratch = turn.scratch.clone();
         // Skills are enumerated once per turn from the turn's canonical
         // working directory (never a session header's `cwd`) and the
         // operator root; only approved names that validate are offered.
@@ -278,9 +280,13 @@ impl ToolRuntime {
                     denied(&prepared, "approval cancelled")
                 }
                 Plan::Ask(prepared, _) => denied(&prepared, "approval cancelled"),
-                Plan::Run(prepared, rule) => self.run(&prepared, &rule, || {
-                    let _ = sender.send(ResponseEvent::CommandStarted {
-                        call_id: call.id.clone(),
+                Plan::Run(prepared, rule) => self.run(&prepared, &rule, |update| {
+                    let call_id = call.id.clone();
+                    let _ = sender.send(match update {
+                        tools::CommandUpdate::Started => ResponseEvent::CommandStarted { call_id },
+                        tools::CommandUpdate::Stdout(bytes) => {
+                            ResponseEvent::CommandStdout { call_id, bytes }
+                        }
                     });
                 }),
             };
@@ -326,7 +332,7 @@ impl ToolRuntime {
         if !self.mode.allows(prepared.tool) {
             return Plan::Done(Box::new(denied(
                 &prepared,
-                "read-only mode blocks writes, commands and delegation",
+                "Plan blocks workspace writes, commands and delegation",
             )));
         }
         if prepared.tool == tools::LOAD_SKILL
@@ -504,7 +510,7 @@ impl ToolRuntime {
         &mut self,
         prepared: &PreparedCall,
         rule_id: &str,
-        command_started: impl FnOnce(),
+        command_update: impl FnMut(tools::CommandUpdate),
     ) -> Outcome {
         // A cancelled turn runs nothing more. The stream reader and the
         // round loop check the same flag, but a batch is several calls, and
@@ -546,7 +552,7 @@ impl ToolRuntime {
             &self.catalog,
             &toolchain_env,
             &self.turn.cancel,
-            command_started,
+            command_update,
         );
         let elapsed = started.elapsed();
         match executed {

@@ -3,7 +3,7 @@ name = "ahi"
 description = "Offline pre-commit runner, terminal chat, and development container launcher. Builtin checks and approved local hooks run from .pre-commit-config.yaml and ahi.hooks.yaml; chat tools (read, search, edit, write, run) are gated by ahi.tools.yaml; ahi dev opens the project in a container."
 keywords = ["pre-commit", "git-hooks", "tui", "chat", "openai"]
 categories = ["development-tools", "command-line-utilities"]
-version = "0.24.1"
+version = "0.25.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.88"
@@ -24,6 +24,8 @@ path = "src/main.rs"
 
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
+git2 = { version = "=0.20.4", default-features = false }
+tempfile = "=3.23.0"
 ahi-durable = { path = "crates/ahi-durable", version = "=0.1.0" }
 clap = { version = "=4.6.7", features = ["derive"] }
 crossterm = "=0.29.0"

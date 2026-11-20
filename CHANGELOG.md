@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.25.0 (2026-11-20)
+
+- Start new, unconfigured workspaces in Plan. Inspect Git status, diffs, and recent history or keep a private temporary draft without granting shell execution. Trusted retains the previous read-write privileges; existing mode identifiers remain accepted.
+- Watch captured stdout append in one running command block in local and service-backed chat. The final result replaces the live preview. Writes show a two-line diff preview; Ctrl+O expands the full result.
+
 ## 0.24.1 (2026-11-20)
 
 - Service-backed chat no longer displays a second or third copy of streamed text and tool events on successive turns. Subscribing again on the same connection replaces that session’s old event forwarder. See [#115](https://github.com/iancleary/ahi/issues/115) for the reproduction and root cause.

@@ -94,6 +94,12 @@ pub(crate) enum Submitted {
 /// What a subscriber receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
+    CommandStdout {
+        session: String,
+        run_id: String,
+        call_id: String,
+        bytes: Vec<u8>,
+    },
     /// A line written to the session.
     Entry {
         session: String,
@@ -177,6 +183,7 @@ struct Inner {
 
 /// One session this process has open.
 struct Live {
+    scratch: crate::tools::Scratch,
     recorder: Recorder,
     open: Option<OpenTurn>,
     subscribers: Vec<SyncSender<Event>>,
@@ -513,6 +520,7 @@ impl Service {
             .clone()
             .unwrap_or_else(crate::session::run_id);
         let backend = HttpBackend::new(self.inner.state.clone())
+            .with_scratch(live.scratch.clone())
             .in_workspace(workdir)
             .with_actions(request.tools.clone())
             .with_caller(Caller {
@@ -656,6 +664,7 @@ impl Live {
     fn new(recorder: Recorder) -> Self {
         Self {
             recorder,
+            scratch: Default::default(),
             open: None,
             subscribers: Vec::new(),
             asks: HashMap::new(),
@@ -900,6 +909,12 @@ impl Turn {
                     delta,
                 });
             }
+            ResponseEvent::CommandStdout { call_id, bytes } => live.emit(Event::CommandStdout {
+                session: self.session.clone(),
+                run_id: self.run_id.clone(),
+                call_id,
+                bytes,
+            }),
             ResponseEvent::CommandStarted { call_id } => {
                 live.recorder.command_started(call_id);
                 live.fan_out_fresh(&self.session);

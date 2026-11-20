@@ -236,7 +236,11 @@ def main() -> None:
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
                     self.wfile.flush()
                     queue_release.wait(10)
-                if body["messages"][-1]["role"] == "tool":
+                if prompt == "live-output":
+                    argv = ["/bin/sh", "-c", "printf 'live-%s\\n' first; while [ ! -f release-output ]; do sleep 0.05; done; printf 'live-%s\\n' last"]
+                    delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
+                    finish = "tool_calls"
+                elif body["messages"][-1]["role"] == "tool":
                     delta = {"content": "mode-fixture-complete"}
                     finish = "stop"
                 else:
@@ -290,9 +294,8 @@ def main() -> None:
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
-                        chat.expect("Trust this workspace?")
-                        chat.send("r")
-                        chat.expect("Read-only · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab")
+                        chat.absent("Trust this workspace?")
                         redraw_release.clear()
                         chat.send("redraw-probe\r")
                         chat.expect("Cleaned up")
@@ -313,18 +316,18 @@ def main() -> None:
                         chat.send("\x1b[Z")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Read-write · Shift+Tab")
+                        chat.expect("Trusted · Shift+Tab")
                         chat.expect("draft-preserved")
                         assert len(list((state / "workspace-trust").iterdir())) == 1
                         assert not (work / "ahi.tools.yaml").exists()
                         chat.send("\x1b[Z")
-                        chat.expect("Read-only · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab")
                         chat.send("\r")
                         chat.expect("mode-fixture-complete")
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
                         chat.send("\x1b[Z")
-                        chat.expect("Read-write · Shift+Tab")
+                        chat.expect("Trusted · Shift+Tab")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
                         deadline = time.monotonic() + 5
@@ -347,7 +350,17 @@ def main() -> None:
                         chat.absent("captured-stdout")
                         chat.expect("draft-toggle")
                         chat.send("\x03")  # clear draft before issuing /mode
-                        # Start another read-write turn, queue read-only while
+                        chat.send("live-output\r")
+                        chat.expect("Running command · stdout")
+                        chat.expect("live-first")
+                        chat.absent("live-last")
+                        (work / "release-output").touch()
+                        chat.absent("Running command · stdout")
+                        chat.send("\x0f")
+                        chat.expect("live-last")
+                        assert chat.screen().count("live-first") == 1
+                        chat.send("\x0f")
+                        # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
@@ -358,13 +371,13 @@ def main() -> None:
                         chat.send("queue-turn\r")
                         chat.expect("mode-stream-waiting")
                         chat.send("\x1b[Z")
-                        chat.expect("Read-write → Read-only next turn")
+                        chat.expect("Trusted → Plan next turn")
                         queue_release.set()
                         deadline = time.monotonic() + 5
                         while not (work / "marker").exists():
                             chat.read()
                             assert time.monotonic() < deadline
-                        chat.expect("Read-only · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab")
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
@@ -383,11 +396,13 @@ def main() -> None:
                         chat.expect("review · Shift+Tab")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")
-                        chat.expect("Read-only · Shift+Tab")
+                        chat.expect("Plan · Shift+Tab")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("\x1b[Z")
-                        chat.expect("Read-write · Shift+Tab")
+                        chat.expect("Trust this workspace?")
+                        chat.send("t")
+                        chat.expect("Trusted · Shift+Tab")
                         chat.absent("Bypass tool policy")
                         chat.send("permissive policy bypass\r")
                         deadline = time.monotonic() + 5
@@ -956,7 +971,7 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("─ / commands ")
-            initial_mode = "Read-only" if session.onboarded_read_only else "Policy"
+            initial_mode = "Plan"
             assert f"{initial_mode} · Shift+Tab · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 

@@ -11,6 +11,7 @@ pub(in crate::tools) struct OpenedRead {
 }
 
 pub(crate) struct Workspace {
+    pub(crate) scratch: crate::tools::Scratch,
     root: PathBuf,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     read_root: ahi_unix::directory::Directory,
@@ -33,6 +34,7 @@ impl Workspace {
         let read_root = ahi_unix::directory::Directory::open(&root)
             .map_err(|_| Error::new("cannot open the working directory for tools"))?;
         Ok(Self {
+            scratch: Default::default(),
             root,
             excluded,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -93,6 +95,13 @@ impl Workspace {
     /// Whether a canonical-or-lexical absolute path lies in one of ahi's own
     /// directories. Used by the walk to prune without canonicalizing every
     /// entry; `resolve` remains the check before any read.
+    pub(in crate::tools) fn overlaps_state(&self, relative: &str) -> bool {
+        let target = self.root.join(relative);
+        self.excluded
+            .iter()
+            .any(|dir| target.starts_with(dir) || dir.starts_with(&target))
+    }
+
     pub(in crate::tools) fn is_excluded(&self, absolute: &Path) -> bool {
         self.excluded.iter().any(|dir| absolute.starts_with(dir))
     }

@@ -79,7 +79,7 @@ const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         command: "/mode",
         label: "Execution mode",
-        description: "Choose Read-write, Read-only or Policy; Shift+Tab cycles",
+        description: "Choose built-in Plan, Trusted, or a workspace mode",
         aliases: &[],
         action: None,
         contexts: CHAT_CONTEXTS,
@@ -87,7 +87,7 @@ const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         command: "/mode revoke",
         label: "Revoke workspace trust",
-        description: "Forget trust and restrict the next turn to read-only",
+        description: "Forget workspace trust and select Plan for the next turn",
         aliases: &[],
         action: None,
         contexts: CHAT_CONTEXTS,

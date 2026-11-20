@@ -11,6 +11,9 @@
 
 pub(crate) mod delegate;
 mod edit_file;
+mod git_inspect;
+mod plan_scratch;
+pub(crate) use plan_scratch::Scratch;
 mod find_files;
 mod helpers;
 mod list_dir;
@@ -27,7 +30,7 @@ use serde_json::{json, Value};
 
 use helpers::glob;
 pub(super) use helpers::Workspace;
-pub(crate) use run_command::{render as render_argv, CommandReport};
+pub(crate) use run_command::{render as render_argv, CommandReport, CommandUpdate};
 use std::sync::atomic::AtomicBool;
 pub(crate) use write_file::WriteReport;
 
@@ -54,7 +57,9 @@ pub(crate) const DELEGATE: &str = "delegate";
 /// rules matched on the skill's scoped ID. Text, never authority.
 pub(crate) const LOAD_SKILL: &str = crate::tool_policy::SKILL_TOOL;
 
-pub(crate) const BUILTIN: [&str; 9] = [
+pub(crate) const BUILTIN: [&str; 11] = [
+    "git_inspect",
+    "plan_scratch",
     READ_FILE,
     LIST_DIR,
     FIND_FILES,
@@ -90,6 +95,8 @@ fn protected(path: &str) -> bool {
 /// Arguments beyond the path, already validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Arguments {
+    Inspect(git_inspect::Operation),
+    Scratch(plan_scratch::Operation),
     Read {
         offset: Option<usize>,
         limit: Option<usize>,
@@ -253,6 +260,8 @@ pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Ve
         .iter()
         .filter(|name| enabled.iter().any(|tool| tool == *name))
         .map(|name| match *name {
+            "git_inspect" => git_inspect::schema(),
+            "plan_scratch" => plan_scratch::schema(),
             LOAD_SKILL => ToolSchema {
                 name: LOAD_SKILL,
                 description: skill_description(skills).into(),
@@ -456,6 +465,12 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         .into_iter()
         .find(|name| *name == call.name)
         .ok_or("unknown tool")?;
+    if tool == "git_inspect" {
+        return git_inspect::prepare(call);
+    }
+    if tool == "plan_scratch" {
+        return plan_scratch::prepare(call);
+    }
     let raw: RawArguments =
         serde_json::from_value(Value::Object(call.arguments.clone())).map_err(|_| INVALID)?;
     let path = match (tool, raw.path) {
@@ -700,6 +715,7 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
 
 /// A finished call: what the model receives, and for a write or a command,
 /// what happened, for the audit log and for the screen.
+#[derive(Default)]
 pub(super) struct Executed {
     pub(super) content: String,
     pub(super) write: Option<WriteReport>,
@@ -744,12 +760,20 @@ pub(super) fn execute(
     skills: &crate::skills::Catalog,
     toolchain_env: &[String],
     cancel: &AtomicBool,
-    command_started: impl FnOnce(),
+    command_update: impl FnMut(CommandUpdate),
 ) -> Result<Executed, ToolFailure> {
     // Result rows are one per line; headers and continuation notes are not
     // matches, so counts are approximate for the screen header only.
     let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
+        Arguments::Inspect(op) => Ok(Executed {
+            content: git_inspect::run(workspace, &call.path, op, cancel)?,
+            ..Default::default()
+        }),
+        Arguments::Scratch(op) => Ok(Executed {
+            content: workspace.scratch.run(op)?,
+            ..Default::default()
+        }),
         Arguments::Skill { name, file } => load_skill::run(name, file, skills),
         Arguments::Delegate {
             worker,
@@ -793,7 +817,7 @@ pub(super) fn execute(
                 *timeout_secs,
                 toolchain_env,
                 cancel,
-                command_started,
+                command_update,
             )?;
             Ok(Executed {
                 content,
@@ -1070,6 +1094,92 @@ mod tests {
         (root, workspace)
     }
 
+    fn ok(name: &str, args: Value) -> PreparedCall {
+        prepare(&call("c", name, args)).unwrap()
+    }
+
+    #[test]
+    fn plan_inspects_git_without_running_configured_programs_or_refreshing_the_index() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("repo");
+        let repo = git2::Repository::init(&root).unwrap();
+        let workspace = Workspace::open(
+            &root,
+            &crate::directories::Directories::single_root(base.path().join("state")),
+        )
+        .unwrap();
+        use std::path::Path;
+        let file = "a && b.txt";
+        fs::write(root.join(file), "before\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("Fixture", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "first version", &tree, &[])
+            .unwrap();
+        fs::write(root.join(file), "staged\n").unwrap();
+        index.add_path(Path::new(file)).unwrap();
+        index.write().unwrap();
+        fs::write(root.join(file), "after\n").unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("diff.external", "not-an-executable")
+            .unwrap();
+        let snapshot = fs::read(repo.path().join("index")).unwrap();
+        for (args, want) in [
+            (json!({"operation":"status"}), file),
+            (json!({"operation":"diff","path":file}), "+after"),
+            (json!({"operation":"diff","staged":true}), "+staged"),
+            (
+                json!({"operation":"log","path":file,"count":1}),
+                "first version",
+            ),
+        ] {
+            assert!(run_text(&ok("git_inspect", args), &workspace)
+                .unwrap()
+                .contains(want));
+        }
+        for args in [
+            json!({"operation":"log","argv":["--output=oops"]}),
+            json!({"operation":"diff","path":"../outside"}),
+            json!({"operation":"checkout"}),
+            json!({"operation":"log","count":51}),
+        ] {
+            assert!(prepare(&call("c", "git_inspect", args)).is_err());
+        }
+        assert_eq!(fs::read(repo.path().join("index")).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn scratch_is_explicit_and_isolated_from_workspace_files() {
+        let (dir, ws) = fixture("scratch");
+        let read = ok("plan_scratch", json!({"operation":"read"}));
+        run_text(
+            &ok(
+                "plan_scratch",
+                json!({"operation":"write","content":"draft"}),
+            ),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(run_text(&read, &ws).unwrap(), "draft");
+        assert!(prepare(&call(
+            "c",
+            "plan_scratch",
+            json!({"operation":"write","path":"README.md","content":"new"})
+        ))
+        .is_err());
+        assert!(!dir.join("README.md").exists());
+        assert_eq!(
+            Scratch::default()
+                .run(&plan_scratch::Operation::Read {})
+                .unwrap(),
+            ""
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Tests never cancel a call unless they say so.
     static NEVER: AtomicBool = AtomicBool::new(false);
 
@@ -1080,7 +1190,7 @@ mod tests {
             &crate::skills::Catalog::default(),
             &[],
             &NEVER,
-            || {},
+            |_| {},
         )
         .map(|executed| executed.content)
         .map_err(|failure| failure.message)
@@ -1371,7 +1481,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
-                || {},
+                |_| {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1389,7 +1499,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
-                || {},
+                |_| {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1677,7 +1787,7 @@ mod tests {
                 &crate::skills::Catalog::default(),
                 &["AHI_TEST_TOOLCHAIN".to_string()],
                 &NEVER,
-                || {},
+                |_| {},
             )
             .map_err(|failure| failure.message)
         };
@@ -1747,7 +1857,7 @@ mod tests {
             &crate::skills::Catalog::default(),
             &[],
             &cancel,
-            || {},
+            |_| {},
         )
         .err()
         .unwrap();

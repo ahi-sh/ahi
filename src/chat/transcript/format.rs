@@ -419,6 +419,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
         header.push(&target, Style::default());
     }
     let mut summary: Vec<String> = Vec::new();
+    let mut preview = Vec::new();
     match &message.detail {
         Some(ToolDetail::Write { before, after }) => {
             let hunks = diff::unified(before.as_deref(), after, 3);
@@ -433,6 +434,18 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 summary.push("created".into());
             }
             summary.push(format!("+{added} -{removed}"));
+            if !options.expanded_tools {
+                for (prefix, text, style) in hunks.iter().flat_map(|h| &h.lines).filter_map(|line| match line {
+                    diff::HunkLine::Added {text,..} => Some(("+",text,options.appearance.theme.diff_added())),
+                    diff::HunkLine::Removed {text,..} => Some(("−",text,options.appearance.theme.diff_removed())),
+                    _=>None,
+                }).take(2) {
+                    let mut row = Styled::default();
+                    let snippet: String = text.chars().filter(|c| !c.is_control()).take(100).collect();
+                    row.push(&format!("{prefix} {snippet}"),style);
+                    preview.push(row);
+                }
+            }
         }
         Some(ToolDetail::Command {
             argv, exit_code, ..
@@ -511,6 +524,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
     }
     out.push(header);
     if !options.expanded_tools {
+        out.extend(preview);
         return out;
     }
 
