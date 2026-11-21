@@ -1,5 +1,19 @@
 # ahi
 
+## Subagent design ([#123](https://github.com/iancleary/ahi/issues/123))
+
+**ahi owns the subagent; Rex keeps it attachable; ahi’s durable session store keeps its conversation recoverable.**
+
+- **ahi** admits each task, enforces the delegated mode against the workspace’s active permissions at admission, runs the child, and reports its status.
+- **Rex** gives each child its own multiplexer session. Clients can attach and detach without owning or cancelling the run.
+- **Durable history** uses ahi’s session recorder and JSONL store, with tool presentation records from `ahi-durable`. Rex scrollback is useful to an attached client, but it is not the authoritative transcript or proof that a run completed.
+
+**Idle means ready for another turn, not closed.** In this design, the child ahi process stays at its prompt in the same Rex session until the orchestrator or the child explicitly closes it. A follow-up starts a new run in the same ahi conversation with a fresh permission check.
+
+The child reports its state to Rex through the **Program Status Protocol (OSC 7501)**: `working` during a run, `blocked` when waiting for input, and `idle` when ready. `done` or `error` reports how the last run ended, not that the child exited. Clients can use Rex to see which child needs attention without parsing its screen. For the recorded outcome of a particular run, the orchestrator queries ahi by run ID.
+
+## Overview
+
 `ahi` is a Rust library and command-line tool for working on software projects:
 
 - **Terminal assistant:** `ahi tui` streams model responses from OpenAI and configured gateways, with workspace tools, saved sessions, and configurable execution permissions.
@@ -492,21 +506,23 @@ The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the w
 
 ### Service-owned scratch delegation in a headless Rex block
 
-`ahi delegate launch` starts **the worker itself** in an existing local Rex session, with no graphical client. The Unix `ahi serve` process admits the task and freezes the exact route and tool rules before asking Rex to start. The worker claims once, runs the model and its tools in private scratch, and returns a result over the same authenticated service connection. No parent transcript or approval grants are copied.
+`ahi delegate launch` starts **the worker itself** in a new, dedicated session on an existing local Rex server, with no graphical client. The Unix `ahi serve` process admits the task and freezes the exact route and tool rules before asking Rex to start. The worker claims once, runs the model and its tools in private scratch, and returns a result over the same authenticated service connection. No parent transcript or approval grants are copied.
 
 ```sh
 ahi delegate launch --server unix:///absolute/path/to/rex.sock \
-  --host-session session:UUID --model gateway/model-id --prompt-file task.txt --dry-run
-# Remove --dry-run to launch. Use the assignment ID printed by ahi:
-ahi delegate status ASSIGNMENT --wait 30
-ahi delegate cancel ASSIGNMENT
+  --model gateway/model-id --prompt-file task.txt --dry-run
+# Remove --dry-run to launch. The first assignment ID is also the child ID.
+ahi delegate status RUN_ID --wait 30
+ahi delegate follow RUN_ID --prompt-file next.txt   # returns a new run ID
+ahi delegate cancel RUN_ID                        # cancel this run, not its child
+ahi delegate close CHILD_ID                       # explicitly end the live child
 ```
 
-**Mode and lifetime.** A direct operator launch uses the current workspace’s startup mode (policy, remembered trust, or Plan). `--mode plan` narrows it; the flag cannot grant trust. The child retains deny, path and unattended approval restrictions. Trusted can narrow to a workspace mode, and Full Access can narrow to Trusted. Between named modes the service requires a provable subset of grants with deny rules preserved; incomparable modes are refused. Even an inherited Full Access label cannot unlock absolute paths, shell commands, skills or recursive delegation in the scratch profile. `--follow-up FILE` is repeatable: each prompt sees the child’s prior replies and tool results. The worker continues through tool rounds, stops when the queue is empty, or ends earlier on failure, cancellation or the assignment deadline. Admission is bounded to 16 prompts totaling 1 MiB; a turn exceeding 64 tool rounds fails. There is no synthetic “keep going” prompt. The result contains the final answer and `turns_completed`.
+**Mode and lifetime.** A direct operator launch uses the current workspace’s startup mode (policy, remembered trust, or Plan). `--mode plan` narrows it; the flag cannot grant trust. The child retains deny, path and unattended approval restrictions. Trusted can narrow to a workspace mode, and Full Access can narrow to Trusted. Between named modes the service requires a provable subset of grants with deny rules preserved; incomparable modes are refused. Even an inherited Full Access label cannot unlock absolute paths, shell commands, skills or recursive delegation in the scratch profile. `--follow-up FILE` is repeatable: each prompt sees the child’s prior replies and tool results. The **run** continues through tool rounds and ends when the queue is empty, or earlier on failure, cancellation or the assignment deadline. The **worker** stays at its prompt. Enter a follow-up in Rex, or use `ahi delegate follow` with the last completed run ID. A stale run ID cannot create a sibling. Each follow-up rechecks the current workspace authority and the previous child ceiling; request a narrower mode if needed. Enter `/close` to end the child from its terminal. Admission is bounded to 16 prompts totaling 1 MiB; a turn exceeding 64 tool rounds fails. There is no synthetic “keep going” prompt. The result contains the final answer and `turns_completed`.
 
-**Calling model.** Set `AHI_DELEGATE_REX_SERVER` and `AHI_DELEGATE_REX_SESSION` in the listening service’s environment to opt into the fixed `rex-scratch` profile. An authorized model can call `delegate` with `{"local":{"profile":"rex-scratch","mode":"plan"},"prompt":"Inspect scratch","follow_ups":["Summarize your findings"]}`. Omit `mode` to inherit. The service checks the still-running parent session and run ID; the model cannot pick another server, path or parent. Trusted and Full Access can call this profile; a workspace mode needs `allow.local_profiles: [rex-scratch]`. Remote `workers` grants do not authorize it. A model in Plan cannot delegate. The existing remote `delegate({worker,prompt,…})` protocol is unchanged; these local inheritance guarantees do not apply across a remote connector.
+**Calling model.** Set `AHI_DELEGATE_REX_SERVER` in the listening service’s environment to opt into the fixed `rex-scratch` profile. An authorized model can call `delegate` with `{"local":{"profile":"rex-scratch","mode":"plan"},"prompt":"Inspect scratch","follow_ups":["Summarize your findings"]}`. Launch returns a task reference instead of waiting. The parent can take another turn while the child runs. The owning parent can later use `{"local":{"profile":"rex-scratch","action":"status","run":"RUN_ID"}}`; use `follow` with a new top-level `prompt`, `cancel` to stop one run, or `close` to end the child. Omit `mode` to inherit. At admission the service checks the still-running parent session and run ID, its frozen permissions, and the origin workspace’s current trust and policy. A temporary parent-mode selection cannot override a revoked workspace grant. The model cannot pick another server, path or parent. Trusted and Full Access can call this profile; a workspace mode needs `allow.local_profiles: [rex-scratch]`. Remote `workers` grants do not authorize it. A model in Plan cannot delegate. The existing remote `delegate({worker,prompt,…})` protocol is unchanged; these local inheritance guarantees do not apply across a remote connector.
 
-**Recovery and retention.** Use a full Rex session ID and a local Unix socket or loopback IP:port on the same host/account. `status` reads structured service records, never PTY output. Losing a launch/claim/finish reply is not permission to retry. Cancellation is cooperative; closing a terminal client does not cancel the worker. A missing result is unknown, not success. Prompts, private admission records and results remain under `<state>/delegation/assignments/`; the scratch directory is under the service’s temp directory and is named in `assignment.scratch`. Remove them manually only after the worker stops. Neither mode restrictions nor the peer-checked socket isolate other processes running as the same OS account.
+**Recovery and retention.** Select a local Unix socket or loopback IP:port on the same host/account. `status` returns the verified Rex session and block IDs, the run result, and `lifecycle` (latest run, live state and transcript path). The durable transcript is a separate ahi session under the child’s private assignment directory, not a branch of the parent conversation. Read that file with `ahi session show /path/to/transcript.jsonl`, even after closing the child. After a crash, inspect the recorded history; nothing silently replays the last run. `status` reads structured service records, never PTY output. Losing a launch/claim/finish reply is not permission to retry. Cancellation is cooperative; closing a terminal client does not cancel the worker. A missing result is unknown, not success. Prompts, private admission records and results remain under `<state>/delegation/assignments/`; the scratch directory is under the service’s temp directory and is named in `assignment.scratch`. Remove them manually only after the worker stops. Neither mode restrictions nor the peer-checked socket isolate other processes running as the same OS account.
 
 For a disposable real-Rex check without a GUI, credentials or paid inference: `python3 scripts/smoke-rex-delegation.py --binary target/debug/ahi` (Unix, installed Rex CLI). It starts a fresh server on a private socket and uses a loopback model fixture.
 

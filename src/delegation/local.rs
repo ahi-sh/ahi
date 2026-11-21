@@ -5,7 +5,7 @@ use super::{
 };
 use crate::tool_policy::ExecutionMode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(crate) const SELECTOR: &str = "local:rex-scratch";
 pub(crate) fn selector() -> &'static [String] {
@@ -23,7 +23,7 @@ pub(crate) fn granted(mode: &ExecutionMode, policy: &crate::tool_policy::ActionP
 #[serde(deny_unknown_fields)]
 pub(crate) struct Task {
     local: Placement,
-    prompt: String,
+    prompt: Option<String>,
     #[serde(default)]
     pub(crate) follow_ups: Vec<String>,
     timeout: Option<u64>,
@@ -33,18 +33,41 @@ pub(crate) struct Task {
 struct Placement {
     profile: String,
     mode: Option<ExecutionMode>,
+    action: Option<Action>,
+    run: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Action {
+    Follow,
+    Status,
+    Cancel,
+    Close,
 }
 impl Task {
     pub(crate) fn parse(v: Value) -> std::result::Result<Self, &'static str> {
         let t: Self =
             serde_json::from_value(v).map_err(|_| "invalid local delegation arguments")?;
-        if t.local.profile != "rex-scratch" || t.prompt.trim().is_empty() || t.timeout == Some(0) {
+        let prompt = t.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        let valid = match (&t.local.action, &t.local.run) {
+            (None, None) => prompt,
+            (Some(action), Some(run))
+                if valid_id(run) && t.follow_ups.is_empty() && t.timeout.is_none() =>
+            {
+                match action {
+                    Action::Follow => prompt,
+                    _ => t.prompt.is_none() && t.local.mode.is_none(),
+                }
+            }
+            _ => false,
+        };
+        if t.local.profile != "rex-scratch" || !valid || t.timeout == Some(0) {
             return Err("expected profile rex-scratch, a prompt and positive timeout");
         }
         Ok(t)
     }
     pub(crate) fn schema() -> Value {
-        json!({"type":"object","additionalProperties":false,"required":["local","prompt"],"properties":{"local":{"type":"object","additionalProperties":false,"required":["profile"],"properties":{"profile":{"type":"string","enum":["rex-scratch"]},"mode":{"type":"string","description":"Omit to inherit; request plan for fewer privileges"}}},"prompt":{"type":"string"},"follow_ups":{"type":"array","maxItems":15,"items":{"type":"string"}},"timeout":{"type":"integer","minimum":1}}})
+        json!({"type":"object","additionalProperties":false,"required":["local"],"properties":{"local":{"type":"object","additionalProperties":false,"required":["profile"],"properties":{"profile":{"type":"string","enum":["rex-scratch"]},"run":{"type":"string","description":"Prior assignment ID, required with action"},"action":{"type":"string","enum":["status","follow","cancel","close"],"description":"Omit to launch. Follow requires a prompt. Other controls take no prompt."},"mode":{"type":"string","description":"Omit to inherit; request plan for fewer privileges"}}},"prompt":{"type":"string"},"follow_ups":{"type":"array","maxItems":15,"items":{"type":"string"}},"timeout":{"type":"integer","minimum":1}}})
     }
 }
 
@@ -74,6 +97,15 @@ impl Profile {
         if timeout_secs == 0 || cancel.load(Ordering::Relaxed) {
             return Err("parent is stopping".into());
         }
+        let mut c = crate::service::client::Client::listening(&self.dirs, &self.socket)
+            .map_err(|_| "no listening local service")?;
+        if let (Some(action), Some(id)) = (&task.local.action, &task.local.run) {
+            let v=c.call("child.manage",json!({"session":self.session,"parent_run":self.run,"run":id,"action":action,"mode":task.local.mode,"prompt":task.prompt})).map_err(|_|"child control not confirmed; check ownership, run and active mode before retrying")?;
+            return Ok(crate::tools::Executed {
+                content: v.to_string(),
+                ..Default::default()
+            });
+        }
         let id = crate::session::uuid();
         let request = Request {
             id: id.clone(),
@@ -86,15 +118,13 @@ impl Profile {
                 gateway: self.gateway.clone(),
                 model: self.model.clone(),
                 thinking: "off".into(),
-                prompt: task.prompt.clone(),
+                prompt: task.prompt.clone().ok_or("a launch requires a prompt")?,
                 timeout_secs,
                 target: self.target.clone(),
             },
             follow_ups: task.follow_ups.clone(),
             preview: false,
         };
-        let mut c = crate::service::client::Client::listening(&self.dirs, &self.socket)
-            .map_err(|_| "no listening local service")?;
         let launched = c.call("child.admit", json!(request));
         let (status, text) = match launched {
             Err(e) if matches!(e.kind, "policy" | "usage" | "config") => return Err(
@@ -105,31 +135,10 @@ impl Profile {
                 "unknown".into(),
                 "launch not established; reconcile this assignment before retrying".into(),
             ),
-            Ok(_) => loop {
-                let status =
-                    super::status(&self.dirs, &id).map_err(|_| "assignment status unknown")?;
-                if let Some(s) = status["result"]["status"].as_str() {
-                    break (
-                        s.to_owned(),
-                        status["result"]["text"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                    );
-                }
-                if cancel.load(Ordering::Relaxed)
-                    || start.elapsed() >= Duration::from_secs(timeout_secs)
-                {
-                    let mut receipt =
-                        super::load(&self.dirs, &id).map_err(|_| "lost child receipt")?;
-                    let _ = super::cancel(&self.dirs, &mut receipt);
-                    break (
-                        "unknown".into(),
-                        "stop requested; completion is not established".into(),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            },
+            Ok(_) => (
+                String::from("submitted"),
+                String::from("child accepted; the parent may continue"),
+            ),
         };
         let effects = "unknown"; // No parent-checkout effects; scratch may contain writes.
         let content =

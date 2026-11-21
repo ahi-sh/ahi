@@ -18,7 +18,7 @@ pub(super) struct Options {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Reserve a scratch assignment and start its worker in the configured Rex session.
+    /// Start a resident scratch child in a new, dedicated Rex session.
     ///
     /// The worker is the process in the block: it runs admitted turns and
     /// scratch tools until idle, then publishes a structured result. No Rex
@@ -26,6 +26,16 @@ enum Command {
     /// the receipt, not in the scratch directory. A launch is issued once;
     /// an ambiguous reply is recorded, never retried.
     Launch(LaunchArgs),
+    /// Admit a new run after the specified completed run; reuse the live child and its history.
+    Follow {
+        after: String,
+        #[arg(long)]
+        prompt_file: PathBuf,
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// Request explicit close of the live child, cancelling active work and retaining history.
+    Close { child: String },
     /// Show the receipt, the worker's claim, and its result if published.
     Status {
         /// Assignment id printed by `launch`.
@@ -63,9 +73,6 @@ struct LaunchArgs {
     /// Local Rex endpoint: unix:///absolute/socket or a loopback IP:port (no host labels).
     #[arg(long)]
     server: String,
-    /// Rex full session:UUID that receives the worker's block; not an ahi session ID.
-    #[arg(long)]
-    host_session: String,
     /// Seconds for the whole child turn.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_TIMEOUT_SECS)]
     timeout: u64,
@@ -130,6 +137,17 @@ impl From<delegation::Error> for Failure {
 fn execute(dirs: &Directories, options: &Options) -> Result<serde_json::Value, Failure> {
     match &options.command {
         Command::Launch(args) => launch(dirs, args),
+        Command::Follow {
+            after,
+            prompt_file,
+            mode,
+        } => control(
+            dirs,
+            after,
+            "child.follow",
+            json!({"after":after,"mode":mode,"prompt":read_prompt(prompt_file)?}),
+        ),
+        Command::Close { child } => control(dirs, child, "child.close", json!(child)),
         Command::Status { id, wait } => {
             let deadline = wait.map(|secs| Instant::now() + Duration::from_secs(secs));
             loop {
@@ -160,6 +178,22 @@ fn execute(dirs: &Directories, options: &Options) -> Result<serde_json::Value, F
     }
 }
 
+fn control(
+    dirs: &Directories,
+    id: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
+    let dir = delegation::assignment_dir(dirs, id)?;
+    let socket = delegation::resident::socket(&dir)?;
+    let map = |e: crate::service::ServiceError| {
+        Failure::Other(if e.kind == "conflict" { 4 } else { 2 }, e.message)
+    };
+    crate::service::client::Client::listening(dirs, &socket)
+        .map_err(map)?
+        .call(method, params)
+        .map_err(map)
+}
 fn launch(dirs: &Directories, args: &LaunchArgs) -> Result<serde_json::Value, Failure> {
     if args.follow_up.len() > 15 {
         return Err(Failure::Other(2, "at most 15 follow-up files".into()));
@@ -169,9 +203,8 @@ fn launch(dirs: &Directories, args: &LaunchArgs) -> Result<serde_json::Value, Fa
         return Err(Failure::Other(2, "--model takes gateway/model-id".into()));
     }
     let prompt = read_prompt(&args.prompt_file)?;
-    let target = Target::Rex {
+    let target = Target::RexServer {
         server: args.server.clone(),
-        session: args.host_session.clone(),
     };
     let spec = Spec {
         gateway: selection.gateway.clone(),

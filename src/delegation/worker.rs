@@ -2,9 +2,9 @@
 //! scratch tools until idle, then publishes on its claiming connection.
 //!
 //! It performs the inference itself through the in-process `HttpBackend`; it
-//! does not submit a turn to a service, open the session store, or tail
-//! another process. The PTY sees only progress lines: never the prompt, the
-//! model's text, or a credential. The service publishes `result.json`.
+//! does not tail another process or use the parent conversation. It records
+//! its own transcript and prints terminal-safe answers and advisory status
+//! in the PTY. The service publishes the structured result.
 
 use std::path::Path;
 use std::sync::mpsc::RecvTimeoutError;
@@ -65,13 +65,86 @@ pub(crate) fn run(dir: &Path, attempt: &str) -> u8 {
         Ok(path) => path,
         Err(_) => return Exit::Refused.code(),
     };
-    report(execute(
-        dir,
-        attempt,
-        &cwd,
-        Observed::from_env(),
-        Origin::Service,
-    ))
+    if !cfg!(unix) {
+        return Exit::Refused.code();
+    }
+    report(reside(dir, attempt, &cwd))
+}
+
+fn reside(root: &Path, first: &str, cwd: &Path) -> Result<Exit, (Exit, String)> {
+    use super::resident::{self, Transition};
+    use crate::program_status::{Reporter, State};
+    let fail = |e: super::Error| (Exit::Refused, e.message);
+    let r = super::load_dir(root).map_err(fail)?;
+    let dirs = r.directories.to_directories();
+    let _lease = resident::lease(root).map_err(fail)?;
+    // The child can be scheduled before `rex new` returns its full handle.
+    let start = Instant::now();
+    loop {
+        let phase = super::load_dir(root).map_err(fail)?.phase;
+        if !matches!(phase, super::Phase::Launching { .. }) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            return Err((Exit::Refused, "unconfirmed Rex launch".into()));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let reporter = Reporter::for_stdout();
+    resident::terminal_input(root.into(), r);
+    let mut dir = root.to_owned();
+    let mut attempt = first.to_owned();
+    loop {
+        reporter.state(State::Working, "ahi child", "");
+        let exit = execute(&dir, &attempt, cwd, Observed::from_env(), Origin::Service)?;
+        reporter.state(
+            if exit == Exit::Ok {
+                State::Done
+            } else {
+                State::Error
+            },
+            "ahi child",
+            "",
+        );
+        if let Some(out) = super::read_outcome(&dir).map_err(fail)? {
+            println!(
+                "{}",
+                out.text
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .collect::<String>()
+            );
+        }
+        println!("Idle. Enter a follow-up or /close.");
+        reporter.state(State::Idle, "ahi child", "");
+        loop {
+            match resident::edge(&dir).map_err(fail)? {
+                Some(Transition::Close) => {
+                    reporter.clear();
+                    let endpoint = resident::socket(root).map_err(fail)?;
+                    let mut c = Client::listening(&dirs, &endpoint)
+                        .map_err(|e| (Exit::Unpublished, e.message))?;
+                    c.call(
+                        "child.close",
+                        json!(dir.file_name().and_then(|s| s.to_str())),
+                    )
+                    .map_err(|e| (Exit::Unpublished, e.message))?;
+                    return Ok(Exit::Ok);
+                }
+                Some(Transition::Run(next)) => {
+                    dir = super::assignment_dir(&dirs, &next).map_err(fail)?;
+                    let r = super::load_dir(&dir).map_err(fail)?;
+                    attempt = r
+                        .phase
+                        .attempt()
+                        .ok_or((Exit::Refused, "missing run attempt".into()))?
+                        .into();
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(200)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,8 +180,10 @@ fn execute(
         .canonicalize()
         .map_err(|_| (Exit::Refused, "missing scratch directory".into()))?;
     if cwd.canonicalize().ok().as_ref() != Some(&expected)
-        || !matches!(&reserved.target,crate::terminal_host::Target::Rex{session,..} if observed.rex_session.as_ref()==Some(session))
-        || !std::fs::read_dir(&expected).is_ok_and(|mut files| files.next().is_none())
+        || !super::resident::session_matches(&reserved, &observed)
+        || (super::resident::child_id(dir, &reserved).map_err(|e| (Exit::Refused, e.message))?
+            == reserved.id
+            && !std::fs::read_dir(&expected).is_ok_and(|mut files| files.next().is_none()))
     {
         return Err((
             Exit::Refused,
@@ -155,8 +230,11 @@ fn execute(
         "assignment {}: claimed attempt {attempt} (pid {})",
         receipt.id, claim.pid
     );
+    let mut rec =
+        super::resident::recorder(dir, &receipt).map_err(|e| (Exit::Unpublished, e.message))?;
     let completed = std::cell::Cell::new(0usize);
-    let mut finish = |status: Status,
+    let mut finish = |rec: &mut crate::session::recorder::Recorder,
+                      status: Status,
                       text: String,
                       truncated: bool,
                       usage: Option<Usage>,
@@ -176,6 +254,18 @@ fn execute(
             error,
             finished: crate::util::rfc3339::now(),
         };
+        rec.finish_turn(
+            match status {
+                Status::Ok => crate::session::Status::Ok,
+                Status::Cancelled => crate::session::Status::Cancelled,
+                Status::Timeout => crate::session::Status::Timeout,
+                Status::Failed => crate::session::Status::Failed,
+            },
+            json!({"status":status,"assignment":receipt.id}),
+        );
+        if let Some(reason) = rec.failure() {
+            return Err((Exit::Unpublished, reason.into()));
+        }
         let status = match &mut service {
             Lease::Service(service) => {
                 let v = service
@@ -211,6 +301,7 @@ fn execute(
     // Once claimed, even a local validation failure is a structured result.
     let mut invalid = |message: String| {
         finish(
+            &mut rec,
             Status::Failed,
             String::new(),
             false,
@@ -228,14 +319,47 @@ fn execute(
     let Some(thinking) = ThinkingLevel::parse(&receipt.thinking) else {
         return invalid("unknown thinking level".into());
     };
+    let protocol = crate::harness::completion_connection(
+        &receipt.directories.to_directories(),
+        &receipt.gateway,
+        &receipt.model,
+    )
+    .ok()
+    .map(|c| c.protocol);
+    let mut history = rec
+        .session()
+        .map(|s| s.active_messages(protocol))
+        .unwrap_or_default();
+    rec.begin_turn_as(receipt.id.clone(), &prompt);
+    if rec.failure().is_some() || rec.over_budget() {
+        return finish(
+            &mut rec,
+            Status::Failed,
+            String::new(),
+            false,
+            None,
+            Some(Failure {
+                kind: "session".into(),
+                message: "durable session unavailable or over budget".into(),
+            }),
+        );
+    }
+    history.push(ChatMessage::new(TranscriptRole::Operator, prompt));
     let remaining = super::remaining_secs(&receipt);
     if remaining <= 0 {
-        return finish(Status::Timeout, String::new(), false, None, None);
+        return finish(&mut rec, Status::Timeout, String::new(), false, None, None);
     }
     let deadline = Instant::now() + Duration::from_secs(remaining as u64);
     // Last checkpoint before the provider sees anything.
     if super::cancel_requested(dir) {
-        return finish(Status::Cancelled, String::new(), false, None, None);
+        return finish(
+            &mut rec,
+            Status::Cancelled,
+            String::new(),
+            false,
+            None,
+            None,
+        );
     }
     let backend = HttpBackend::new(receipt.directories.to_directories());
     let mut backend = if admission.policy.rules.is_empty() {
@@ -264,7 +388,7 @@ fn execute(
             model: receipt.model.clone(),
         },
         thinking,
-        messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],
+        messages: history,
     };
     eprintln!(
         "assignment {}: inference started on {}/{} ({remaining}s remain)",
@@ -301,11 +425,12 @@ fn execute(
                     kind: "turn".into(),
                     message: "the turn ended without a completion".into(),
                 });
-                return finish(status, text, truncated, usage, error);
+                return finish(&mut rec, status, text, truncated, usage, error);
             }
         };
         match event {
             ResponseEvent::TextDelta(delta) => {
+                rec.text(&delta);
                 if !truncated {
                     truncated = super::push_bounded(&mut text, &delta, MAX_RESULT_TEXT_BYTES);
                 }
@@ -332,6 +457,20 @@ fn execute(
                 }
                 if stopped.is_none() && !super::cancel_requested(dir) && Instant::now() < deadline {
                     if let Some(next) = follow_ups.next() {
+                        rec.next_prompt(&next);
+                        if rec.failure().is_some() || rec.over_budget() {
+                            return finish(
+                                &mut rec,
+                                Status::Failed,
+                                text,
+                                truncated,
+                                usage,
+                                Some(Failure {
+                                    kind: "session".into(),
+                                    message: "child transcript unavailable or full".into(),
+                                }),
+                            );
+                        }
                         request.messages.push(ChatMessage::new(
                             TranscriptRole::Assistant,
                             std::mem::take(&mut text),
@@ -353,7 +492,7 @@ fn execute(
                         Status::Ok
                     }
                 });
-                return finish(status, text, truncated, usage, None);
+                return finish(&mut rec, status, text, truncated, usage, None);
             }
             ResponseEvent::Failed { message, kind } => {
                 let status = stopped.unwrap_or(Status::Failed);
@@ -361,9 +500,10 @@ fn execute(
                     kind: crate::service::error_kind_name(kind).to_string(),
                     message,
                 });
-                return finish(status, text, truncated, usage, error);
+                return finish(&mut rec, status, text, truncated, usage, error);
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
+                rec.calls(&calls, native.as_ref());
                 let mut m = ChatMessage::new(TranscriptRole::Assistant, std::mem::take(&mut text));
                 m.tool = Some(ToolPayload::Calls { calls, native });
                 request.messages.push(m);
@@ -374,8 +514,19 @@ fn execute(
                 tool,
                 content,
                 exit_code,
+                detail,
+                elapsed,
+                output,
                 ..
             } => {
+                rec.tool_result(
+                    &call_id,
+                    &tool,
+                    &output,
+                    &content,
+                    exit_code,
+                    ahi_durable::ToolPresentation::new(detail, elapsed),
+                );
                 let mut m = ChatMessage::new(TranscriptRole::Tool { exit_code }, "");
                 m.tool = Some(ToolPayload::Result {
                     call_id,

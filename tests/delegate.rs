@@ -7,8 +7,6 @@ use std::process::{Command, Output};
 #[path = "support/fixture_directory.rs"]
 mod fixture_directory;
 
-const SESSION: &str = "session:11111111-1111-4111-8111-111111111111";
-
 fn run(state: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ahi"))
         .current_dir(state)
@@ -71,8 +69,6 @@ fn dry_run_binds_the_route_and_reserves_nothing() {
             prompt.to_str().unwrap(),
             "--server",
             "127.0.0.1:4400",
-            "--host-session",
-            SESSION,
             "--dry-run",
         ],
     );
@@ -98,7 +94,7 @@ fn dry_run_binds_the_route_and_reserves_nothing() {
         .unwrap()
         .iter()
         .any(|t| t == "write_file"));
-    assert_eq!(value["target"]["session"], SESSION);
+    assert_eq!(value["target"]["backend"], "rex_server");
     assert!(!String::from_utf8_lossy(&preview.stdout).contains("quartz-lantern"));
     assert!(
         !state.join("delegation").exists(),
@@ -117,8 +113,6 @@ fn dry_run_binds_the_route_and_reserves_nothing() {
             prompt.to_str().unwrap(),
             "--server",
             "127.0.0.1:4400",
-            "--host-session",
-            SESSION,
         ],
     );
     assert_eq!(
@@ -173,8 +167,6 @@ fn launch_without_rex_records_a_failed_start_and_status_reads_it_back() {
             prompt.to_str().unwrap(),
             "--server",
             "127.0.0.1:4400",
-            "--host-session",
-            SESSION,
         ],
     );
     assert_eq!(

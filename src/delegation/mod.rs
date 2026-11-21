@@ -6,6 +6,7 @@
 
 pub(crate) mod broker;
 pub(crate) mod local;
+pub(crate) mod resident;
 mod worker;
 
 #[cfg(test)]
@@ -344,12 +345,12 @@ fn validate(spec: &Spec) -> Result<()> {
             "the timeout must be 1 to {MAX_TIMEOUT_SECS} seconds"
         )));
     }
-    if !matches!(spec.target, Target::Rex { .. }) {
+    if !matches!(spec.target, Target::Rex { .. } | Target::RexServer { .. }) {
         return Err(Error::input(
             "only a Rex execution target hosts a delegated worker in this version",
         ));
     }
-    if let Target::Rex { server, .. } = &spec.target {
+    if let Target::Rex { server, .. } | Target::RexServer { server } = &spec.target {
         if !server
             .strip_prefix("unix://")
             .is_some_and(|s| s.starts_with('/'))
@@ -409,6 +410,15 @@ fn reserve_with_id(dirs: &Directories, spec: Spec, id: String) -> Result<Receipt
     reserve_at(dirs, spec, id.clone(), scratch.join(id))
 }
 fn reserve_at(dirs: &Directories, spec: Spec, id: String, scratch: PathBuf) -> Result<Receipt> {
+    reserve_run(dirs, spec, id, scratch, true)
+}
+fn reserve_run(
+    dirs: &Directories,
+    spec: Spec,
+    id: String,
+    scratch: PathBuf,
+    fresh: bool,
+) -> Result<Receipt> {
     validate(&spec)?;
     let paths = Paths::from_directories(dirs)?;
     let dir = assignment_dir(dirs, &id)?;
@@ -417,7 +427,9 @@ fn reserve_at(dirs: &Directories, spec: Spec, id: String, scratch: PathBuf) -> R
             .map_err(|err| Error::io("create", &parent, err))?;
     }
     create_exclusive(&dir)?;
-    create_exclusive(&scratch)?;
+    if fresh {
+        create_exclusive(&scratch)?;
+    }
     let prompt_path = dir.join(PROMPT_FILE);
     write_private_new(&prompt_path, spec.prompt.as_bytes())?;
     let receipt = Receipt {
@@ -717,6 +729,9 @@ pub(crate) fn status(dirs: &Directories, id: &str) -> Result<Value> {
         (None, None) => receipt.phase.name(),
     };
     Ok(json!({
+        "child":resident::child_id(&dir,&receipt)?,
+        "lifecycle":resident::lifecycle(dirs,&resident::child_id(&dir,&receipt)?)?,
+        "transition":read_json::<resident::Transition>(&dir.join("transition.json"))?,
         "assignment": receipt,
         "authority":read_json::<Value>(&dir.join("authority.json"))?,
         "claim": claim,
@@ -747,7 +762,14 @@ fn claim_pid(dir: &Path, attempt: &str, observed: &Observed, pid: u32) -> Result
             receipt.id
         )));
     }
-    if cancel_requested(dir) {
+    // A verified resident may claim cancelled work solely to publish the
+    // cancellation and return to idle; the worker checks before inference.
+    if cancel_requested(dir)
+        && !matches!(
+            (&receipt.target, &receipt.phase),
+            (Target::RexServer { .. }, Phase::Launched { .. })
+        )
+    {
         return Err(Error::conflict("assignment cancelled before claim"));
     }
     if !receipt.phase.admits_claim(attempt) {
@@ -797,7 +819,10 @@ fn claim_pid(dir: &Path, attempt: &str, observed: &Observed, pid: u32) -> Result
 
 /// Whether the operator has since recorded a cancel.
 pub(crate) fn cancel_requested(dir: &Path) -> bool {
-    !matches!(fs::symlink_metadata(dir.join("cancel.request")), Err(ref e) if e.kind()==std::io::ErrorKind::NotFound)
+    matches!(
+        read_json::<resident::Transition>(&dir.join("transition.json")),
+        Ok(Some(resident::Transition::Close))
+    ) || !matches!(fs::symlink_metadata(dir.join("cancel.request")), Err(ref e) if e.kind()==std::io::ErrorKind::NotFound)
         || load_dir(dir).is_err()
 }
 

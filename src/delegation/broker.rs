@@ -31,13 +31,13 @@ pub(super) struct Admission {
     pub follow_ups: Vec<String>,
 }
 
-fn denied(message: impl ToString) -> ServiceError {
+pub(super) fn denied(message: impl ToString) -> ServiceError {
     ServiceError {
         kind: "policy",
         message: message.to_string(),
     }
 }
-fn parse<T: DeserializeOwned>(value: Value) -> ServiceResult<T> {
+pub(super) fn parse<T: DeserializeOwned>(value: Value) -> ServiceResult<T> {
     serde_json::from_value(value).map_err(denied)
 }
 impl From<Error> for ServiceError {
@@ -72,7 +72,43 @@ fn covers(broad: &crate::tool_policy::ToolRule, narrow: &crate::tool_policy::Too
             .iter()
             .all(|v| broad.toolchain_env.contains(v))
 }
-fn restrict(
+// A later admission may lose grants, never acquire wider ones. Carry forward deny rules.
+pub(super) fn ceiling(
+    mut current: ActionPolicy,
+    old: &ActionPolicy,
+) -> ServiceResult<ActionPolicy> {
+    use crate::tool_policy::Effect::{Approve, Deny};
+    for r in current.rules.iter().filter(|r| r.effect == Approve) {
+        if !old
+            .rules
+            .iter()
+            .any(|p| p.effect == Approve && (!p.ask || r.ask) && covers(p, r))
+        {
+            return Err(denied("requested rules exceed the admitted ceiling"));
+        }
+    }
+    for p in old.rules.iter().filter(|p| p.effect == Deny) {
+        if !current.rules.contains(p) {
+            current.rules.push(p.clone());
+        }
+    }
+    Ok(current)
+}
+// A parent's still-running turn is necessary but not sufficient: trust can
+// be revoked or the workspace's default changed while inference is running.
+pub(super) fn workspace_cap(
+    cwd: &Path,
+    dirs: &Directories,
+    mode: &ExecutionMode,
+    policy: ActionPolicy,
+) -> ServiceResult<ActionPolicy> {
+    let (now, workspace) = crate::chat::operator_authority(cwd, &dirs.state).map_err(denied)?;
+    if !super::local::granted(&now, &workspace) {
+        return Err(denied("workspace no longer authorizes local delegation"));
+    }
+    ceiling(policy, &restrict(now, workspace, Some(mode.clone()))?.1)
+}
+pub(super) fn restrict(
     parent: ExecutionMode,
     mut policy: ActionPolicy,
     requested: Option<ExecutionMode>,
@@ -208,20 +244,47 @@ pub(crate) fn admit(service: &Service, socket: &Path, r: Request) -> ServiceResu
     {
         return Err(denied("at most 16 nonempty turns totaling 1 MiB"));
     }
-    let (parent, policy) = match &r.source {
+    if !matches!(r.spec.target, Target::RexServer { .. }) {
+        return Err(denied(
+            "a dedicated Rex session requires a server-only profile",
+        ));
+    }
+    let (parent, policy, workspace, previous) = match &r.source {
         Source::Operator { cwd } => {
             let cwd = cwd.canonicalize().map_err(denied)?;
-            crate::chat::operator_authority(&cwd, &dirs.state).map_err(denied)?
+            let (m, p) = crate::chat::operator_authority(&cwd, &dirs.state).map_err(denied)?;
+            (m, p, cwd, None)
         }
         Source::Parent { session, run } => {
-            let (mode, policy) = service.parent_authority(session, run, &r.spec)?;
-            if !super::local::granted(&mode, &policy) {
+            let crate::service::ParentAuthority {
+                mode,
+                current: policy,
+                workspace: cwd,
+                frozen: prior,
+            } = service.parent_authority(
+                session,
+                run,
+                &r.spec.gateway,
+                &r.spec.model,
+                &r.spec.target,
+            )?;
+            if !super::local::granted(&mode, &policy) || !super::local::granted(&mode, &prior) {
                 return Err(denied("parent mode has no local delegation grant"));
             }
-            (mode, policy)
+            (mode, policy, cwd, Some(prior))
         }
     };
-    let (mode, policy) = restrict(parent.clone(), policy, r.mode)?;
+    let (mode, policy) = restrict(parent.clone(), policy, r.mode.clone())?;
+    let policy = if let Some(prior) = previous {
+        workspace_cap(
+            &workspace,
+            dirs,
+            &mode,
+            ceiling(policy, &restrict(parent.clone(), prior, r.mode)?.1)?,
+        )?
+    } else {
+        policy
+    };
     crate::harness::completion_connection(dirs, &r.spec.gateway, &r.spec.model).map_err(|e| {
         ServiceError {
             kind: "config",
@@ -229,15 +292,13 @@ pub(crate) fn admit(service: &Service, socket: &Path, r: Request) -> ServiceResu
         }
     })?;
     let executable = std::env::current_exe().map_err(denied)?;
-    let summary = json!({"parent_mode":parent,"mode":mode,"tools":policy.advertised_tools(),"turns":1+r.follow_ups.len(),"source":r.source});
+    let summary = json!({"parent_mode":parent,"mode":mode,"tools":policy.advertised_tools(),"turns":1+r.follow_ups.len(),"source":r.source,"workspace":workspace});
     if r.preview {
         return Ok(
             json!({"dry_run":true,"reserved":false,"gateway":r.spec.gateway,"model":r.spec.model,"thinking":r.spec.thinking,"timeout_secs":r.spec.timeout_secs,"worker_executable":executable,"prompt_sha256":crate::session::sha256_hex(r.spec.prompt.as_bytes()),"prompt_bytes":r.spec.prompt.len(),"target":r.spec.target,"placement":"scratch","tools":summary["tools"],"authority":summary}),
         );
     }
-    let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).map_err(denied)?;
-    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let token = credential(socket)?;
     let scratch = std::env::temp_dir()
         .canonicalize()
         .map_err(denied)?
@@ -260,7 +321,7 @@ pub(crate) fn admit(service: &Service, socket: &Path, r: Request) -> ServiceResu
     )?;
     write_private_new(
         &dir.join("broker.json"),
-        &serde_json::to_vec(&json!({"socket":socket,"nonce":nonce})).map_err(denied)?,
+        &serde_json::to_vec(&token).map_err(denied)?,
     )?;
     if let Err(e) = launch(dirs, &mut receipt, &executable, None) {
         return Err(ServiceError {
@@ -269,6 +330,13 @@ pub(crate) fn admit(service: &Service, socket: &Path, r: Request) -> ServiceResu
         });
     }
     Ok(status(dirs, &receipt.id)?)
+}
+
+pub(super) fn credential(socket: &Path) -> ServiceResult<Value> {
+    let mut nonce = [0u8; 32];
+    getrandom::fill(&mut nonce).map_err(denied)?;
+    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(json!({"socket":socket,"nonce":nonce}))
 }
 
 // One per accepted connection; dropping the connection never implicitly
@@ -293,6 +361,9 @@ impl Connection {
     ) -> ServiceResult<Value> {
         match method {
             "child.admit" => admit(service, socket, parse(params)?),
+            "child.follow" => super::resident::follow(service, socket, parse(params)?, None),
+            "child.manage" => super::resident::manage(service, socket, parse(params)?),
+            "child.close" => super::resident::close(service.directories(), parse(params)?),
             "child.claim" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -321,13 +392,14 @@ impl Connection {
                         .and_then(|id| id.strip_prefix("block:"))
                         .is_some_and(crate::session::valid_id)
                     || matches!(&receipt.phase,Phase::Launched{terminal,..} if Some(&terminal.id)!=r.observed.rex_block.as_ref())
-                    || !matches!(&receipt.target,Target::Rex{session,..} if r.observed.rex_session.as_ref()==Some(session))
+                    || !super::resident::session_matches(&receipt, &r.observed)
                     || r.cwd.canonicalize().map_err(denied)?
                         != receipt.scratch.canonicalize().map_err(denied)?
-                    || fs::read_dir(&receipt.scratch)
-                        .map_err(denied)?
-                        .next()
-                        .is_some()
+                    || (super::resident::child_id(&dir, &receipt)? == receipt.id
+                        && fs::read_dir(&receipt.scratch)
+                            .map_err(denied)?
+                            .next()
+                            .is_some())
                 {
                     return Err(denied(
                         "claim credential, cwd or Rex session does not match",
@@ -366,11 +438,8 @@ impl Connection {
                 {
                     return Err(denied("invalid result for claim"));
                 }
-                if cancel_requested(dir) {
-                    out.status = Status::Cancelled;
-                } else if remaining_secs(r) <= 0 {
-                    out.status = Status::Timeout;
-                }
+                // The worker has already committed its disposition to the transcript.
+                // A late cancel request must not rewrite that terminal result.
                 out.finished = crate::util::rfc3339::now();
                 finish(dir, &out)?;
                 self.held = None;
