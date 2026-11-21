@@ -12,6 +12,22 @@
 
 The child reports its state to Rex through the **Program Status Protocol (OSC 7501)**: `working` during a run, `blocked` when waiting for input, and `idle` when ready. `done` or `error` reports how the last run ended, not that the child exited. Clients can use Rex to see which child needs attention without parsing its screen. For the recorded outcome of a particular run, the orchestrator queries ahi by run ID.
 
+## Delegation glossary
+
+| Term | Meaning in ahi |
+| --- | --- |
+| **Delegation** | Asking another ahi worker to carry out a bounded task under an approved mode. |
+| **Orchestrator** | The parent that delegates work, tracks its outcome, and decides whether to follow up, cancel a run, or close a child. The parent can keep chatting while the child works. |
+| **Subagent (child)** | The ahi worker that does the delegated work. A resident child stays open between runs. Its **child ID** identifies it across those runs. |
+| **ahi session** | The child’s recorded conversation: prompts, replies, tool calls, and results. A follow-up uses that history; closing the live child does not delete it. |
+| **Rex session** | The multiplexer session that hosts the live child. Its **Rex session ID** tells a client where to attach, not which run to inspect. |
+| **Run (assignment)** | One admitted piece of work, from acceptance to completion, failure, cancellation, or timeout. Its **run ID** identifies the work to inspect or cancel. For a local Rex child, this is the **assignment ID**. The first run uses the child ID; later runs have distinct IDs. |
+| **Turn** | One prompt and the model and tool calls needed to answer it. Prompts queued together at admission can span several turns in one run. A follow-up submitted later starts a new run in the same ahi session. |
+| **Admission** | The service’s permission check before accepting a run. The delegated mode cannot grant more than the caller or the workspace permits at that moment; a follow-up cannot widen the child’s existing permissions. |
+| **Idle** | The child is open and ready for another run. Detaching disconnects a client; cancelling stops a run; closing ends the live child. |
+
+For tool, policy, and terminal-host terminology, see the [general glossary](#glossary).
+
 ## Overview
 
 `ahi` is a Rust library and command-line tool for working on software projects:
@@ -532,7 +548,7 @@ Detection only in this version; nothing is confined yet. `ahi sandbox check` pri
 
 ## Glossary
 
-These terms describe ahi's boundaries, not interchangeable names for the same subsystem.
+For children, sessions, runs, and turns, see the [delegation glossary](#delegation-glossary).
 
 | Term | Meaning in ahi |
 | --- | --- |
@@ -548,9 +564,7 @@ These terms describe ahi's boundaries, not interchangeable names for the same su
 | **Terminal / shell / UI client** | A terminal supplies program input/output; a shell is one program that can run in it. A graphical UI client displays terminals. Ahi does not manage the external client's windows, layout, or focus. |
 | **Execution target** | The selected server/core and local or remote execution namespace. Native Windows and WSL are different targets, even on one physical computer. |
 | **Terminal handle** | A backend- and target-qualified native terminal ID. It is not an ahi session ID, worker label, or currently focused pane. Local core IDs are not portable to another machine. |
-| **Ahi session / turn** | A session is a recorded conversation and its execution history. A turn is one submitted request and the model/tool work needed to answer it. A Rex session is a separate native resource container. |
 | **Session service / connector** | `ahi serve` owns structured session operations. `ahi connect` carries that protocol over stdio, including through SSH. `hc connect` carries a different protocol. |
-| **Worker / delegation / orchestration** | A worker is an ahi service receiving a task. Delegation submits that task through an explicitly configured connector. Scheduling and coordinating multiple workers are not terminal-host responsibilities. |
 | **Program status** | Advisory OSC 7501 reports such as working or blocked. They are neither structured agent replies nor authorization or proof that a process exited. |
 | **Durability / ledger** | Stored conversation and execution facts, including tool presentation details. Rendering and authorization remain application responsibilities. |
 | **Conversation resume / crash recovery** | Resume restores a saved conversation. Crash recovery would reconcile unfinished effects and permissions; it is not implemented by conversation resume. |
