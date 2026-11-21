@@ -42,6 +42,10 @@ pub(crate) struct HttpBackend {
     caller: Caller,
     /// Bounds every tool call of a turn; `None` is the chat's unbounded turn.
     deadline: Option<Instant>,
+    /// `false` is a hard ceiling: no tool root is resolved, no policy file is
+    /// read, and the model is offered no tool schema. Used by the delegation
+    /// worker, whose scratch directory must not be able to raise its powers.
+    tools_enabled: bool,
     grants: SessionGrants,
     scratch: crate::tools::Scratch,
     /// One client for the life of the chat: connections are reused across
@@ -61,6 +65,7 @@ impl HttpBackend {
             actions: None,
             caller: Caller::default(),
             deadline: None,
+            tools_enabled: true,
             grants: SessionGrants::default(),
             scratch: Default::default(),
             agent: ureq::Agent::config_builder()
@@ -90,6 +95,14 @@ impl HttpBackend {
 
     pub(crate) fn with_scratch(mut self, scratch: crate::tools::Scratch) -> Self {
         self.scratch = scratch;
+        self
+    }
+
+    /// Run every turn without tools, whatever the working directory holds.
+    /// Unlike an empty workspace this never consults a policy file, so a
+    /// planted `ahi.tools.yaml` cannot enable anything.
+    pub(crate) fn without_tools(mut self) -> Self {
+        self.tools_enabled = false;
         self
     }
 
@@ -131,8 +144,13 @@ impl CompletionBackend for HttpBackend {
         self.cancel = Arc::clone(&cancel);
         let caller = self.caller.clone();
         let deadline = self.deadline;
+        let tools_enabled = self.tools_enabled;
         let handle = std::thread::spawn(move || {
-            let workspace = workspace.or_else(|| std::env::current_dir().ok());
+            let workspace = if tools_enabled {
+                workspace.or_else(|| std::env::current_dir().ok())
+            } else {
+                None
+            };
             let result = complete(
                 &state,
                 ToolSource {

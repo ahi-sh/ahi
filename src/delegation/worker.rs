@@ -1,0 +1,267 @@
+//! The process in the Rex block: claim the assignment once, run one bounded
+//! model turn with no tools, publish a structured result, exit.
+//!
+//! It performs the inference itself through the in-process `HttpBackend`; it
+//! does not submit a turn to a service, open the session store, or tail
+//! another process. The PTY sees only progress lines: never the prompt, the
+//! model's text, or a credential. The result travels through `result.json`.
+
+use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
+
+use super::{Failure, Observed, Outcome, Status, Usage, MAX_RESULT_TEXT_BYTES};
+use crate::chat::backend::{
+    Caller, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection,
+};
+use crate::chat::thinking::ThinkingLevel;
+use crate::chat::transcript::{ChatMessage, TranscriptRole};
+
+/// How often the worker re-reads the receipt for a cancel while streaming.
+const CANCEL_POLL: Duration = Duration::from_millis(500);
+
+/// Exit codes of `ahi internal-worker`. The result file, not the code, is the
+/// record; the code is for the operator glancing at the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// A result with status `ok` was published.
+    Ok = 0,
+    /// A result with status `failed` was published.
+    Failed = 1,
+    /// The arguments or the stored records were refused before any claim.
+    Refused = 2,
+    /// Another worker holds the claim, or the attempt is stale or cancelled.
+    NotClaimed = 3,
+    /// A result with status `cancelled` or `timeout` was published.
+    Stopped = 6,
+    /// The turn ran but no result could be published.
+    Unpublished = 8,
+}
+
+impl Exit {
+    pub(crate) fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Run the worker for `dir` under `attempt`. Returns the exit code.
+pub(crate) fn run(dir: &Path, attempt: &str) -> u8 {
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => return Exit::Refused.code(),
+    };
+    run_at(dir, attempt, &cwd, Observed::from_env())
+}
+
+pub(super) fn run_at(dir: &Path, attempt: &str, cwd: &Path, observed: Observed) -> u8 {
+    match execute(dir, attempt, cwd, observed) {
+        Ok(exit) => exit.code(),
+        Err((exit, message)) => {
+            eprintln!("error: {message}");
+            exit.code()
+        }
+    }
+}
+
+fn execute(
+    dir: &Path,
+    attempt: &str,
+    cwd: &Path,
+    observed: Observed,
+) -> Result<Exit, (Exit, String)> {
+    if !dir.is_absolute() {
+        return Err((
+            Exit::Refused,
+            "--assignment-dir must be absolute".to_string(),
+        ));
+    }
+    let reserved = super::load_dir(dir).map_err(|err| (Exit::Refused, err.message))?;
+    let expected = reserved
+        .scratch
+        .canonicalize()
+        .map_err(|_| (Exit::Refused, "missing scratch directory".into()))?;
+    if cwd.canonicalize().ok().as_ref() != Some(&expected)
+        || !matches!(&reserved.target,crate::terminal_host::Target::Rex{session,..} if observed.rex_session.as_ref()==Some(session))
+        || !std::fs::read_dir(&expected).is_ok_and(|mut files| files.next().is_none())
+    {
+        return Err((
+            Exit::Refused,
+            "worker must run in the assigned Rex session and empty scratch directory".into(),
+        ));
+    }
+    let (receipt, claim) = super::claim(dir, attempt, &observed).map_err(|err| {
+        let exit = match err.kind {
+            super::ErrorKind::Conflict => Exit::NotClaimed,
+            _ => Exit::Refused,
+        };
+        (exit, err.message)
+    })?;
+    eprintln!(
+        "assignment {}: claimed attempt {attempt} (pid {})",
+        receipt.id, claim.pid
+    );
+    let finish = |status: Status,
+                  text: String,
+                  truncated: bool,
+                  usage: Option<Usage>,
+                  error: Option<Failure>|
+     -> Result<Exit, (Exit, String)> {
+        let outcome = Outcome {
+            assignment: receipt.id.clone(),
+            attempt: attempt.to_string(),
+            status,
+            gateway: receipt.gateway.clone(),
+            model: receipt.model.clone(),
+            text_bytes: text.len() as u64,
+            text,
+            truncated,
+            usage,
+            error,
+            finished: crate::util::rfc3339::now(),
+        };
+        super::finish(dir, &outcome).map_err(|err| (Exit::Unpublished, err.message))?;
+        eprintln!(
+            "assignment {}: {} ({} bytes of text{}; result published)",
+            receipt.id,
+            match status {
+                Status::Ok => "ok",
+                Status::Failed => "failed",
+                Status::Cancelled => "cancelled",
+                Status::Timeout => "timeout",
+            },
+            outcome.text_bytes,
+            if truncated { ", truncated" } else { "" }
+        );
+        Ok(match status {
+            Status::Ok => Exit::Ok,
+            Status::Failed => Exit::Failed,
+            Status::Cancelled | Status::Timeout => Exit::Stopped,
+        })
+    };
+    // Once claimed, even a local validation failure is a structured result.
+    let invalid = |message: String| {
+        finish(
+            Status::Failed,
+            String::new(),
+            false,
+            None,
+            Some(Failure {
+                kind: "config".into(),
+                message,
+            }),
+        )
+    };
+    let prompt = match super::read_prompt(dir, &receipt) {
+        Ok(p) => p,
+        Err(e) => return invalid(e.message),
+    };
+    let Some(thinking) = ThinkingLevel::parse(&receipt.thinking) else {
+        return invalid("unknown thinking level".into());
+    };
+    let remaining = super::remaining_secs(&receipt);
+    if remaining <= 0 {
+        return finish(Status::Timeout, String::new(), false, None, None);
+    }
+    let deadline = Instant::now() + Duration::from_secs(remaining as u64);
+    // Last checkpoint before the provider sees anything.
+    if super::cancel_requested(dir) {
+        return finish(Status::Cancelled, String::new(), false, None, None);
+    }
+    let mut backend = HttpBackend::new(receipt.directories.to_directories())
+        .without_tools()
+        .with_deadline(deadline)
+        .with_caller(Caller {
+            origin: "delegate",
+            run_id: Some(receipt.id.clone()),
+        });
+    let request = ChatRequest {
+        mode: Default::default(),
+        skills: Vec::new(),
+        selection: Selection {
+            gateway: receipt.gateway.clone(),
+            model: receipt.model.clone(),
+        },
+        thinking,
+        messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],
+    };
+    eprintln!(
+        "assignment {}: inference started on {}/{} ({remaining}s remain, no tools)",
+        receipt.id, receipt.gateway, receipt.model
+    );
+    let events = backend.submit(request);
+    let mut text = String::new();
+    let mut truncated = false;
+    let mut usage = None;
+    // Set once the worker itself stopped the turn; the backend's eventual
+    // `Failed` then means that stop, not a provider fault.
+    let mut stopped: Option<Status> = None;
+    let mut last_poll = Instant::now();
+    loop {
+        if stopped.is_none() {
+            let now = Instant::now();
+            if now >= deadline {
+                stopped = Some(Status::Timeout);
+                backend.cancel();
+            } else if now.duration_since(last_poll) >= CANCEL_POLL {
+                last_poll = now;
+                if super::cancel_requested(dir) {
+                    stopped = Some(Status::Cancelled);
+                    backend.cancel();
+                }
+            }
+        }
+        let event = match events.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                let status = stopped.unwrap_or(Status::Failed);
+                let error = (status == Status::Failed).then(|| Failure {
+                    kind: "turn".into(),
+                    message: "the turn ended without a completion".into(),
+                });
+                return finish(status, text, truncated, usage, error);
+            }
+        };
+        match event {
+            ResponseEvent::TextDelta(delta) => {
+                if !truncated {
+                    truncated = super::push_bounded(&mut text, &delta, MAX_RESULT_TEXT_BYTES);
+                }
+            }
+            ResponseEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                ..
+            } => {
+                usage = Some(Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                });
+            }
+            // Without tools the backend fails the turn on a tool request; the
+            // request itself is neither executed nor approved here.
+            ResponseEvent::ToolApprovalRequested(request) => drop(request),
+            ResponseEvent::Completed => {
+                let status = stopped.unwrap_or(Status::Ok);
+                return finish(status, text, truncated, usage, None);
+            }
+            ResponseEvent::Failed { message, kind } => {
+                let status = stopped.unwrap_or(Status::Failed);
+                let error = (status == Status::Failed).then(|| Failure {
+                    kind: crate::service::error_kind_name(kind).to_string(),
+                    message,
+                });
+                return finish(status, text, truncated, usage, error);
+            }
+            ResponseEvent::CommandStdout { .. }
+            | ResponseEvent::CommandStarted { .. }
+            | ResponseEvent::ToolCallsRequested { .. }
+            | ResponseEvent::ContextWindow(_)
+            | ResponseEvent::ToolCallReturned
+            | ResponseEvent::ToolResult { .. }
+            | ResponseEvent::Reconnecting { .. } => {}
+        }
+    }
+}
