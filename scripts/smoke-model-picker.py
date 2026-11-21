@@ -32,6 +32,8 @@ def main() -> None:
     parser.add_argument("--binary", type=Path, default=Path("target/debug/ahi"))
     parser.add_argument("--capture-directory", type=Path)
     focused = parser.add_mutually_exclusive_group()
+    focused.add_argument("--startup-version-only", action="store_true",
+                         help="verify an incompatible local service is refused before the picker opens")
     focused.add_argument("--appearance-only", action="store_true",
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
@@ -188,7 +190,7 @@ def main() -> None:
             self.recent = b""
             os.write(self.fd, keys.encode())
 
-        def finish(self) -> str:
+        def finish(self, expected_code: int = 0) -> str:
             end = time.monotonic() + 10
             while time.monotonic() < end:
                 self.read()
@@ -196,7 +198,7 @@ def main() -> None:
                 if pid:
                     self.dead = True
                     self.read()
-                    assert os.waitstatus_to_exitcode(status) == 0, self.output
+                    assert os.waitstatus_to_exitcode(status) == expected_code, self.output
                     return self.output.decode(errors="replace")
             raise AssertionError("picker did not exit")
 
@@ -206,6 +208,37 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    if args.startup_version_only or not any((args.workspace_modes_only, args.appearance_only,
+            args.skill_picker_only, args.login_copy_only, args.stream_recovery_only, args.session_details_only)):
+        with tempfile.TemporaryDirectory(prefix="ahi-version-", dir="/tmp") as temp, socket.socket(socket.AF_UNIX) as listener:
+            state = Path(temp)
+            path = state / "serve.sock"
+            listener.bind(str(path))
+            listener.listen()
+            listener.settimeout(5)
+            session = Session(state, command=("tui", "--socket", str(path)))
+            try:
+                # A liveness probe may connect and immediately close. Only a real
+                # health request needs an answer; never send the picker a key.
+                while True:
+                    conn, _ = listener.accept()
+                    with conn, conn.makefile("rb") as reader:
+                        conn.settimeout(5)
+                        line = reader.readline()
+                        if line:
+                            req = json.loads(line)
+                            assert req["method"] == "health", req
+                            conn.sendall((json.dumps({"id": req["id"], "result": {"version": "0.26.1"}}) + "\n").encode())
+                            break
+                output = session.finish(expected_code=1)
+                assert f"the server on {path} is ahi 0.26.1" in output and "ahi serve stop" in output, output
+                assert b"\x1b[?1049h" not in session.output, "entered alternate screen before refusing service"
+            finally:
+                session.close()
+        if args.startup_version_only:
+            print("PASS: stale local service refused before TUI startup, without input")
+            return
 
     if args.workspace_modes_only:
         queue_release = threading.Event()
