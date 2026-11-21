@@ -1739,7 +1739,7 @@ fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
                 0,
                 "edited a.rs: 1 replacement, +2 -1 lines".into()
             ),
-            ("c2".into(), 0, "created new.rs: 1 lines".into()),
+            ("c2".into(), 0, "created new.rs: 1 line".into()),
             (
                 "c3".into(),
                 1,

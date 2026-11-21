@@ -2,6 +2,8 @@
 
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::backend::Selection;
 use super::location::GitStatus;
@@ -134,21 +136,24 @@ pub(crate) fn render_location_row(
     if width == 0 {
         return Line::default();
     }
-    let length: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    let length: usize = spans.iter().map(Span::width).sum();
     if length > width {
         // Trim the source spans, not a flattened string, so visible text keeps
         // its color even when the OS/path prefix has been clipped away.
         let mut skip = length - (width - 1);
         for span in &mut spans {
-            let count = span.content.chars().count();
-            let removed = skip.min(count);
-            span.content = span
-                .content
-                .chars()
-                .skip(removed)
-                .collect::<String>()
-                .into();
-            skip -= removed;
+            if skip == 0 {
+                break;
+            }
+            let mut end = 0;
+            for (index, cluster) in span.content.grapheme_indices(true) {
+                end = index + cluster.len();
+                skip = skip.saturating_sub(cluster.width());
+                if skip == 0 {
+                    break;
+                }
+            }
+            span.content = span.content[end..].to_string().into();
         }
         spans.insert(0, Span::raw("…"));
     }
@@ -188,6 +193,18 @@ mod tests {
             assert_eq!(buffer[(x, 0)].fg, Color::Indexed(76));
             assert!(!buffer[(x, 0)].modifier.contains(Modifier::DIM));
         }
+    }
+
+    #[test]
+    fn narrow_location_keeps_the_rightmost_wide_and_combining_graphemes() {
+        assert_eq!(
+            render_location_row(6, "OS", "界界e\u{301}終", None).to_string(),
+            "…界e\u{301}終"
+        );
+        assert_eq!(
+            render_location_row(3, "OS", "folder/界界", None).to_string(),
+            "…界"
+        );
     }
 
     #[test]

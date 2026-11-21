@@ -48,7 +48,7 @@ pub(super) fn run(
     directory: &Path,
     relative: &str,
     query: &Query<'_>,
-) -> Result<String, &'static str> {
+) -> Result<(String, usize), &'static str> {
     if !directory.is_dir() {
         return Err("not a directory");
     }
@@ -62,7 +62,8 @@ pub(super) fn run(
     };
     let regex = RegexBuilder::new(&source)
         .case_insensitive(query.ignore_case)
-        .multi_line(false)
+        .multi_line(true)
+        .crlf(true)
         .size_limit(1 << 20)
         .dfa_size_limit(1 << 20)
         .build()
@@ -157,8 +158,13 @@ pub(super) fn run(
         out.push_str("[no matches]");
     } else if matches > shown {
         out.push_str(&format!(
-            "\n[{} more matches not shown; raise limit or narrow the path, glob, or pattern]",
-            matches - shown
+            "\n[{} more {} not shown; raise limit or narrow the path, glob, or pattern]",
+            matches - shown,
+            if matches - shown == 1 {
+                "match"
+            } else {
+                "matches"
+            }
         ));
     }
     if exhausted {
@@ -167,7 +173,7 @@ pub(super) fn run(
     if skipped > 0 {
         out.push_str(&format!("\n[{skipped} binary or oversized files skipped]"));
     }
-    Ok(out)
+    Ok((out, shown))
 }
 
 /// A file's matching lines, pre-rendered as `path:line:text` runs in one
@@ -241,6 +247,10 @@ impl<'a> Scanner<'a> {
         let mut last_line_start = usize::MAX;
         for found in self.regex.find_iter(buffer) {
             let start = found.start();
+            // A terminating newline doesn't create another searchable file line.
+            if start == buffer.len() && (buffer.is_empty() || buffer.ends_with(b"\n")) {
+                break;
+            }
             line_number += buffer[counted_to..start]
                 .iter()
                 .filter(|b| **b == b'\n')

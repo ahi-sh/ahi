@@ -7,8 +7,7 @@ use std::io::{BufRead, BufReader};
 use super::helpers::Workspace;
 
 pub(super) const MAX_BYTES: usize = 64 * 1024;
-/// Files beyond this are read only through `offset`/`limit` windows that
-/// stop early; the line count in the header is then a lower bound.
+/// Bound the scan needed to count lines and validate UTF-8.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `offset` is a 1-based first line; `limit` a number of lines. `None`
@@ -18,7 +17,7 @@ pub(super) fn run(
     relative: &str,
     offset: Option<usize>,
     limit: Option<usize>,
-) -> Result<String, &'static str> {
+) -> Result<(String, usize), &'static str> {
     let opened = workspace.open_read(relative)?;
     if opened.size > MAX_FILE_BYTES {
         return Err("file is larger than 64 MiB");
@@ -57,6 +56,9 @@ pub(super) fn run(
             continue;
         }
         if body.len() + text.len() > MAX_BYTES {
+            if body.is_empty() {
+                return Err("requested line exceeds 64 KiB; skip it with a later offset or narrow the search with search_files");
+            }
             stopped_by_cap = true;
             // Keep counting to report the total; nothing more is stored.
             continue;
@@ -65,8 +67,18 @@ pub(super) fn run(
         last_included = line_number;
     }
     let total = line_number;
-    if first > total && total > 0 {
+    if first > total.max(1) {
         return Err("offset is past the end of the file");
+    }
+    if total == 0 {
+        return Ok((
+            if paged {
+                "[empty file]\n".into()
+            } else {
+                String::new()
+            },
+            0,
+        ));
     }
     // The body is the file's bytes, verbatim. Only the header and the
     // continuation line are added, and only when the whole file is not
@@ -82,10 +94,15 @@ pub(super) fn run(
             out.push('\n');
         }
         out.push_str(&format!(
-            "[{} more lines; continue with offset={}]",
+            "[{} more {}; continue with offset={}]",
             total - last_included,
+            if total - last_included == 1 {
+                "line"
+            } else {
+                "lines"
+            },
             last_included + 1
         ));
     }
-    Ok(out)
+    Ok((out, last_included - first + 1))
 }

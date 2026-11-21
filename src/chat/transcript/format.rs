@@ -394,7 +394,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
     // The first line of `output` is `tool target` or `tool target: reason`.
     let (target, reason) = {
         let rest = first.strip_prefix(name).unwrap_or(first).trim_start();
-        match rest.split_once(": ") {
+        match rest.split_once(": ").filter(|_| exit_code != 0) {
             Some((target, reason)) => (target.to_string(), Some(reason.to_string())),
             None => (rest.to_string(), None),
         }
@@ -489,8 +489,10 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
             lines,
         }) => {
             let start = offset.unwrap_or(1);
-            summary.push(match limit {
-                Some(_) if *lines > 0 => format!("lines {start}–{}", start + lines - 1),
+            summary.push(match (offset.is_some() || limit.is_some(), *lines) {
+                (true, 1) => format!("line {start}"),
+                (true, n) if n > 1 => format!("lines {start}–{}", start.saturating_add(n - 1)),
+                (_, 1) => "1 line".to_string(),
                 _ => format!("{lines} lines"),
             });
         }
@@ -560,6 +562,11 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 out.push(search_row(line, options));
             }
         }
+        Some(ToolDetail::Read { lines: 0, .. }) => {
+            let mut row = Styled::default();
+            row.push("(empty file)", theme::dim());
+            out.push(row);
+        }
         Some(ToolDetail::Read { offset, .. }) => {
             let language = target.rsplit('.').next().and_then(highlight::language);
             read_rows(lines, offset.unwrap_or(1), language, &mut out);
@@ -589,7 +596,12 @@ fn read_rows<'a>(
         let bracketed = line.starts_with('[') && line.ends_with(']');
         (index == 0 && bracketed && line.starts_with("[lines "))
             || (index + 1 == lines.len()
-                && (line.starts_with('…') || (bracketed && line.contains(" more lines;"))))
+                && (line
+                    .strip_prefix("… ")
+                    .and_then(|s| s.strip_suffix(" more lines"))
+                    .is_some_and(|n| n.parse::<usize>().is_ok())
+                    || (bracketed
+                        && (line.contains(" more line;") || line.contains(" more lines;")))))
     };
     let body = lines
         .iter()
@@ -679,10 +691,10 @@ fn stream_rows(label: &str, text: &str, cut: bool, style: Option<Style>, out: &m
         };
         let more = lines.len().saturating_sub(MAX_STREAM_ROWS);
         styled.push(
-            &if cut {
-                format!("  … {more} more lines shown to the model, output truncated")
-            } else {
-                format!("  … {more} more lines")
+            &match (more, cut) {
+                (0, true) => "  … output truncated".to_string(),
+                (_, true) => format!("  … {more} more captured lines; output truncated"),
+                (_, false) => format!("  … {more} more lines"),
             },
             theme::dim(),
         );
@@ -980,6 +992,27 @@ mod tests {
     }
 
     #[test]
+    fn expanded_read_preserves_colons_in_paths_and_numbers_literal_ellipsis_lines() {
+        let read = tool(
+            "read_file",
+            "read_file notes: daily.txt\n…work in progress",
+            0,
+            Some(ToolDetail::Read {
+                offset: None,
+                limit: None,
+                lines: 1,
+            }),
+        );
+        assert_eq!(
+            texts(&paragraphs(&read, &options(), 80)),
+            [
+                "✓ read_file notes: daily.txt · 1 line · 3.8s",
+                "1 …work in progress"
+            ]
+        );
+    }
+
+    #[test]
     fn tool_headers_follow_one_grammar() {
         let read = tool(
             "read_file",
@@ -995,7 +1028,7 @@ mod tests {
         assert_eq!(
             texts(&out),
             vec![
-                "✓ read_file src/main.rs · lines 10–10 · 3.8s",
+                "✓ read_file src/main.rs · line 10 · 3.8s",
                 "10 fn main() {}"
             ]
         );
@@ -1041,7 +1074,7 @@ mod tests {
                 "stderr",
                 "  bad",
                 "  worse",
-                "  … 0 more lines shown to the model, output truncated",
+                "  … output truncated",
             ]
         );
         assert_eq!(

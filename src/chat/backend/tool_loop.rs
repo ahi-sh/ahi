@@ -629,7 +629,7 @@ impl ToolRuntime {
                         lines_added: 0,
                         lines_removed: 0,
                     };
-                    record = Some(self.record_write(prepared, &none, failure.message));
+                    record = Some(self.record_write(prepared, &none, &failure.message));
                 }
                 if prepared.tool == tools::RUN_COMMAND {
                     let none = tools::CommandReport {
@@ -638,7 +638,7 @@ impl ToolRuntime {
                         env_names: Vec::new(),
                     };
                     record =
-                        Some(self.record_command(prepared, &none, failure.message, failure.ran));
+                        Some(self.record_command(prepared, &none, &failure.message, failure.ran));
                 }
                 if prepared.tool == tools::LOAD_SKILL {
                     let none = tools::SkillReport {
@@ -651,7 +651,7 @@ impl ToolRuntime {
                         sha256: String::new(),
                         bytes: 0,
                     };
-                    record = Some(self.record_skill(&none, failure.message));
+                    record = Some(self.record_skill(&none, &failure.message));
                 }
                 if prepared.tool == tools::DELEGATE {
                     let none = tools::delegate::DelegationReport {
@@ -663,9 +663,9 @@ impl ToolRuntime {
                         effects: "unknown".to_string(),
                         duration_ms: elapsed.as_millis(),
                     };
-                    record = Some(self.record_delegation(&none, failure.message));
+                    record = Some(self.record_delegation(&none, &failure.message));
                 }
-                let mut outcome = error(prepared.tool, Some(prepared.target()), failure.message);
+                let mut outcome = error(prepared.tool, Some(prepared.target()), &failure.message);
                 outcome.elapsed = elapsed;
                 outcome.record = record;
                 outcome
