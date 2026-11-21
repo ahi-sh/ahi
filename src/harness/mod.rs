@@ -527,9 +527,8 @@ pub fn refresh_provider(state: &Directories, id: &str) -> Result<()> {
             CatalogRoute::StandardModels => {
                 let headers = gateway_headers(&entry)?;
                 let (models, mut metadata) = fetch_standard_models(&entry.base_url, &headers)?;
-                // `/models` lists ids and names only. Typed metadata that
-                // discovery or an earlier refresh recorded for an id that is
-                // still listed survives; the fresh name overlays it.
+                // Some standard catalogs return little more than ids. Keep
+                // previous metadata unless this refresh supplies a new value.
                 if let Ok(Some(previous)) = read_last_good(state, id) {
                     for (model, fresh) in metadata.iter_mut() {
                         if let Some(kept) = previous.metadata.get(model) {
@@ -616,6 +615,7 @@ fn fetch_standard_models(
         id: String,
         #[serde(default)]
         display_name: Option<String>,
+        max_tokens: Option<std::num::NonZeroU64>,
     }
     const MAX_PAGES: usize = 8;
     let mut models = Vec::new();
@@ -642,6 +642,7 @@ fn fetch_standard_models(
                 return Err(Error::protocol("duplicate model catalog id"));
             }
             let model = ModelMetadata {
+                max_tokens: entry.max_tokens,
                 name: entry
                     .display_name
                     .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control)),
@@ -1605,7 +1606,7 @@ mod tests {
     #[test]
     fn standard_models_refresh_keeps_display_names_and_sends_the_configured_key() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("harness-standard");
-        let body = br#"{"data":[{"id":"claude-b","display_name":"Claude B","type":"model"},{"id":"claude-a","display_name":" "}],"has_more":false}"#;
+        let body = br#"{"data":[{"id":"claude-b","display_name":"Claude B","type":"model","max_tokens":64000},{"id":"claude-a","display_name":" "}],"has_more":false}"#;
         let port = serve("200 OK", "", body);
         fs::write(
             dir.join("models.json"),
@@ -1630,6 +1631,10 @@ mod tests {
         assert_eq!(
             catalog.metadata["claude-b"].name.as_deref(),
             Some("Claude B")
+        );
+        assert_eq!(
+            catalog.metadata["claude-b"].max_tokens.unwrap().get(),
+            64000
         );
         assert_eq!(catalog.metadata["claude-a"].name, None);
         assert_eq!(claude.models[0].status, CatalogMembership::Listed);

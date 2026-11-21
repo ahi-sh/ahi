@@ -348,7 +348,7 @@ fn complete(
             let body = protocol::request_body(connection.protocol, &context)?;
             cancelled(cancel)?;
             let response = send(agent, state, &connection, &body, sender, cancel)?;
-            let outcome = decode(connection.protocol, metadata, response, sender, cancel)?;
+            let outcome = decode(connection.protocol, &context, response, sender, cancel)?;
             match outcome {
                 StreamOutcome::Stopped => return Ok(()),
                 StreamOutcome::ToolCalls {
@@ -525,7 +525,7 @@ fn http_error(status: u16) -> Error {
 /// Validate the response envelope the protocol cares about, then decode.
 fn decode(
     protocol: Protocol,
-    metadata: &crate::harness::ModelMetadata,
+    context: &RequestContext<'_>,
     response: ureq::http::Response<ureq::Body>,
     sender: &Sender<ResponseEvent>,
     cancel: &Arc<AtomicBool>,
@@ -549,7 +549,7 @@ fn decode(
         inner: response.into_body().into_reader(),
         cancel: Arc::clone(cancel),
     };
-    protocol::read_stream(protocol, reader, sender, metadata).map_err(|error| {
+    protocol::read_stream(protocol, reader, sender, context).map_err(|error| {
         // Content-Type is not an acceptance gate for framing-validated
         // protocols, but it is the most useful diagnostic when framing fails.
         if protocol == Protocol::OpenAiCompletions {

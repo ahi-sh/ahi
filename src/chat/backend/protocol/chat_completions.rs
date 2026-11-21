@@ -260,7 +260,10 @@ pub(super) fn read_stream(
                     "stop" => finished = Some(FinishReason::Stop),
                     "tool_calls" => finished = Some(FinishReason::ToolCalls),
                     "length" => {
-                        return Err(Error::limit("model response truncated by its output limit"))
+                        return Err(super::output_limit(
+                            metadata.max_tokens,
+                            !tool_calls.is_empty(),
+                        ))
                     }
                     _ => {
                         return Err(Error::protocol(

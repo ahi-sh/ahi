@@ -24,7 +24,14 @@ fn read_stream(body: &[u8], sender: &Sender<ResponseEvent>) -> Result<StreamOutc
         Protocol::OpenAiCompletions,
         std::io::Cursor::new(body.to_vec()),
         sender,
-        &ModelMetadata::default(),
+        &RequestContext::new(
+            "fixture",
+            ThinkingLevel::Off,
+            &ModelMetadata::default(),
+            &[],
+            None,
+            false,
+        ),
     )
 }
 
@@ -192,8 +199,19 @@ fn responses_fixture_with_refresh(
     }).to_string().as_bytes()).unwrap();
     let mut input = request();
     input.selection = parse_selection("openai/curated-model");
-    let metadata = crate::harness::ModelMetadata::default();
-    let body_bytes = responses_request_body(&input, &metadata).unwrap();
+    let metadata = ModelMetadata {
+        max_tokens: std::num::NonZeroU64::new(64000),
+        ..Default::default()
+    };
+    let context = RequestContext::new(
+        &input.selection.model,
+        input.thinking,
+        &metadata,
+        &input.messages,
+        None,
+        true,
+    );
+    let body_bytes = protocol::request_body(Protocol::OpenAiResponses, &context).unwrap();
     let response = crate::harness::fixture_inference_response(
         &state,
         &body_bytes,
@@ -205,7 +223,7 @@ fn responses_fixture_with_refresh(
     let cancel = Arc::new(AtomicBool::new(false));
     let result = decode(
         Protocol::OpenAiResponses,
-        &metadata,
+        &context,
         response,
         &sender,
         &cancel,
@@ -351,7 +369,25 @@ fn verify_responses_http_failures() {
             response_events(vec![
                 json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
             ]),
-            "truncated",
+            "output limit. Ask for a shorter answer",
+        ),
+        (
+            response_events(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{","status":"incomplete"}}),
+                json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
+            ]),
+            "No tool calls from this reply ran",
+        ),
+        // A contradictory completion must never authorize an unfinished item,
+        // even if its arguments happen to be valid JSON.
+        (
+            response_events(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{}","status":"incomplete"}}),
+                completed_response(vec![]),
+            ]),
+            "invalid or conflicting",
         ),
         (
             response_events(vec![
@@ -2287,7 +2323,7 @@ fn write_protocol_models(state: &Path, url: &str, api: &str) {
         state.join("models.json"),
         json!({"providers": {"local": {
             "baseUrl": url, "api": api, "apiKey": "gateway",
-            "models": [{"id": "vendor/model", "maxTokens": 2048}]
+            "models": [{"id": "vendor/model", "maxTokens": 32768}]
         }}})
         .to_string(),
     )
@@ -2325,7 +2361,7 @@ fn an_anthropic_gateway_runs_the_same_tool_loop_and_replays_blocks() {
     assert!(lower.contains("anthropic-version: 2023-06-01\r\n"));
     assert!(!lower.contains("authorization:"));
     let first = request_body(&requests[0]);
-    assert_eq!(first["max_tokens"], 2048);
+    assert_eq!(first["max_tokens"], 32768);
     assert_eq!(first["tools"][0]["name"], "read_file");
     assert!(first["tools"][0]["input_schema"].is_object());
     assert!(first.get("system").is_none());
@@ -2343,6 +2379,36 @@ fn an_anthropic_gateway_runs_the_same_tool_loop_and_replays_blocks() {
     assert_eq!(
         result["content"][0],
         json!({"type": "tool_result", "tool_use_id": "toolu_01", "content": "fn a() {}\n", "is_error": false})
+    );
+}
+
+#[test]
+fn a_cutoff_discards_the_whole_call_batch_without_replaying_an_earlier_round() {
+    let partial = tool_stream(
+        &[json!([
+            {"index":0,"id":"again","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"src/a.rs\"}"}},
+            {"index":1,"id":"partial","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}
+        ])],
+        "length",
+    );
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[("first", "read_file", json!({"path":"src/a.rs"}))]),
+        stream(&partial),
+    ]);
+    let fixture = ToolFixture::new(
+        &url,
+        APPROVE_READS,
+        json!({"id":"vendor/model","maxTokens":16384}),
+    );
+    let events = collect(&mut fixture.backend(), request());
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(
+        results(&events),
+        vec![("first".into(), 0, "fn a() {}\n".into())]
+    );
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { kind: ErrorKind::Limit, message }) if message.contains("request limit: 16384 tokens). No tool calls from this reply ran")),
+        "{events:?}"
     );
 }
 
@@ -2376,7 +2442,7 @@ fn a_responses_gateway_sends_output_limits_and_replays_function_items() {
         .contains("authorization: bearer gateway\r\n"));
     let body = request_body(&requests[0]);
     // A gateway, not a browser token: the output budget is sent.
-    assert_eq!(body["max_output_tokens"], 2048);
+    assert_eq!(body["max_output_tokens"], 32768);
     assert_eq!(body["store"], false);
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["name"], "read_file");

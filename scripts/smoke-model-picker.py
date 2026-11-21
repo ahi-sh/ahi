@@ -1819,7 +1819,7 @@ def main() -> None:
             session.expect("0.1% / 1M")
             path, headers, request = gateway_requests[-1]
             assert path == "/v1/chat/completions"
-            assert request["max_tokens"] == 4096
+            assert request["max_tokens"] == 32768
             assert request["stream_options"] == {"include_usage": True}
             assert not {"store", "reasoning_effort", "tools"} & request.keys()
             cache_path = metadata_state / "catalogs/home.json"
@@ -1906,9 +1906,13 @@ def main() -> None:
             session.send("verify missing terminator\r")
             session.expect("model response ended before [DONE]")
             assert "stream_options" not in gateway_requests[-1][2]
-            gateway_response["stream"] = usage_stream.replace('"stop"', '"length"')
+            # A textual tool marker is still partial prose, never a structured call.
+            gateway_response["stream"] = usage_stream.replace('"stop"', '"length"').replace(
+                'metadata confirmed', '<tool_call>unfinished example')
             session.send("verify explicit truncation\r")
-            session.expect("model response truncated by its output limit")
+            session.expect("<tool_call>unfinished example")
+            session.expect("request limit: 128 tokens")
+            session.expect("Ask for a shorter answer")
             gateway_response["stream"] = (
                 'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}\n\n'
                 'data: [DONE]\n\n'
@@ -2132,7 +2136,7 @@ def main() -> None:
             server_thread.join(timeout=5)
     print(
         "PASS: Pi-shaped catalog onboarding, authoritative /v1 Review and inference, metadata cache/restart/curation, "
-        "provider/model overrides, capped output fields, reported paid usage without cached-input double counting, "
+        "provider/model overrides, declared output limits without clamping, reported paid usage without cached-input double counting, "
         "usage omission, reasoning Off and assistant replay, finish-reason fallback with truncation/tool safety, "
         "ahi.tools.yaml-gated read_file with operator approve/deny, tool resubmission and cross-turn replay, "
         "exact UTF-8 byte boundaries without rejected HTTP requests, model names/limits/context, "
