@@ -20,8 +20,8 @@ pub(super) struct Options {
 enum Command {
     /// Reserve a scratch assignment and start its worker in the configured Rex session.
     ///
-    /// The worker is the process in the block: it runs one turn on the exact
-    /// gateway/model with no tools and publishes a structured result. No Rex
+    /// The worker is the process in the block: it runs admitted turns and
+    /// scratch tools until idle, then publishes a structured result. No Rex
     /// client needs to be attached. The prompt file is kept privately beside
     /// the receipt, not in the scratch directory. A launch is issued once;
     /// an ambiguous reply is recorded, never retried.
@@ -49,6 +49,17 @@ struct LaunchArgs {
     /// The task, read once (UTF-8, at most 1 MiB).
     #[arg(long, value_name = "PATH")]
     prompt_file: PathBuf,
+    /// Follow-up prompt file. Repeat in order; all turns share history and one deadline.
+    #[arg(long, value_name = "PATH")]
+    follow_up: Vec<PathBuf>,
+    /// Child mode. Defaults to the caller's mode; never grants additional permissions.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Take the ceiling from this active service session and --parent-run instead of workspace startup.
+    #[arg(long, requires = "parent_run")]
+    parent_session: Option<String>,
+    #[arg(long, requires = "parent_session")]
+    parent_run: Option<String>,
     /// Local Rex endpoint: unix:///absolute/socket or a loopback IP:port (no host labels).
     #[arg(long)]
     server: String,
@@ -150,6 +161,9 @@ fn execute(dirs: &Directories, options: &Options) -> Result<serde_json::Value, F
 }
 
 fn launch(dirs: &Directories, args: &LaunchArgs) -> Result<serde_json::Value, Failure> {
+    if args.follow_up.len() > 15 {
+        return Err(Failure::Other(2, "at most 15 follow-up files".into()));
+    }
     let selection = crate::chat::backend::parse_selection(&args.model);
     if selection.gateway.is_empty() || selection.model.is_empty() {
         return Err(Failure::Other(2, "--model takes gateway/model-id".into()));
@@ -173,40 +187,68 @@ fn launch(dirs: &Directories, args: &LaunchArgs) -> Result<serde_json::Value, Fa
     // provider requests. Resolution reads local configuration only.
     crate::harness::completion_connection(dirs, &selection.gateway, &selection.model)
         .map_err(|err| Failure::Other(3, err.to_string()))?;
-    let executable = std::env::current_exe()
-        .ok()
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| {
-            Failure::Other(3, "cannot determine this executable's absolute path".into())
-        })?;
-    if args.dry_run {
-        return Ok(json!({
-            "dry_run": true,
-            "gateway": spec.gateway,
-            "model": spec.model,
-            "thinking": spec.thinking,
-            "prompt_sha256": crate::session::sha256_hex(spec.prompt.as_bytes()),
-            "prompt_bytes": spec.prompt.len(),
-            "timeout_secs": spec.timeout_secs,
-            "target": target,
-            "worker_executable": executable,
-            "placement": "scratch",
-            "tools": [],
-            "reserved": false,
-        }));
+    use delegation::broker::{Request, Source};
+    let source = match (&args.parent_session, &args.parent_run) {
+        (Some(session), Some(run)) => Source::Parent {
+            session: session.clone(),
+            run: run.clone(),
+        },
+        _ => Source::Operator {
+            cwd: std::env::current_dir().map_err(|e| Failure::Other(2, e.to_string()))?,
+        },
+    };
+    let mode = args
+        .mode
+        .as_ref()
+        .map(|m| serde_json::from_value(json!(m)))
+        .transpose()
+        .map_err(|e| Failure::Other(2, e.to_string()))?;
+    let request = Request {
+        id: crate::session::uuid(),
+        source,
+        mode,
+        spec,
+        follow_ups: args
+            .follow_up
+            .iter()
+            .map(|p| read_prompt(p))
+            .collect::<Result<_, _>>()?,
+        preview: args.dry_run,
+    };
+    let map = |e: crate::service::ServiceError| {
+        Failure::Other(
+            match e.kind {
+                "launch" => 5,
+                "conflict" => 4,
+                "config" => 3,
+                "policy" | "usage" => 2,
+                _ => 1,
+            },
+            e.message,
+        )
+    };
+    if request.preview && matches!(request.source, Source::Operator { .. }) {
+        return delegation::broker::admit(
+            &crate::service::Service::open(dirs),
+            &crate::serve::socket_path(dirs, None),
+            request,
+        )
+        .map_err(map);
     }
-    let mut receipt = delegation::reserve(dirs, spec)?;
-    let launched = delegation::launch(dirs, &mut receipt, &executable, None);
-    let status = delegation::status(dirs, &receipt.id)?;
-    match launched {
-        Ok(()) => Ok(status),
-        Err(err) => {
-            // The reservation and its phase are on disk; the operator needs
-            // the id to reconcile, so it goes to stderr with the error.
-            eprintln!("assignment {} is {}", receipt.id, receipt.phase.name());
-            Err(err.into())
-        }
+    let socket = if request.preview {
+        crate::serve::socket_path(dirs, None)
+    } else {
+        crate::serve::ensure_running(dirs, None).map_err(|e| Failure::Other(3, e.to_string()))?
+    };
+    let mut service = crate::service::client::Client::listening(dirs, &socket).map_err(map)?;
+    let health = service.call("health", json!({})).map_err(map)?;
+    if health["store"].as_str().map(Path::new) != Some(dirs.state.join("sessions").as_path()) {
+        return Err(Failure::Other(3,"the listening service uses a different state directory; select its state or a separate runtime directory".into()));
     }
+    service.call("child.admit", json!(request)).map_err(|e| {
+        eprintln!("assignment {} (check status before retrying)", request.id);
+        map(e)
+    })
 }
 
 fn read_prompt(path: &Path) -> Result<String, Failure> {

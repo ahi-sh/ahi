@@ -1,21 +1,36 @@
-//! The process in the Rex block: claim the assignment once, run one bounded
-//! model turn with no tools, publish a structured result, exit.
+//! The Rex process claims a service assignment, runs the admitted turns and
+//! scratch tools until idle, then publishes on its claiming connection.
 //!
 //! It performs the inference itself through the in-process `HttpBackend`; it
 //! does not submit a turn to a service, open the session store, or tail
 //! another process. The PTY sees only progress lines: never the prompt, the
-//! model's text, or a credential. The result travels through `result.json`.
+//! model's text, or a credential. The service publishes `result.json`.
 
 use std::path::Path;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
+use super::broker::Admission;
 use super::{Failure, Observed, Outcome, Status, Usage, MAX_RESULT_TEXT_BYTES};
 use crate::chat::backend::{
     Caller, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection,
 };
 use crate::chat::thinking::ThinkingLevel;
-use crate::chat::transcript::{ChatMessage, TranscriptRole};
+use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
+use crate::service::client::Client;
+use serde_json::{json, Value};
+
+enum Lease {
+    Service(Client),
+    #[cfg(test)]
+    Fixture,
+}
+
+enum Origin {
+    Service,
+    #[cfg(test)]
+    Fixture,
+}
 
 /// How often the worker re-reads the receipt for a cancel while streaming.
 const CANCEL_POLL: Duration = Duration::from_millis(500);
@@ -50,11 +65,21 @@ pub(crate) fn run(dir: &Path, attempt: &str) -> u8 {
         Ok(path) => path,
         Err(_) => return Exit::Refused.code(),
     };
-    run_at(dir, attempt, &cwd, Observed::from_env())
+    report(execute(
+        dir,
+        attempt,
+        &cwd,
+        Observed::from_env(),
+        Origin::Service,
+    ))
 }
 
+#[cfg(test)]
 pub(super) fn run_at(dir: &Path, attempt: &str, cwd: &Path, observed: Observed) -> u8 {
-    match execute(dir, attempt, cwd, observed) {
+    report(execute(dir, attempt, cwd, observed, Origin::Fixture))
+}
+fn report(result: Result<Exit, (Exit, String)>) -> u8 {
+    match result {
         Ok(exit) => exit.code(),
         Err((exit, message)) => {
             eprintln!("error: {message}");
@@ -68,6 +93,7 @@ fn execute(
     attempt: &str,
     cwd: &Path,
     observed: Observed,
+    origin: Origin,
 ) -> Result<Exit, (Exit, String)> {
     if !dir.is_absolute() {
         return Err((
@@ -89,24 +115,55 @@ fn execute(
             "worker must run in the assigned Rex session and empty scratch directory".into(),
         ));
     }
-    let (receipt, claim) = super::claim(dir, attempt, &observed).map_err(|err| {
-        let exit = match err.kind {
-            super::ErrorKind::Conflict => Exit::NotClaimed,
-            _ => Exit::Refused,
-        };
-        (exit, err.message)
-    })?;
+    let (mut service, admission, claim): (Lease, Admission, super::Claim) = match origin {
+        Origin::Service => {
+            let token: Value = super::read_json(&dir.join("broker.json"))
+                .map_err(|e| (Exit::Refused, e.message))?
+                .ok_or((Exit::Refused, "no service credential".into()))?;
+            let socket = token["socket"]
+                .as_str()
+                .ok_or((Exit::Refused, "missing service endpoint".into()))?;
+            let mut c =
+                Client::listening(&reserved.directories.to_directories(), Path::new(socket))
+                    .map_err(|e| (Exit::Refused, e.message))?;
+            let v=c.call("child.claim",json!({"id":reserved.id,"attempt":attempt,"nonce":token["nonce"],"cwd":expected,"pid":std::process::id(),"observed":observed})).map_err(|e|(Exit::NotClaimed,e.message))?;
+            (
+                Lease::Service(c),
+                serde_json::from_value(v["admission"].clone())
+                    .map_err(|e| (Exit::Refused, e.to_string()))?,
+                serde_json::from_value(v["claim"].clone())
+                    .map_err(|e| (Exit::Refused, e.to_string()))?,
+            )
+        }
+        #[cfg(test)]
+        Origin::Fixture => {
+            let (_, claim) =
+                super::claim(dir, attempt, &observed).map_err(|e| (Exit::NotClaimed, e.message))?;
+            (
+                Lease::Fixture,
+                Admission {
+                    mode: Default::default(),
+                    policy: Default::default(),
+                    follow_ups: vec![],
+                },
+                claim,
+            )
+        }
+    };
+    let receipt = reserved;
     eprintln!(
         "assignment {}: claimed attempt {attempt} (pid {})",
         receipt.id, claim.pid
     );
-    let finish = |status: Status,
-                  text: String,
-                  truncated: bool,
-                  usage: Option<Usage>,
-                  error: Option<Failure>|
+    let completed = std::cell::Cell::new(0usize);
+    let mut finish = |status: Status,
+                      text: String,
+                      truncated: bool,
+                      usage: Option<Usage>,
+                      error: Option<Failure>|
      -> Result<Exit, (Exit, String)> {
         let outcome = Outcome {
+            turns_completed: completed.get(),
             assignment: receipt.id.clone(),
             attempt: attempt.to_string(),
             status,
@@ -119,7 +176,20 @@ fn execute(
             error,
             finished: crate::util::rfc3339::now(),
         };
-        super::finish(dir, &outcome).map_err(|err| (Exit::Unpublished, err.message))?;
+        let status = match &mut service {
+            Lease::Service(service) => {
+                let v = service
+                    .call("child.finish", json!(outcome))
+                    .map_err(|e| (Exit::Unpublished, e.message))?;
+                serde_json::from_value(v["status"].clone())
+                    .map_err(|e| (Exit::Unpublished, e.to_string()))?
+            }
+            #[cfg(test)]
+            Lease::Fixture => {
+                super::finish(dir, &outcome).map_err(|e| (Exit::Unpublished, e.message))?;
+                status
+            }
+        };
         eprintln!(
             "assignment {}: {} ({} bytes of text{}; result published)",
             receipt.id,
@@ -139,7 +209,7 @@ fn execute(
         })
     };
     // Once claimed, even a local validation failure is a structured result.
-    let invalid = |message: String| {
+    let mut invalid = |message: String| {
         finish(
             Status::Failed,
             String::new(),
@@ -167,15 +237,27 @@ fn execute(
     if super::cancel_requested(dir) {
         return finish(Status::Cancelled, String::new(), false, None, None);
     }
-    let mut backend = HttpBackend::new(receipt.directories.to_directories())
-        .without_tools()
-        .with_deadline(deadline)
-        .with_caller(Caller {
-            origin: "delegate",
-            run_id: Some(receipt.id.clone()),
-        });
-    let request = ChatRequest {
-        mode: Default::default(),
+    let backend = HttpBackend::new(receipt.directories.to_directories());
+    let mut backend = if admission.policy.rules.is_empty() {
+        backend.without_tools()
+    } else {
+        backend
+            .in_workspace(expected)
+            .with_frozen_policy(admission.policy)
+    }
+    .with_deadline(deadline)
+    .with_caller(Caller {
+        origin: "delegate",
+        run_id: Some(receipt.id.clone()),
+    });
+    let mut follow_ups = admission.follow_ups.into_iter();
+    let mut request = ChatRequest {
+        // Even a Full Access parent never enables absolute paths in scratch.
+        mode: if admission.mode.host_paths() {
+            crate::tool_policy::ExecutionMode::ReadWrite
+        } else {
+            admission.mode
+        },
         skills: Vec::new(),
         selection: Selection {
             gateway: receipt.gateway.clone(),
@@ -185,10 +267,10 @@ fn execute(
         messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],
     };
     eprintln!(
-        "assignment {}: inference started on {}/{} ({remaining}s remain, no tools)",
+        "assignment {}: inference started on {}/{} ({remaining}s remain)",
         receipt.id, receipt.gateway, receipt.model
     );
-    let events = backend.submit(request);
+    let mut events = backend.submit(request.clone());
     let mut text = String::new();
     let mut truncated = false;
     let mut usage = None;
@@ -240,11 +322,37 @@ fn execute(
                     cached_input_tokens,
                 });
             }
-            // Without tools the backend fails the turn on a tool request; the
-            // request itself is neither executed nor approved here.
-            ResponseEvent::ToolApprovalRequested(request) => drop(request),
+            ResponseEvent::ToolApprovalRequested(request) => request.reply.send(vec![
+                    crate::chat::backend::ToolDecision::Unattended;
+                    request.calls.len()
+                ]),
             ResponseEvent::Completed => {
-                let status = stopped.unwrap_or(Status::Ok);
+                if stopped.is_none() {
+                    completed.set(completed.get() + 1);
+                }
+                if stopped.is_none() && !super::cancel_requested(dir) && Instant::now() < deadline {
+                    if let Some(next) = follow_ups.next() {
+                        request.messages.push(ChatMessage::new(
+                            TranscriptRole::Assistant,
+                            std::mem::take(&mut text),
+                        ));
+                        request
+                            .messages
+                            .push(ChatMessage::new(TranscriptRole::Operator, next));
+                        truncated = false;
+                        events = backend.submit(request.clone());
+                        continue;
+                    }
+                }
+                let status = stopped.unwrap_or_else(|| {
+                    if super::cancel_requested(dir) {
+                        Status::Cancelled
+                    } else if Instant::now() >= deadline {
+                        Status::Timeout
+                    } else {
+                        Status::Ok
+                    }
+                });
                 return finish(status, text, truncated, usage, None);
             }
             ResponseEvent::Failed { message, kind } => {
@@ -255,12 +363,31 @@ fn execute(
                 });
                 return finish(status, text, truncated, usage, error);
             }
+            ResponseEvent::ToolCallsRequested { calls, native } => {
+                let mut m = ChatMessage::new(TranscriptRole::Assistant, std::mem::take(&mut text));
+                m.tool = Some(ToolPayload::Calls { calls, native });
+                request.messages.push(m);
+                truncated = false;
+            }
+            ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                content,
+                exit_code,
+                ..
+            } => {
+                let mut m = ChatMessage::new(TranscriptRole::Tool { exit_code }, "");
+                m.tool = Some(ToolPayload::Result {
+                    call_id,
+                    name: tool,
+                    content,
+                });
+                request.messages.push(m);
+            }
             ResponseEvent::CommandStdout { .. }
             | ResponseEvent::CommandStarted { .. }
-            | ResponseEvent::ToolCallsRequested { .. }
             | ResponseEvent::ContextWindow(_)
             | ResponseEvent::ToolCallReturned
-            | ResponseEvent::ToolResult { .. }
             | ResponseEvent::Reconnecting { .. } => {}
         }
     }

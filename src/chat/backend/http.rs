@@ -46,6 +46,8 @@ pub(crate) struct HttpBackend {
     /// read, and the model is offered no tool schema. Used by the delegation
     /// worker, whose scratch directory must not be able to raise its powers.
     tools_enabled: bool,
+    local: Option<crate::delegation::local::Profile>,
+    frozen: Option<crate::tool_policy::ActionPolicy>,
     grants: SessionGrants,
     scratch: crate::tools::Scratch,
     /// One client for the life of the chat: connections are reused across
@@ -66,6 +68,8 @@ impl HttpBackend {
             caller: Caller::default(),
             deadline: None,
             tools_enabled: true,
+            local: None,
+            frozen: None,
             grants: SessionGrants::default(),
             scratch: Default::default(),
             agent: ureq::Agent::config_builder()
@@ -95,6 +99,19 @@ impl HttpBackend {
 
     pub(crate) fn with_scratch(mut self, scratch: crate::tools::Scratch) -> Self {
         self.scratch = scratch;
+        self
+    }
+
+    pub(crate) fn with_local_profile(
+        mut self,
+        local: Option<crate::delegation::local::Profile>,
+    ) -> Self {
+        self.local = local;
+        self
+    }
+
+    pub(crate) fn with_frozen_policy(mut self, policy: crate::tool_policy::ActionPolicy) -> Self {
+        self.frozen = Some(policy);
         self
     }
 
@@ -145,6 +162,8 @@ impl CompletionBackend for HttpBackend {
         let caller = self.caller.clone();
         let deadline = self.deadline;
         let tools_enabled = self.tools_enabled;
+        let frozen = self.frozen.clone();
+        let local = self.local.clone();
         let handle = std::thread::spawn(move || {
             let workspace = if tools_enabled {
                 workspace.or_else(|| std::env::current_dir().ok())
@@ -154,6 +173,8 @@ impl CompletionBackend for HttpBackend {
             let result = complete(
                 &state,
                 ToolSource {
+                    local,
+                    frozen,
                     workspace: workspace.as_deref(),
                     actions: actions.as_deref(),
                     caller,
@@ -235,6 +256,8 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
 /// Where a turn's tool policy comes from: the workspace's `ahi.tools.yaml`
 /// unless an explicit `actions` file replaces it.
 struct ToolSource<'a> {
+    local: Option<crate::delegation::local::Profile>,
+    frozen: Option<crate::tool_policy::ActionPolicy>,
     scratch: crate::tools::Scratch,
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
@@ -262,12 +285,16 @@ fn complete(
         protocol::emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
     let ToolSource {
+        local,
+        frozen,
         scratch,
         workspace,
         actions,
         caller,
         deadline,
     } = source;
+    let child = caller.origin == "delegate";
+    let mut rounds = 0usize;
     let mut tools = match workspace {
         Some(directory) => ToolRuntime::load(
             directory,
@@ -277,6 +304,8 @@ fn complete(
             grants,
             actions,
             TurnContext {
+                local,
+                frozen,
                 scratch,
                 mode: request.mode,
                 caller,
@@ -305,6 +334,9 @@ fn complete(
     let schemas = tools.as_ref().map(ToolRuntime::schemas);
     let mut turn = || -> Result<()> {
         loop {
+            if child && deadline.is_some_and(|d| Instant::now() >= d) {
+                return Err(Error::new("assignment deadline reached"));
+            }
             let context = RequestContext::new(
                 &selection.model,
                 thinking,
@@ -344,6 +376,12 @@ fn complete(
                         }));
                     };
                     cancelled(cancel)?;
+                    rounds += 1;
+                    if child && rounds > 64 {
+                        return Err(Error::policy(
+                            "scratch child exceeded 64 tool rounds in one turn",
+                        ));
+                    }
                     let results = tools.run_round(&calls, sender)?;
                     let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
                     assistant.tool = Some(ToolPayload::Calls { calls, native });

@@ -1,30 +1,11 @@
-//! Operator-only local delegation: one bounded, unattended child turn in an
-//! empty scratch directory, hosted as a process in a designated Rex session.
-//!
-//! First vertical slice of `docs/proposals/subagent-modules.md`. Not a
-//! model-facing tool: nothing here is advertised to a model, parsed from tool
-//! arguments, or reachable from `tools::delegate`.
-//!
-//! Durable state is a set of owner-only files under
-//! `<state>/delegation/assignments/<id>/`, written by exactly two parties:
-//!
-//! - the operator-side process (`ahi delegate`) writes `assignment.json` (the
-//!   receipt: exact route, digest, phase, launch attempt, terminal handle) and
-//!   `prompt.txt`; it is the only writer of the receipt;
-//! - the worker (`ahi internal-worker`, the process in the Rex block) creates
-//!   `claim.json` and `result.json`, each exactly once and atomically, and
-//!   never modifies the receipt.
-//!
-//! The scratch directory lives in a separate tree, `<state>/delegation/scratch/<id>/`,
-//! so the prompt and receipt are never under the worker's working directory.
-//! The worker has no tools, so even that is defense in depth.
-//!
-//! Limits of this slice (see the proposal's status section): there is no
-//! service-brokered claim over authenticated IPC; the atomic file claim trusts
-//! the operator account and is not isolation from other same-UID processes.
-//! Scratch placement only; no worktree. One child per assignment; no siblings,
-//! continuation, or remote hosts.
+//! Same-account Rex scratch delegation. A peer-checked local service admits
+//! the task, freezes authority, and publishes the durable receipt, claim and
+//! result. The worker in the block runs inference and confined tools. The
+//! private scratch cwd is outside ahi state; nonces never enter argv, tool
+//! roots or status. Missing results are unknown, never a reason to relaunch.
 
+pub(crate) mod broker;
+pub(crate) mod local;
 mod worker;
 
 #[cfg(test)]
@@ -214,7 +195,8 @@ impl Paths {
 }
 
 /// What the operator asked for, before anything durable exists.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Spec {
     pub(crate) gateway: String,
     pub(crate) model: String,
@@ -301,6 +283,8 @@ pub(crate) struct Failure {
 /// `text` is untrusted model output, bounded by `MAX_RESULT_TEXT_BYTES`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Outcome {
+    #[serde(default)]
+    pub(crate) turns_completed: usize,
     pub(crate) assignment: String,
     pub(crate) attempt: String,
     pub(crate) status: Status,
@@ -412,20 +396,23 @@ pub(crate) fn preview(dirs: &Directories, spec: &Spec) -> Result<()> {
 
 /// Reserve a fresh assignment: receipt and private prompt in one tree, an
 /// empty scratch directory in another. No provider request, no Rex call.
+#[cfg(test)]
 pub(crate) fn reserve(dirs: &Directories, spec: Spec) -> Result<Receipt> {
     reserve_with_id(dirs, spec, crate::session::uuid())
 }
 
+#[cfg(test)]
 fn reserve_with_id(dirs: &Directories, spec: Spec, id: String) -> Result<Receipt> {
+    preview(dirs, &spec)?;
+    let scratch = root(dirs).join("scratch");
+    directories::create_private_dir(&scratch).map_err(|e| Error::io("create", &scratch, e))?;
+    reserve_at(dirs, spec, id.clone(), scratch.join(id))
+}
+fn reserve_at(dirs: &Directories, spec: Spec, id: String, scratch: PathBuf) -> Result<Receipt> {
     validate(&spec)?;
     let paths = Paths::from_directories(dirs)?;
     let dir = assignment_dir(dirs, &id)?;
-    let scratch = root(dirs).join("scratch").join(&id);
-    for parent in [
-        root(dirs),
-        root(dirs).join("assignments"),
-        root(dirs).join("scratch"),
-    ] {
+    for parent in [root(dirs), root(dirs).join("assignments")] {
         directories::create_private_dir(&parent)
             .map_err(|err| Error::io("create", &parent, err))?;
     }
@@ -731,6 +718,7 @@ pub(crate) fn status(dirs: &Directories, id: &str) -> Result<Value> {
     };
     Ok(json!({
         "assignment": receipt,
+        "authority":read_json::<Value>(&dir.join("authority.json"))?,
         "claim": claim,
         "result": outcome,
         "state": state,
@@ -744,7 +732,11 @@ pub(crate) fn status(dirs: &Directories, id: &str) -> Result<Value> {
 /// the attempt has not expired, and nothing has finished; then creates
 /// `claim.json` exclusively. A second claimant fails with `Conflict` and must
 /// not call a provider.
+#[cfg(test)]
 pub(crate) fn claim(dir: &Path, attempt: &str, observed: &Observed) -> Result<(Receipt, Claim)> {
+    claim_pid(dir, attempt, observed, std::process::id())
+}
+fn claim_pid(dir: &Path, attempt: &str, observed: &Observed, pid: u32) -> Result<(Receipt, Claim)> {
     let receipt = load_dir(dir)?;
     if !crate::session::valid_run_id(attempt) {
         return Err(Error::input("the attempt id is malformed"));
@@ -783,7 +775,7 @@ pub(crate) fn claim(dir: &Path, attempt: &str, observed: &Observed) -> Result<(R
     let claim = Claim {
         assignment: receipt.id.clone(),
         attempt: attempt.to_string(),
-        pid: std::process::id(),
+        pid,
         claimed: crate::util::rfc3339::now(),
         observed: observed.clone(),
         session_mismatch,

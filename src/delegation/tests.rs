@@ -478,6 +478,7 @@ fn claims_are_single_and_bound_to_the_intended_attempt_and_results_publish_once(
     assert_eq!(status(&f.dirs, &receipt.id).unwrap()["state"], "cancelling");
 
     let outcome = Outcome {
+        turns_completed: 1,
         assignment: receipt.id.clone(),
         attempt: "a1".into(),
         status: Status::Cancelled,
@@ -537,6 +538,56 @@ fn claims_are_single_and_bound_to_the_intended_attempt_and_results_publish_once(
         load(&f.dirs, "not-an-id").unwrap_err().kind,
         ErrorKind::Input
     );
+}
+
+#[test]
+fn service_claim_requires_a_nonce_and_cannot_be_rebound_to_another_connection() {
+    use super::broker::Connection;
+    let f = fixture("claim-connection");
+    let service = crate::service::Service::open(&f.dirs);
+    let sock = f.root.join("socket");
+    let mut r = reserve(&f.dirs, spec(PROMPT)).unwrap();
+    intend_launch(&f, &mut r, "one", 60);
+    let dir = dir_of(&f, &r);
+    write_private_new(
+        &dir.join("broker.json"),
+        json!({"socket":sock,"nonce":"secret"})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    write_private_new(
+        &dir.join("admission.json"),
+        br#"{"mode":"plan","policy":{"rules":[],"named":{},"default_mode":null},"follow_ups":[]}"#,
+    )
+    .unwrap();
+    let mut first = Connection::default();
+    let mut other = Connection::default();
+    let mut p = json!({"id":r.id,"attempt":"one","nonce":"wrong","pid":42,"cwd":r.scratch,"observed":{"rex_session":SESSION,"rex_block":BLOCK}});
+    assert!(first
+        .dispatch(&service, &sock, "child.claim", p.clone())
+        .is_err());
+    assert!(read_claim(&dir).unwrap().is_none());
+    p["nonce"] = json!("secret");
+    let claim = first
+        .dispatch(&service, &sock, "child.claim", p.clone())
+        .unwrap();
+    assert_eq!(claim["claim"]["pid"], 42);
+    assert!(other.dispatch(&service, &sock, "child.claim", p).is_err());
+    let finish = json!({"assignment":r.id,"attempt":"one","gateway":"local","model":"vendor/model","status":"ok","text":"answer","text_bytes":6,"turns_completed":1,"truncated":false,"finished":""});
+    assert!(other
+        .dispatch(&service, &sock, "child.finish", finish.clone())
+        .is_err());
+    assert!(read_outcome(&dir).unwrap().is_none());
+    assert_eq!(
+        first
+            .dispatch(&service, &sock, "child.finish", finish.clone())
+            .unwrap()["status"],
+        "ok"
+    );
+    assert!(first
+        .dispatch(&service, &sock, "child.finish", finish)
+        .is_err());
 }
 
 #[test]

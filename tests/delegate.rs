@@ -11,6 +11,8 @@ const SESSION: &str = "session:11111111-1111-4111-8111-111111111111";
 
 fn run(state: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ahi"))
+        .current_dir(state)
+        .env_remove("XDG_RUNTIME_DIR")
         .env("PATH", "")
         .env_remove("REX_SESSION")
         .env_remove("REX_BLOCK")
@@ -85,7 +87,17 @@ fn dry_run_binds_the_route_and_reserves_nothing() {
     assert_eq!(value["gateway"], "local");
     assert_eq!(value["model"], "vendor/model");
     assert_eq!(value["placement"], "scratch");
-    assert_eq!(value["tools"], json!([]));
+    assert_eq!(value["authority"]["mode"], "plan");
+    assert!(value["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "read_file"));
+    assert!(!value["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "write_file"));
     assert_eq!(value["target"]["session"], SESSION);
     assert!(!String::from_utf8_lossy(&preview.stdout).contains("quartz-lantern"));
     assert!(
@@ -145,6 +157,7 @@ fn dry_run_binds_the_route_and_reserves_nothing() {
     std::fs::remove_dir_all(state).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn launch_without_rex_records_a_failed_start_and_status_reads_it_back() {
     let state = prepared("delegate-no-rex");
@@ -211,6 +224,8 @@ fn launch_without_rex_records_a_failed_start_and_status_reads_it_back() {
     );
     let unknown = run(&state, &["delegate", "status", "not-an-id"]);
     assert_eq!(unknown.status.code(), Some(2));
+    assert!(run(&state, &["serve", "stop"]).status.success());
+    std::fs::remove_dir(value["assignment"]["scratch"].as_str().unwrap()).unwrap();
     std::fs::remove_dir_all(state).unwrap();
 }
 
