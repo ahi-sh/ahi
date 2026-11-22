@@ -112,7 +112,13 @@ def scripted(case, client, turn, model, check):
     ).encode()
 
 
-def relay(url, raw):
+def relay(url, raw, turn_deadline):
+    def remaining():
+        seconds = turn_deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError("turn deadline reached")
+        return seconds
+
     cls = (
         http.client.HTTPSConnection
         if url.scheme == "https"
@@ -121,7 +127,7 @@ def relay(url, raw):
     headers = {"Content-Type": "application/json"}
     if key := os.environ.get("HILLCLIMB_API_KEY"):
         headers["Authorization"] = "Bearer " + key
-    with closing(cls(url.hostname, url.port, timeout=25)) as conn:
+    with closing(cls(url.hostname, url.port, timeout=remaining())) as conn:
         conn.connect()
         sock = conn.sock
 
@@ -131,7 +137,7 @@ def relay(url, raw):
             except OSError:
                 pass
 
-        deadline = threading.Timer(25, interrupt)
+        deadline = threading.Timer(remaining(), interrupt)
         deadline.start()
         try:
             conn.request(
@@ -146,6 +152,30 @@ def relay(url, raw):
             return data
         finally:
             deadline.cancel()
+
+
+def reported_usage(reply):
+    # Optional SSE usage is evidence about this request only. Missing != zero.
+    result = dict(prompt_tokens=None, completion_tokens=None, cached_prompt_tokens=None)
+    for line in reply.splitlines():
+        if not line.startswith(b"data:") or b'"usage"' not in line:
+            continue
+        try:
+            u = json.loads(line[5:]).get("usage")
+        except (ValueError, AttributeError):
+            continue
+        if not isinstance(u, dict):
+            continue
+        details = u.get("prompt_tokens_details")
+        for key in result:
+            n = (
+                (details.get("cached_tokens") if isinstance(details, dict) else None)
+                if key == "cached_prompt_tokens"
+                else u.get(key)
+            )
+            if type(n) is int and n >= 0:
+                result[key] = n
+    return result
 
 
 def run(args, case, url, root, binary):
@@ -189,7 +219,7 @@ def run(args, case, url, root, binary):
         wrapper.chmod(0o700)
         prompt += " Before answering, run check-fixture with no arguments and make sure it passes."
         names.append("bash" if client == "pi" else "run_command")
-    seen, errors = [], []
+    seen, errors, usage = [], [], []
     submitted = set()
     nonce = secrets.token_urlsafe(24)
     read = check_result = False
@@ -258,7 +288,7 @@ def run(args, case, url, root, binary):
                         check_marker + ":0",
                     )
                 reply = (
-                    relay(url, raw)
+                    relay(url, raw, turn_deadline)
                     if url
                     else scripted(
                         case,
@@ -268,6 +298,7 @@ def run(args, case, url, root, binary):
                         args.checker,
                     )
                 )
+                usage.append(reported_usage(reply))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -374,6 +405,8 @@ def run(args, case, url, root, binary):
                 str(state),
                 "exec",
                 "--standalone",
+                "--timeout",
+                str(args.timeout),
                 "--format",
                 "json",
                 "--tools",
@@ -388,9 +421,10 @@ def run(args, case, url, root, binary):
             prompt,
         ]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
         started_ns = time.time_ns()
         start = time.monotonic()
+        turn_deadline = start + args.timeout
+        thread.start()
         try:
             child = subprocess.Popen(
                 [binary, *cmd],
@@ -401,7 +435,9 @@ def run(args, case, url, root, binary):
                 start_new_session=True,
             )
             try:
-                output, _ = child.communicate(timeout=SECONDS)
+                output, _ = child.communicate(
+                    timeout=max(0, turn_deadline - time.monotonic())
+                )
             except BaseException:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
@@ -469,7 +505,10 @@ def run(args, case, url, root, binary):
         "checker_sha256": checker_hash,
         "checker_exit": checker_exit,
         "thinking": args.thinking,
-        "limits": [args.rounds, args.max_tokens, SECONDS],
+        "limits": [args.rounds, args.max_tokens, args.timeout],
+        "prompt_bytes": len(prompt.encode()),
+        "expected_write_bytes": len(case.get("after", "").encode()),
+        "request_usage": usage,
         "tools": names,
         "wire_effort": seen,
         "requests": len(seen),
@@ -510,6 +549,12 @@ def main():
         type=Path,
         help="trusted POSIX sh test to expose as check-fixture; enables command tool",
     )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=SECONDS,
+        help="whole-turn wall budget in seconds (1–3600); not renewed per request",
+    )
     p.add_argument("--model", help="exact served ID; required for live trials")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
@@ -530,6 +575,8 @@ def main():
         "--route", help="non-secret serving manifest ID (required with --live-url)"
     )
     args = p.parse_args()
+    if not 1 <= args.timeout <= 3600:
+        p.error("expected 1–3600 seconds per turn")
     if not 1 <= args.rounds <= 10 or not 1 <= args.max_tokens <= 4096:
         p.error("expected 1–10 rounds and 1–4096 tokens/request")
     url = urlsplit(args.live_url) if args.live_url else None
