@@ -91,6 +91,10 @@ fn server_sequence(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<St
 }
 
 fn serve_one(listener: &TcpListener, response: &str) -> String {
+    serve_after(listener, response, Duration::ZERO)
+}
+
+fn serve_after(listener: &TcpListener, response: &str, delay: Duration) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut stream = loop {
         match listener.accept() {
@@ -130,6 +134,7 @@ fn serve_one(listener: &TcpListener, response: &str) -> String {
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
     request.push_str(std::str::from_utf8(&body).unwrap());
+    thread::sleep(delay);
     for fragment in response.as_bytes().chunks(7) {
         if stream.write_all(fragment).is_err() {
             break;
@@ -173,6 +178,46 @@ fn backend(state: &Path) -> HttpBackend {
     let workspace = state.join("empty-workspace");
     fs::create_dir_all(&workspace).unwrap();
     HttpBackend::new(Directories::single_root(state.to_path_buf())).in_workspace(workspace)
+}
+
+#[test]
+fn bounded_gateway_request_can_outlast_the_agent_timeout() {
+    check_slow_prefill(Duration::from_millis(80), Some(Duration::from_millis(10)));
+}
+
+#[test]
+#[ignore = "126-second loopback prefill; run explicitly to exercise the real 120-second boundary"]
+fn bounded_gateway_request_survives_two_minutes_without_a_first_byte() {
+    check_slow_prefill(Duration::from_secs(126), None);
+}
+
+fn check_slow_prefill(delay: Duration, agent_timeout: Option<Duration>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state = state_for(&format!("http://{}/v1", listener.local_addr().unwrap()));
+    let server = thread::spawn(move || serve_after(&listener, &text_stream("ready"), delay));
+    let budget = delay + Duration::from_secs(5);
+    let mut backend = backend(&state).with_deadline(Instant::now() + budget);
+    if let Some(short) = agent_timeout {
+        // Exercise the same per-request override at CI speed.
+        backend.agent = ureq::Agent::config_builder()
+            .timeout_global(Some(short))
+            .build()
+            .new_agent();
+    }
+    let events = backend.submit(request());
+    let mut answer = String::new();
+    loop {
+        match events.recv_timeout(budget).unwrap() {
+            ResponseEvent::TextDelta(text) => answer.push_str(&text),
+            ResponseEvent::Completed => break,
+            ResponseEvent::Failed { message, .. } => panic!("slow prefill failed: {message}"),
+            _ => (),
+        }
+    }
+    assert_eq!(answer, "ready");
+    server.join().unwrap();
+    fs::remove_dir_all(state).unwrap();
 }
 
 fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {

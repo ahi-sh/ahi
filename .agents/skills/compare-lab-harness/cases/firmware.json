@@ -1,8 +1,0 @@
-{
-  "prompt": "Read sensor.h and correct the ready mask for bit four (zero-based), keeping the other bytes and hex style unchanged. Name the macro you corrected.",
-  "input": "sensor.h",
-  "before": "#define SENSOR_READY_MASK 0x08u\n#define SENSOR_IDLE_MASK 0x02u\n",
-  "after": "#define SENSOR_READY_MASK 0x10u\n#define SENSOR_IDLE_MASK 0x02u\n",
-  "marker": "SENSOR_READY_MASK",
-  "answer": "SENSOR_READY_MASK"
-}
