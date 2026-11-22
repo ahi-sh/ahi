@@ -1384,7 +1384,7 @@ fn headless_explicit_skill_loads_before_inference_and_reads_nested_support() {
     let first: serde_json::Value =
         serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(
-        first["messages"][0]["content"],
+        first["messages"][1]["content"],
         "Before $review and\n$review after"
     );
     assert!(requests[0].contains("OPERATOR INSTRUCTIONS"));

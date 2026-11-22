@@ -723,8 +723,9 @@ fn worker_runs_one_toolless_turn_on_the_bound_route_and_publishes_a_structured_r
         "no tool schema is offered: {body}"
     );
     assert!(body.get("tool_choice").is_none());
-    assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(body["messages"][0]["content"], PROMPT);
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][1]["content"], PROMPT);
 
     let outcome = read_outcome(&dir).unwrap().expect("result published");
     assert_eq!(outcome.status, Status::Ok);

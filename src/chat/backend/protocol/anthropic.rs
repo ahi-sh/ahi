@@ -35,6 +35,7 @@ pub(super) fn request(context: &RequestContext<'_>) -> Result<Value> {
     ))?.get();
     let mut body = json!({
         "model": context.model,
+        "system": crate::system_prompt::CORE,
         "max_tokens": max_tokens,
         "stream": true,
         "messages": messages(context.messages),
@@ -793,7 +794,7 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert!(body["tools"][0]["input_schema"].is_object());
-        assert!(body.get("system").is_none());
+        assert_eq!(body["system"], crate::system_prompt::CORE);
         let adaptive = ModelMetadata {
             compat: crate::harness::CompletionCompatibility {
                 thinking_mode: Some(ThinkingMode::Adaptive),

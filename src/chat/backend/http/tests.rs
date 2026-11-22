@@ -184,6 +184,15 @@ fn responses_fixture_with_refresh(
     refresh: bool,
     content_type: Option<&str>,
 ) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
+    browser_request_fixture(body, refresh, content_type, request())
+}
+
+fn browser_request_fixture(
+    body: &str,
+    refresh: bool,
+    content_type: Option<&str>,
+    mut input: ChatRequest,
+) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
     let token_server = refresh.then(|| server("200 OK", Some("application/json"), r#"{"access_token":"disposable-browser-token","refresh_token":"rotated-disposable-token","expires_in":3600,"scope":"chatgpt.tokens.use.direct"}"#));
     let token_url = token_server
         .as_ref()
@@ -197,7 +206,6 @@ fn responses_fixture_with_refresh(
         "expires_in":3600, "expires_at":if refresh {0} else {i64::MAX}, "client_id":"fixture-client",
         "resource":"https://api.openai.com/v1", "scopes":["chatgpt.tokens.use.direct"], "flow":"chatgpt-direct"
     }).to_string().as_bytes()).unwrap();
-    let mut input = request();
     input.selection = parse_selection("openai/curated-model");
     let metadata = ModelMetadata {
         max_tokens: std::num::NonZeroU64::new(64000),
@@ -320,7 +328,7 @@ fn verify_responses_http_workflow() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(body).unwrap(),
         json!({
-            "model":"curated-model", "stream":true,"store":false,
+            "model":"curated-model", "stream":true,"store":false,"instructions":crate::system_prompt::CORE,
             "input":[{"role":"user","content":[{"type":"input_text","text":"first"}]},{"role":"assistant","content":"previous reply"},{"role":"user","content":[{"type":"input_text","text":"why?"}]}]
         })
     );
@@ -546,6 +554,32 @@ fn verify_responses_tool_requests() {
     assert_eq!(native.items.len(), 2);
     assert_eq!(native.items[0]["call_id"], "call_first");
     assert!(matches!(&events[..], [ResponseEvent::Usage { .. }]));
+
+    let mut follow = request();
+    let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
+    assistant.tool = Some(ToolPayload::Calls {
+        calls: calls.clone(),
+        native: Some(native),
+    });
+    follow.messages.push(assistant);
+    for call in calls {
+        let mut tool = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "terminal preview");
+        tool.tool = Some(ToolPayload::Result {
+            call_id: call.id,
+            name: call.name,
+            content: "fixture result".into(),
+        });
+        follow.messages.push(tool);
+    }
+    let (_, _, received) = browser_request_fixture(&body, false, Some("text/event-stream"), follow);
+    let sent = request_body(&received);
+    assert_eq!(sent["instructions"], crate::system_prompt::CORE);
+    assert_one_core_prompt(&sent);
+    assert_eq!(
+        sent["input"].as_array().unwrap().last().unwrap(),
+        &json!({"type":"function_call_output","call_id":"call_second","output":"fixture result"})
+    );
+    assert!(sent.get("max_output_tokens").is_none());
     for (first, second, complete) in [
         (first.clone(), second.clone(), false),
         (
@@ -600,6 +634,11 @@ fn verify_responses_tool_requests() {
             .iter()
             .any(|event| matches!(event, ResponseEvent::ToolCallsRequested { .. })));
     }
+}
+
+fn assert_one_core_prompt(body: &serde_json::Value) {
+    let encoded = json!(crate::system_prompt::CORE).to_string();
+    assert_eq!(body.to_string().matches(&encoded).count(), 1);
 }
 
 fn request() -> ChatRequest {
@@ -710,6 +749,7 @@ fn gateway_streams_model_text_and_real_usage_with_conversation_history() {
         json!({
             "model": "vendor/model", "stream": true, "stream_options": {"include_usage": true},
             "messages": [
+                {"role": "system", "content": crate::system_prompt::CORE},
                 {"role": "user", "content": "first"},
                 {"role": "assistant", "content": "previous reply"},
                 {"role": "user", "content": "why?"}
@@ -1557,17 +1597,24 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
     assert_eq!(advertised, ["read_file"]);
     assert_eq!(first["tools"], second["tools"]);
     let messages = second["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 5);
-    assert_eq!(messages[..3], first["messages"].as_array().unwrap()[..]);
+    for body in [&first, &second] {
+        assert_eq!(
+            body["messages"][0],
+            json!({"role":"system","content":crate::system_prompt::CORE})
+        );
+        assert_one_core_prompt(body);
+    }
+    assert_eq!(messages.len(), 6);
+    assert_eq!(messages[..4], first["messages"].as_array().unwrap()[..]);
     assert_eq!(
-        messages[3],
+        messages[4],
         json!({"role": "assistant", "content": null, "tool_calls": [{
             "id": "call_a", "type": "function",
             "function": {"name": "read_file", "arguments": "{\"path\":\"./src/a.rs\"}"}
         }]})
     );
     assert_eq!(
-        messages[4],
+        messages[5],
         json!({"role": "tool", "tool_call_id": "call_a", "content": "fn a() {}\n"})
     );
 }
@@ -2269,6 +2316,7 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     assert_eq!(
         body["messages"],
         json!([
+            {"role": "system", "content": crate::system_prompt::CORE},
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "checking", "tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"}}]},
             {"role": "tool", "tool_call_id": "call_a", "content": "model content"},
@@ -2364,7 +2412,10 @@ fn an_anthropic_gateway_runs_the_same_tool_loop_and_replays_blocks() {
     assert_eq!(first["max_tokens"], 32768);
     assert_eq!(first["tools"][0]["name"], "read_file");
     assert!(first["tools"][0]["input_schema"].is_object());
-    assert!(first.get("system").is_none());
+    for body in [&first, &request_body(&requests[1])] {
+        assert_eq!(body["system"], crate::system_prompt::CORE);
+        assert_one_core_prompt(body);
+    }
     assert_eq!(first["messages"][0]["role"], "user");
     assert_eq!(first["messages"][0]["content"][0]["text"], "first");
     let second = request_body(&requests[1]);
@@ -2441,6 +2492,10 @@ fn a_responses_gateway_sends_output_limits_and_replays_function_items() {
         .to_ascii_lowercase()
         .contains("authorization: bearer gateway\r\n"));
     let body = request_body(&requests[0]);
+    for body in [&body, &request_body(&requests[1])] {
+        assert_eq!(body["instructions"], crate::system_prompt::CORE);
+        assert_one_core_prompt(body);
+    }
     // A gateway, not a browser token: the output budget is sent.
     assert_eq!(body["max_output_tokens"], 32768);
     assert_eq!(body["store"], false);

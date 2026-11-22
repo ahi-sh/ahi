@@ -62,7 +62,8 @@ pub(crate) fn definition(schema: &ToolSchema) -> Value {
 
 pub(super) fn messages(messages: &[ChatMessage], compat: &CompletionCompatibility) -> Vec<Value> {
     let exchanges = Exchanges::of(messages);
-    let mut output = Vec::with_capacity(messages.len());
+    let mut output = Vec::with_capacity(messages.len() + 1);
+    output.push(json!({"role": "system", "content": crate::system_prompt::CORE}));
     for (index, message) in messages.iter().enumerate() {
         match message.role {
             TranscriptRole::Operator => {
@@ -334,9 +335,9 @@ mod tests {
             &[assistant("", &["a"]), stored.to_chat(None)],
             &CompletionCompatibility::default(),
         );
-        assert_eq!(body.len(), 2);
+        assert_eq!(body.len(), 3);
         assert_eq!(
-            body[1],
+            body[2],
             json!({"role": "tool", "tool_call_id": "a", "content": "model result"})
         );
     }
@@ -357,7 +358,7 @@ mod tests {
         };
         assert_eq!(
             roles(&CompletionCompatibility::default()),
-            ["user", "assistant", "tool", "user"]
+            ["system", "user", "assistant", "tool", "user"]
         );
         let compat = CompletionCompatibility {
             requires_assistant_after_tool_result: Some(true),
@@ -365,7 +366,7 @@ mod tests {
         };
         assert_eq!(
             roles(&compat),
-            ["user", "assistant", "tool", "assistant", "user"]
+            ["system", "user", "assistant", "tool", "assistant", "user"]
         );
     }
 
@@ -389,6 +390,7 @@ mod tests {
         assert_eq!(
             messages(&transcript, &compat),
             vec![
+                json!({"role": "system", "content": crate::system_prompt::CORE}),
                 json!({"role": "user", "content": "q"}),
                 json!({"role": "assistant", "content": null, "tool_calls": [
                     {"id": "a", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"}}
