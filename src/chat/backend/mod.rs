@@ -18,7 +18,7 @@ use ahi_durable::{ToolDetail, ToolRecord};
 
 pub(crate) use http::HttpBackend;
 #[allow(unused_imports)]
-pub(crate) use tool_loop::Caller;
+pub(crate) use tool_loop::{Caller, PREVIEW_LINES};
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;

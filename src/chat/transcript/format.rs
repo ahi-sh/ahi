@@ -385,16 +385,19 @@ fn table(
 // --- tool results -----------------------------------------------------------
 
 fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<Styled> {
-    let name = match &message.tool {
-        Some(ToolPayload::Result { name, .. }) => name.as_str(),
-        _ => "",
+    let (name, model_content) = match &message.tool {
+        Some(ToolPayload::Result { name, content, .. }) => (name.as_str(), content.as_str()),
+        _ => ("", ""),
     };
-    let mut lines = message.text.split('\n');
+    let cut = message.text.strip_prefix(super::MODEL_CUT_PREFIX);
+    let mut lines = cut.unwrap_or(&message.text).split('\n');
     let first = lines.next().unwrap_or("");
     // The first line of `output` is `tool target` or `tool target: reason`.
     let (target, reason) = {
         let rest = first.strip_prefix(name).unwrap_or(first).trim_start();
-        match rest.split_once(": ") {
+        match rest.split_once(": ").filter(|_| {
+            exit_code != 0 && !matches!(message.detail, Some(ToolDetail::Command { .. }))
+        }) {
             Some((target, reason)) => (target.to_string(), Some(reason.to_string())),
             None => (rest.to_string(), None),
         }
@@ -489,8 +492,10 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
             lines,
         }) => {
             let start = offset.unwrap_or(1);
-            summary.push(match limit {
-                Some(_) if *lines > 0 => format!("lines {start}–{}", start + lines - 1),
+            summary.push(match (offset.is_some() || limit.is_some(), *lines) {
+                (true, 1) => format!("line {start}"),
+                (true, n) if n > 1 => format!("lines {start}–{}", start.saturating_add(n - 1)),
+                (_, 1) => "1 line".to_string(),
                 _ => format!("{lines} lines"),
             });
         }
@@ -503,9 +508,12 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
         }),
         None => {}
     }
+    if cut.is_some() {
+        summary.push("model received truncated result (turn budget)".into());
+    }
     if let Some(reason) = &reason {
         summary.push(reason.clone());
-    } else if exit_code == tools_exit_denied() {
+    } else if exit_code == tools_exit_denied() && name != tools::RUN_COMMAND {
         summary.push("denied".into());
     } else if exit_code != 0 && matches!(message.detail, None | Some(ToolDetail::Omitted { .. })) {
         summary.push(format!("exit {exit_code}"));
@@ -560,9 +568,41 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 out.push(search_row(line, options));
             }
         }
-        Some(ToolDetail::Read { offset, .. }) => {
+        Some(ToolDetail::Read { lines: 0, .. }) => {
+            let mut row = Styled::default();
+            row.push("(empty file)", theme::dim());
+            out.push(row);
+        }
+        Some(ToolDetail::Read {
+            offset,
+            limit,
+            lines: count,
+        }) => {
             let language = target.rsplit('.').next().and_then(highlight::language);
-            read_rows(lines, offset.unwrap_or(1), language, &mut out);
+            // Whole-file content is verbatim, including anything that *looks*
+            // like a paging notice. Only inspect framing for a requested page
+            // or a byte-capped read with more rows than actual file lines.
+            let framed = offset.is_some()
+                || limit.is_some()
+                || (lines
+                    .clone()
+                    .next()
+                    .is_some_and(|s| s.starts_with("[lines "))
+                    && model_content.lines().count() > *count);
+            if cut.is_some() && offset.is_none() && limit.is_none() {
+                // Can't infer byte paging from a truncated payload. Display
+                // the local preview without inventing source positions.
+                out.extend(lines.map(Styled::plain));
+            } else {
+                read_rows(
+                    lines,
+                    offset.unwrap_or(1),
+                    *count,
+                    framed,
+                    language,
+                    &mut out,
+                );
+            }
         }
         _ => {
             for line in lines {
@@ -581,32 +621,43 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
 fn read_rows<'a>(
     lines: impl Iterator<Item = &'a str>,
     first: usize,
+    count: usize,
+    framed: bool,
     language: Option<highlight::Language>,
     out: &mut Vec<Styled>,
 ) {
     let lines: Vec<&str> = lines.collect();
-    let is_note = |index: usize, line: &str| {
-        let bracketed = line.starts_with('[') && line.ends_with(']');
-        (index == 0 && bracketed && line.starts_with("[lines "))
-            || (index + 1 == lines.len()
-                && (line.starts_with('…') || (bracketed && line.contains(" more lines;"))))
-    };
-    let body = lines
-        .iter()
-        .enumerate()
-        .filter(|(index, line)| !is_note(*index, line))
-        .count();
-    let digits = (first + body.saturating_sub(1)).to_string().len();
+    let page_end = lines.first().filter(|_| framed).and_then(|line| {
+        let range = line
+            .strip_prefix("[lines ")?
+            .strip_suffix(']')?
+            .split_once(" of ")?
+            .0;
+        let (start, end) = range.split_once('-')?;
+        (start.parse::<usize>().ok()? == first)
+            .then(|| end.parse::<usize>().ok())
+            .flatten()
+    });
+    let begin = usize::from(page_end.is_some());
+    let body = page_end.map_or(count, |end| end.saturating_sub(first).saturating_add(1));
+    let data = begin
+        ..begin
+            .saturating_add(body)
+            .min(crate::chat::backend::PREVIEW_LINES);
+    let digits = first
+        .saturating_add(data.len().saturating_sub(1))
+        .to_string()
+        .len();
     let mut number = first;
     for (index, line) in lines.iter().enumerate() {
         let mut styled = Styled::default();
-        if is_note(index, line) {
+        if !data.contains(&index) {
             styled.push(&clip(line), theme::dim());
         } else {
             styled.push(&format!("{number:>digits$} "), theme::gutter());
             styled.hang = digits + 1;
             push_highlighted(&mut styled, language, &clip(&expand_tabs(line)));
-            number += 1;
+            number = number.saturating_add(1);
         }
         out.push(styled);
     }
@@ -619,35 +670,50 @@ fn tools_exit_denied() -> i32 {
 /// `path:line:text` from `search_files`, with the prefix clickable.
 fn search_row(line: &str, options: &Options) -> Styled {
     let mut styled = Styled::default();
-    let mut parts = line.splitn(3, ':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(path), Some(number), Some(text))
-            if number.chars().all(|c| c.is_ascii_digit())
-                && !number.is_empty()
-                && (options.exists)(path) =>
-        {
-            styled.push_target(
-                &format!("{path}:{number}"),
-                theme::file_ref(),
-                Target::File {
-                    path: path.to_string(),
-                    line: number.parse().ok(),
-                    column: None,
-                },
-            );
-            styled.push(":", theme::dim());
-            styled.push(&clip(text), Style::default());
-        }
-        _ => {
-            styled.push(
-                &clip(line),
-                if line.starts_with('[') {
-                    theme::dim()
-                } else {
-                    Style::default()
-                },
-            );
-        }
+    let location = || {
+        let (path, suffix) = if line.starts_with('"') {
+            let mut json = serde_json::Deserializer::from_str(line).into_iter::<String>();
+            let path = json.next()?.ok()?;
+            (path, line.get(json.byte_offset()..)?.strip_prefix(':')?)
+        } else {
+            let (path, suffix) = line.split_once(':')?;
+            // Old transcripts may have unquoted colons in paths. Never link
+            // to a shorter, unrelated path if another line number fits.
+            let (before_last_colon, _) = suffix.rsplit_once(':')?;
+            if before_last_colon
+                .split(':')
+                .skip(1)
+                .any(|field| field.parse::<usize>().is_ok())
+            {
+                return None;
+            }
+            (path.to_string(), suffix)
+        };
+        let (number, text) = suffix.split_once(':')?;
+        let number = number.parse().ok()?;
+        (number > 0 && (options.exists)(&path)).then_some((path, number, text))
+    };
+    if let Some((path, number, text)) = location() {
+        styled.push_target(
+            &line[..line.len() - text.len() - 1],
+            theme::file_ref(),
+            Target::File {
+                path,
+                line: Some(number),
+                column: None,
+            },
+        );
+        styled.push(":", theme::dim());
+        styled.push(&clip(text), Style::default());
+    } else {
+        styled.push(
+            &clip(line),
+            if line.starts_with('[') {
+                theme::dim()
+            } else {
+                Style::default()
+            },
+        );
     }
     styled
 }
@@ -679,10 +745,10 @@ fn stream_rows(label: &str, text: &str, cut: bool, style: Option<Style>, out: &m
         };
         let more = lines.len().saturating_sub(MAX_STREAM_ROWS);
         styled.push(
-            &if cut {
-                format!("  … {more} more lines shown to the model, output truncated")
-            } else {
-                format!("  … {more} more lines")
+            &match (more, cut) {
+                (0, true) => "  … output truncated".to_string(),
+                (_, true) => format!("  … {more} more captured lines; output truncated"),
+                (_, false) => format!("  … {more} more lines"),
             },
             theme::dim(),
         );
@@ -980,6 +1046,103 @@ mod tests {
     }
 
     #[test]
+    fn a_verbatim_file_can_contain_both_kinds_of_notices() {
+        let text = "[lines 1-1 of 7]\nordinary\n… 2 more lines";
+        let mut read = tool(
+            "read_file",
+            &format!("read_file a.txt\n{text}"),
+            0,
+            Some(ToolDetail::Read {
+                offset: None,
+                limit: None,
+                lines: 3,
+            }),
+        );
+        if let Some(ToolPayload::Result { content, .. }) = &mut read.tool {
+            *content = text.into();
+        }
+        assert_eq!(
+            &texts(&paragraphs(&read, &options(), 80))[1..],
+            ["1 [lines 1-1 of 7]", "2 ordinary", "3 … 2 more lines"]
+        );
+    }
+
+    #[test]
+    fn search_links_to_the_quoted_path_not_its_existing_prefix() {
+        let opts = Options {
+            exists: &|path| matches!(path, "notes" | "notes:2:old.txt"),
+            ..options()
+        };
+        let row = search_row(r#""notes:2:old.txt":7:needle"#, &opts);
+        assert_eq!(
+            targets(&row),
+            [&Target::File {
+                path: "notes:2:old.txt".into(),
+                line: Some(7),
+                column: None
+            }]
+        );
+        let legacy = search_row("notes:2:old.txt:7:needle", &opts);
+        assert_eq!(legacy.text, "notes:2:old.txt:7:needle");
+        assert!(targets(&legacy).is_empty());
+    }
+
+    #[test]
+    fn local_command_capture_is_labelled_even_when_collapsed_after_a_model_budget_cut() {
+        let msg = tool(
+            "run_command",
+            &format!(
+                "{}run_command .\nlocal tail",
+                super::super::MODEL_CUT_PREFIX
+            ),
+            0,
+            Some(ToolDetail::Command {
+                argv: vec!["fixture".into()],
+                exit_code: Some(0),
+                stdout: "local tail".into(),
+                stderr: String::new(),
+                stdout_cut: false,
+                stderr_cut: false,
+            }),
+        );
+        for expanded in [false, true] {
+            let rows = paragraphs(
+                &msg,
+                &Options {
+                    expanded_tools: expanded,
+                    ..options()
+                },
+                120,
+            );
+            assert!(rows[0]
+                .text
+                .contains("model received truncated result (turn budget)"));
+            assert_eq!(rows.iter().any(|r| r.text.contains("local tail")), expanded);
+        }
+    }
+
+    #[test]
+    fn expanded_read_preserves_colons_in_paths_and_numbers_literal_ellipsis_lines() {
+        let read = tool(
+            "read_file",
+            "read_file notes: daily.txt\n…work in progress",
+            0,
+            Some(ToolDetail::Read {
+                offset: None,
+                limit: None,
+                lines: 1,
+            }),
+        );
+        assert_eq!(
+            texts(&paragraphs(&read, &options(), 80)),
+            [
+                "✓ read_file notes: daily.txt · 1 line · 3.8s",
+                "1 …work in progress"
+            ]
+        );
+    }
+
+    #[test]
     fn tool_headers_follow_one_grammar() {
         let read = tool(
             "read_file",
@@ -995,7 +1158,7 @@ mod tests {
         assert_eq!(
             texts(&out),
             vec![
-                "✓ read_file src/main.rs · lines 10–10 · 3.8s",
+                "✓ read_file src/main.rs · line 10 · 3.8s",
                 "10 fn main() {}"
             ]
         );
@@ -1041,7 +1204,7 @@ mod tests {
                 "stderr",
                 "  bad",
                 "  worse",
-                "  … 0 more lines shown to the model, output truncated",
+                "  … output truncated",
             ]
         );
         assert_eq!(

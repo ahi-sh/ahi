@@ -18,13 +18,13 @@ use super::{
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 use crate::tool_policy::grants::{SessionGrant, SessionGrants};
-use crate::tool_policy::{self, path_within, ActionPolicy, Verdict};
+use crate::tool_policy::{path_within, ActionPolicy, Verdict};
 use crate::tools::{self, Arguments, PreparedCall, Workspace};
 use ahi_durable::{ToolDetail, ToolRecord};
 
 /// Tool content returned to the model within one operator turn.
 pub(super) const MAX_TURN_OUTPUT_BYTES: usize = 256 * 1024;
-const PREVIEW_LINES: usize = 8;
+pub(crate) const PREVIEW_LINES: usize = 8;
 const PREVIEW_LINE_CHARS: usize = 200;
 
 pub(super) const EXIT_OK: i32 = 0;
@@ -54,6 +54,8 @@ impl Default for Caller {
 /// What one turn brings to the runtime besides policy: who is asking, how
 /// long the turn may take, and the flag that stops it.
 pub(super) struct TurnContext {
+    pub(super) local: Option<crate::delegation::local::Profile>,
+    pub(super) frozen: Option<ActionPolicy>,
     pub(super) scratch: crate::tools::Scratch,
     pub(super) mode: crate::tool_policy::ExecutionMode,
     pub(super) caller: Caller,
@@ -120,22 +122,13 @@ impl ToolRuntime {
         turn: TurnContext,
     ) -> Result<Option<Self>> {
         let mode = turn.mode.clone();
-        let installed = match policy_file {
-            Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
-            None => tool_policy::load(directory, &tools::BUILTIN)?,
+        let policy = match turn.frozen.clone() {
+            Some(policy) => policy,
+            None => ActionPolicy::resolve(directory, policy_file, &mode)?,
         };
-        let policy = match mode {
-            crate::tool_policy::ExecutionMode::ReadWrite
-            | crate::tool_policy::ExecutionMode::ReadOnly
-            | crate::tool_policy::ExecutionMode::FullAccess => tool_policy::ActionPolicy::trusted(),
-            crate::tool_policy::ExecutionMode::Named(_) => installed
-                .ok_or_else(|| crate::error::Error::new("workspace modes file missing"))?
-                .select(&mode)?,
-            crate::tool_policy::ExecutionMode::Policy => match installed {
-                Some(policy) => policy,
-                None => return Ok(None),
-            },
-        };
+        if policy.rules.is_empty() {
+            return Ok(None);
+        }
         let mut workspace = Workspace::open(directory, state)?;
         workspace.scratch = turn.scratch.clone();
         // Only the explicitly confirmed built-in mode unlocks host paths;
@@ -146,7 +139,11 @@ impl ToolRuntime {
         // Skills are enumerated once per turn from the turn's canonical
         // working directory (never a session header's `cwd`) and the
         // operator root; only approved names that validate are offered.
-        let catalog = crate::skills::enumerate(workspace.root(), std::env::home_dir().as_deref());
+        let catalog = if turn.caller.origin == "delegate" {
+            crate::skills::Catalog::default()
+        } else {
+            crate::skills::enumerate(workspace.root(), std::env::home_dir().as_deref())
+        };
         let skills: Vec<crate::skills::Skill> = catalog
             .skills
             .iter()
@@ -194,7 +191,19 @@ impl ToolRuntime {
             .filter(|tool| tool.as_str() != tools::LOAD_SKILL || !skills.is_empty())
             .cloned()
             .collect();
-        tools::schemas(&enabled, &skills, self.mode.host_paths())
+        let mut schemas = tools::schemas(&enabled, &skills, self.mode.host_paths());
+        if self.turn.local.is_some() {
+            if let Some(s) = schemas.iter_mut().find(|s| s.name == tools::DELEGATE) {
+                let local = crate::delegation::local::Task::schema();
+                let remote = std::mem::replace(&mut s.parameters, local);
+                if tools::delegate::via_template().is_some() {
+                    s.parameters =
+                        serde_json::json!({"type":"object","oneOf":[remote,s.parameters]});
+                }
+                s.description="Delegate a task. For local.profile=rex-scratch the child inherits this model and mode; request plan to narrow it.".into();
+            }
+        }
+        schemas
     }
 
     /// Explicit user requests are real, audited local loads before inference,
@@ -337,6 +346,12 @@ impl ToolRuntime {
     }
 
     fn plan(&self, prepared: PreparedCall) -> Plan {
+        if matches!(prepared.arguments, Arguments::LocalDelegate(_)) && self.turn.local.is_none() {
+            return Plan::Done(Box::new(denied(
+                &prepared,
+                "no authorized local Rex profile for this turn",
+            )));
+        }
         if !self.mode.allows(prepared.tool) {
             return Plan::Done(Box::new(denied(
                 &prepared,
@@ -554,14 +569,20 @@ impl ToolRuntime {
                 *timeout_secs = (*timeout_secs).min(remaining.as_secs().max(1));
             }
         }
-        let executed = tools::execute(
-            &bounded,
-            &self.workspace,
-            &self.catalog,
-            &toolchain_env,
-            &self.turn.cancel,
-            command_update,
-        );
+        let executed = if let (Arguments::LocalDelegate(task), Some(profile)) =
+            (&bounded.arguments, &self.turn.local)
+        {
+            profile.execute(task, &self.turn.cancel, self.turn.deadline)
+        } else {
+            tools::execute(
+                &bounded,
+                &self.workspace,
+                &self.catalog,
+                &toolchain_env,
+                &self.turn.cancel,
+                command_update,
+            )
+        };
         let elapsed = started.elapsed();
         match executed {
             Ok(tools::Executed {
@@ -579,14 +600,23 @@ impl ToolRuntime {
                 if let Some(report) = skill {
                     record = Some(self.record_skill(&report, "ok"));
                 }
-                if let Some(report) = command {
-                    record = Some(self.record_command(prepared, &report, "ok", Some(true)));
-                }
+                let exit_code = if let Some(report) = command {
+                    let code = report.exit_code.unwrap_or(-1);
+                    record = Some(self.record_command(
+                        prepared,
+                        &report,
+                        if code == 0 { "ok" } else { "failed" },
+                        Some(true),
+                    ));
+                    code
+                } else {
+                    EXIT_OK
+                };
                 if let Some(report) = delegation {
                     record = Some(self.record_delegation(&report, "ok"));
                 }
                 Outcome {
-                    exit_code: EXIT_OK,
+                    exit_code,
                     output: format!(
                         "{} {}\n{}",
                         prepared.tool,
@@ -608,7 +638,7 @@ impl ToolRuntime {
                         lines_added: 0,
                         lines_removed: 0,
                     };
-                    record = Some(self.record_write(prepared, &none, failure.message));
+                    record = Some(self.record_write(prepared, &none, &failure.message));
                 }
                 if prepared.tool == tools::RUN_COMMAND {
                     let none = tools::CommandReport {
@@ -617,7 +647,7 @@ impl ToolRuntime {
                         env_names: Vec::new(),
                     };
                     record =
-                        Some(self.record_command(prepared, &none, failure.message, failure.ran));
+                        Some(self.record_command(prepared, &none, &failure.message, failure.ran));
                 }
                 if prepared.tool == tools::LOAD_SKILL {
                     let none = tools::SkillReport {
@@ -630,7 +660,7 @@ impl ToolRuntime {
                         sha256: String::new(),
                         bytes: 0,
                     };
-                    record = Some(self.record_skill(&none, failure.message));
+                    record = Some(self.record_skill(&none, &failure.message));
                 }
                 if prepared.tool == tools::DELEGATE {
                     let none = tools::delegate::DelegationReport {
@@ -642,9 +672,9 @@ impl ToolRuntime {
                         effects: "unknown".to_string(),
                         duration_ms: elapsed.as_millis(),
                     };
-                    record = Some(self.record_delegation(&none, failure.message));
+                    record = Some(self.record_delegation(&none, &failure.message));
                 }
-                let mut outcome = error(prepared.tool, Some(prepared.target()), failure.message);
+                let mut outcome = error(prepared.tool, Some(prepared.target()), &failure.message);
                 outcome.elapsed = elapsed;
                 outcome.record = record;
                 outcome
@@ -842,6 +872,10 @@ impl ToolRuntime {
             }
             outcome.content.truncate(cut);
             outcome.content.push_str(NOTICE);
+            // The local preview/capture is not a copy of the provider request.
+            outcome
+                .output
+                .insert_str(0, crate::chat::transcript::MODEL_CUT_PREFIX);
         }
         self.output_bytes = self.output_bytes.saturating_add(outcome.content.len());
     }

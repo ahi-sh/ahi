@@ -31,7 +31,7 @@ fn discovered_names_cannot_be_replaced_by_file_or_ancestor_symlinks() {
     }
     assert_eq!(
         crate::tools::read_file::run(&workspace, candidate, None, None),
-        Ok("needle inside\n".into())
+        Ok(("needle inside\n".into(), 1))
     );
     assert_eq!(
         crate::tools::read_file::run(&workspace, "nested", None, None),
@@ -66,7 +66,7 @@ fn discovered_names_cannot_be_replaced_by_file_or_ancestor_symlinks() {
     }
     assert_eq!(
         crate::tools::read_file::run(&workspace, candidate, None, None),
-        Ok("needle restored\n".into())
+        Ok(("needle restored\n".into(), 1))
     );
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(outside).unwrap();

@@ -61,6 +61,7 @@ pub(super) fn run(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let lines = line_count(content);
+    let unit = if lines == 1 { "line" } else { "lines" };
     if !overwrite {
         if exists {
             return Err("file exists; set overwrite to replace it");
@@ -68,7 +69,7 @@ pub(super) fn run(
         crate::precommit::checks::create_new(path, content.as_bytes())
             .map_err(|_| "cannot create the file")?;
         return Ok((
-            format!("created {name}: {lines} lines"),
+            format!("created {name}: {lines} {unit}"),
             WriteReport {
                 before: None,
                 after: hex(content.as_bytes()),
@@ -88,7 +89,7 @@ pub(super) fn run(
     let removed = line_count(&before_text);
     let report = WriteReport::replace(path, &before, content.as_bytes(), lines, removed)?;
     Ok((
-        format!("replaced {name}: {lines} lines (was {removed})"),
+        format!("replaced {name}: {lines} {unit} (was {removed})"),
         report,
         WriteTexts {
             before: Some(before_text),

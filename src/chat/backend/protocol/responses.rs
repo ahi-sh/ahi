@@ -17,7 +17,7 @@ use crate::chat::backend::tool_call::ToolCallAssembler;
 use crate::chat::backend::ResponseEvent;
 use crate::chat::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
-use crate::harness::{ModelMetadata, Protocol};
+use crate::harness::Protocol;
 use crate::tools::ToolSchema;
 
 /// Output items one response may carry.
@@ -44,10 +44,8 @@ pub(super) fn request(context: &RequestContext<'_>) -> Value {
         // condition, on the browser-login path too.
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
-    if !context.browser_token {
-        if let Some(budget) = context.output_budget() {
-            body["max_output_tokens"] = json!(budget);
-        }
+    if let Some(budget) = context.output_budget() {
+        body["max_output_tokens"] = json!(budget);
     }
     body
 }
@@ -328,7 +326,7 @@ impl Slots {
 pub(super) fn read_stream(
     reader: impl Read + Send + 'static,
     sender: &Sender<ResponseEvent>,
-    metadata: &ModelMetadata,
+    context: &RequestContext<'_>,
 ) -> Result<StreamOutcome> {
     let mut sse = SseReader::new(reader, true);
     let mut slots = Slots::default();
@@ -336,6 +334,8 @@ pub(super) fn read_stream(
     let mut ids: Vec<String> = Vec::new();
     let mut response_id = None;
     let mut text_out = String::new();
+    let mut saw_calls = false;
+    let mut incomplete_item = false;
     loop {
         let data = match sse.next_event() {
             Ok(data) => data,
@@ -378,7 +378,10 @@ pub(super) fn read_stream(
                     return Err(invalid());
                 }
                 let arguments = match &item {
-                    Item::Function { arguments, .. } => arguments.clone(),
+                    Item::Function { arguments, .. } => {
+                        saw_calls = true;
+                        arguments.clone()
+                    }
                     _ => String::new(),
                 };
                 if arguments.len() > MAX_ARGUMENT_BYTES {
@@ -492,8 +495,9 @@ pub(super) fn read_stream(
                     ) if id == final_id
                         && role == "assistant"
                         && final_role == role
-                        && status == "completed" =>
+                        && matches!(status.as_str(), "completed" | "incomplete") =>
                     {
+                        incomplete_item |= status == "incomplete";
                         if text.len() > content.len() {
                             return Err(invalid());
                         }
@@ -532,9 +536,10 @@ pub(super) fn read_stream(
                             status,
                         },
                     ) if id == final_id && call_id == final_call_id && name == final_name => {
+                        incomplete_item |= status.as_deref() == Some("incomplete");
                         if status
                             .as_deref()
-                            .is_some_and(|status| status != "completed")
+                            .is_some_and(|status| !matches!(status, "completed" | "incomplete"))
                             || final_arguments.len() > MAX_ARGUMENT_BYTES
                             || !final_arguments.starts_with(&arguments)
                             || (arguments_done && final_arguments != &arguments)
@@ -555,7 +560,8 @@ pub(super) fn read_stream(
                 );
             }
             Event::Completed { response } => {
-                if response.status != "completed"
+                if incomplete_item
+                    || response.status != "completed"
                     || response.error.is_some()
                     || response.incomplete_details.is_some()
                     || !identifier(&response.id)
@@ -613,7 +619,12 @@ pub(super) fn read_stream(
                     }
                     emit(
                         sender,
-                        usage_event(metadata, usage.input_tokens, usage.output_tokens, cached),
+                        usage_event(
+                            context.metadata,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            cached,
+                        ),
                     )?;
                 }
                 let outcome = if calls.is_empty() {
@@ -637,7 +648,7 @@ pub(super) fn read_stream(
                         .incomplete_details
                         .is_some_and(|details| details.reason == "max_output_tokens")
                     {
-                        Error::limit("OpenAI response truncated by its output limit")
+                        super::output_limit(context.output_budget(), saw_calls)
                     } else {
                         Error::protocol("OpenAI response incomplete")
                     },

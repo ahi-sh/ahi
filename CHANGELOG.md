@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Stop clamping model output to 4,096 tokens. Use the advertised model limit, or omit the field when the protocol allows it. Anthropic Messages requires a catalog or configured `maxTokens`. If a provider cuts a reply short, report the requested limit when known and suggest a next step without retrying or running calls from that reply.
+
+- Delegate a scratch task to a resident ahi child in a dedicated local Rex session. A parent can keep chatting while the child works. Follow-ups reuse the durable conversation and recheck permissions; cancelling a run or detaching a client does not close the child. See [scratch delegation](README.md#service-owned-scratch-delegation-in-a-headless-rex-block).
+
 ## 0.26.1
 
 - Publish an attested Apple Silicon archive and separate checksum manifest. `scripts/install-macos.sh` bootstraps the first installation without Cargo or sudo; `ahi update` uses versioned archive names for subsequent updates.

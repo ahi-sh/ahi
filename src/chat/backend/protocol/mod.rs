@@ -21,8 +21,6 @@ use crate::harness::{ModelMetadata, Protocol};
 use super::{ResponseEvent, ToolCall};
 use crate::tools::ToolSchema;
 
-/// Conservative output budget sent when a model declares `maxTokens`.
-pub(super) const DEFAULT_OUTPUT_BUDGET: u64 = 4096;
 /// Hard cap on any serialized request, before the model's own declared limit.
 pub(super) const REQUEST_CAP: u64 = 16 * 1024 * 1024;
 
@@ -70,11 +68,9 @@ impl<'a> RequestContext<'a> {
         }
     }
 
-    /// `min(4096, maxTokens)` when the model declares a ceiling.
-    pub(super) fn output_budget(&self) -> Option<u64> {
-        self.metadata
-            .max_tokens
-            .map(|limit| DEFAULT_OUTPUT_BUDGET.min(limit.get()))
+    /// Browser-login Responses rejects an output limit; otherwise honor the model's own.
+    pub(super) fn output_budget(&self) -> Option<std::num::NonZeroU64> {
+        self.metadata.max_tokens.filter(|_| !self.browser_token)
     }
 
     /// The reasoning effort to send, only when metadata explicitly permits it.
@@ -120,13 +116,29 @@ pub(super) fn read_stream(
     protocol: Protocol,
     reader: impl Read + Send + 'static,
     sender: &Sender<ResponseEvent>,
-    metadata: &ModelMetadata,
+    context: &RequestContext<'_>,
 ) -> Result<StreamOutcome> {
+    let metadata = context.metadata;
     match protocol {
         Protocol::OpenAiCompletions => chat_completions::read_stream(reader, sender, metadata),
-        Protocol::OpenAiResponses => responses::read_stream(reader, sender, metadata),
+        Protocol::OpenAiResponses => responses::read_stream(reader, sender, context),
         Protocol::AnthropicMessages => anthropic::read_stream(reader, sender, metadata),
     }
+}
+
+/// A provider stopped this generation. Never promote its calls to a tool round.
+fn output_limit(limit: Option<std::num::NonZeroU64>, saw_calls: bool) -> Error {
+    let requested = limit
+        .map(|n| format!(" (request limit: {n} tokens)"))
+        .unwrap_or_default();
+    let next = if saw_calls {
+        "No tool calls from this reply ran. Ask for a fresh call with smaller arguments."
+    } else {
+        "Ask for a shorter answer, or quote the last complete point and ask the model to continue."
+    };
+    Error::limit(format!(
+        "Reply cut short by the model's output limit{requested}. {next}"
+    ))
 }
 
 /// Whether a `200` response must declare `text/event-stream` to be read.

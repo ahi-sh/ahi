@@ -176,6 +176,7 @@ pub(super) enum Arguments {
         name: Vec<String>,
         file: Option<String>,
     },
+    LocalDelegate(crate::delegation::local::Task),
     /// A task for a worker. `worker` holds the one label, as a list so
     /// policy matches it the way it matches an argv prefix.
     Delegate {
@@ -202,6 +203,7 @@ impl PreparedCall {
     /// never shown, so a prompt cannot carry model-chosen text.
     pub(super) fn target(&self) -> &str {
         match &self.arguments {
+            Arguments::LocalDelegate(_) => return crate::delegation::local::SELECTOR,
             Arguments::Delegate { worker, .. } => return &worker[0],
             Arguments::Skill { name, .. } => return &name[0],
             _ => {}
@@ -219,6 +221,7 @@ impl PreparedCall {
     pub(super) fn argv(&self) -> &[String] {
         match &self.arguments {
             Arguments::Command { argv, .. } | Arguments::SkillCommand { argv, .. } => argv,
+            Arguments::LocalDelegate(_) => crate::delegation::local::selector(),
             Arguments::Delegate { worker, .. } => worker,
             Arguments::Skill { name, .. } => name,
             _ => &[],
@@ -238,6 +241,9 @@ impl PreparedCall {
                 Some(file) => format!("reference {file}"),
                 None => "the skill's text".to_string(),
             },
+            Arguments::LocalDelegate(task) => {
+                format!("{} prompt(s) in Rex scratch", 1 + task.follow_ups.len())
+            }
             Arguments::Delegate { prompt, task, .. } => format!(
                 "{} lines{}",
                 write_file::line_count(prompt),
@@ -336,7 +342,7 @@ pub(super) fn schemas(
             },
             READ_FILE => ToolSchema {
                 name: READ_FILE,
-                description: format!("Read a UTF-8 text file {inside}, whole or a window of lines. Output is capped at 64 KiB; a tail line names the next offset when more remains.").into(),
+                description: format!("Read a UTF-8 text file {inside}, whole or a window of lines. Returns up to 64 KiB of whole lines with a continuation offset. A single line larger than that cannot be returned; use search_files for a bounded excerpt or skip the line.").into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -373,7 +379,7 @@ pub(super) fn schemas(
             },
             SEARCH_FILES => ToolSchema {
                 name: SEARCH_FILES,
-                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending; binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.".into(),
+                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending. Paths containing colons, quotes or control characters are JSON-quoted; use the decoded path with other tools. Binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -390,7 +396,7 @@ pub(super) fn schemas(
             },
             EDIT_FILE => ToolSchema {
                 name: EDIT_FILE,
-                description: format!("Replace text in a UTF-8 file {inside}. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.").into(),
+                description: format!("Replace text in a UTF-8 file {inside}. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Reports the occurrence count when old is absent or ambiguous without changing the file.").into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -541,6 +547,15 @@ pub(super) fn prepare_scoped(
     }
     if tool == "plan_scratch" {
         return plan_scratch::prepare(call);
+    }
+    if tool == DELEGATE && call.arguments.contains_key("local") {
+        return Ok(PreparedCall {
+            tool,
+            path: String::new(),
+            arguments: Arguments::LocalDelegate(crate::delegation::local::Task::parse(
+                Value::Object(call.arguments.clone()),
+            )?),
+        });
     }
     let raw: RawArguments =
         serde_json::from_value(Value::Object(call.arguments.clone())).map_err(|_| INVALID)?;
@@ -806,22 +821,25 @@ pub(super) struct Executed {
 /// and for a command whether a process ran first. `None` is "not known from
 /// here": a read or a write that failed in the workspace, where nothing
 /// about a process applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ToolFailure {
-    pub(super) message: &'static str,
+    pub(super) message: String,
     pub(super) ran: Option<bool>,
 }
 
 impl From<&'static str> for ToolFailure {
     fn from(message: &'static str) -> Self {
-        Self { message, ran: None }
+        Self {
+            message: message.into(),
+            ran: None,
+        }
     }
 }
 
 impl From<run_command::RunError> for ToolFailure {
     fn from(error: run_command::RunError) -> Self {
         Self {
-            message: error.message,
+            message: error.message.into(),
             ran: Some(error.ran),
         }
     }
@@ -839,9 +857,6 @@ pub(super) fn execute(
     cancel: &AtomicBool,
     command_update: impl FnMut(CommandUpdate),
 ) -> Result<Executed, ToolFailure> {
-    // Result rows are one per line; headers and continuation notes are not
-    // matches, so counts are approximate for the screen header only.
-    let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
         Arguments::Inspect(op) => Ok(Executed {
             content: git_inspect::run(workspace, &call.path, op, cancel)?,
@@ -852,6 +867,7 @@ pub(super) fn execute(
             ..Default::default()
         }),
         Arguments::Skill { name, file } => load_skill::run(name, file, skills),
+        Arguments::LocalDelegate(_) => Err("no service-bound local delegation profile".into()),
         Arguments::Delegate {
             worker,
             prompt,
@@ -874,7 +890,7 @@ pub(super) fn execute(
             let cwd = workspace
                 .resolve(&call.path)
                 .map_err(|message| ToolFailure {
-                    message,
+                    message: message.into(),
                     ran: Some(false),
                 })?;
             let resolved;
@@ -950,12 +966,12 @@ pub(super) fn execute(
             })
         }
         Arguments::Read { offset, limit } => {
-            let content = read_file::run(workspace, &call.path, *offset, *limit)?;
+            let (content, lines) = read_file::run(workspace, &call.path, *offset, *limit)?;
             Ok(Executed {
                 detail: Some(ToolDetail::Read {
                     offset: *offset,
                     limit: *limit,
-                    lines: content.lines().count(),
+                    lines,
                 }),
                 content,
                 write: None,
@@ -978,11 +994,12 @@ pub(super) fn execute(
         }
         Arguments::Find { pattern, limit } => {
             let path = workspace.resolve(&call.path)?;
-            let content = find_files::run(workspace, &path, &call.path, pattern, *limit)?;
+            let (content, matches) =
+                find_files::run(workspace, &path, &call.path, pattern, *limit)?;
             Ok(Executed {
                 detail: Some(ToolDetail::Find {
                     pattern: pattern.clone(),
-                    matches: matches(&content),
+                    matches,
                 }),
                 content,
                 write: None,
@@ -999,7 +1016,7 @@ pub(super) fn execute(
             limit,
         } => {
             let path = workspace.resolve(&call.path)?;
-            let content = search_files::run(
+            let (content, matches) = search_files::run(
                 workspace,
                 &path,
                 &call.path,
@@ -1016,7 +1033,7 @@ pub(super) fn execute(
                     pattern: pattern.clone(),
                     literal: *literal,
                     glob: glob.clone(),
-                    matches: matches(&content),
+                    matches,
                 }),
                 content,
                 write: None,
@@ -1261,7 +1278,7 @@ mod tests {
     /// Tests never cancel a call unless they say so.
     static NEVER: AtomicBool = AtomicBool::new(false);
 
-    fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
+    fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, String> {
         execute(
             call,
             workspace,
@@ -1274,7 +1291,7 @@ mod tests {
         .map_err(|failure| failure.message)
     }
 
-    fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
+    fn read(workspace: &Workspace, path: &str) -> Result<String, String> {
         run_text(
             &PreparedCall {
                 tool: READ_FILE,
@@ -1288,7 +1305,7 @@ mod tests {
         )
     }
 
-    fn list(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
+    fn list(workspace: &Workspace, path: &str) -> Result<String, String> {
         run_text(
             &PreparedCall {
                 tool: LIST_DIR,
@@ -1314,17 +1331,15 @@ mod tests {
             std::os::unix::fs::symlink(root.join("src"), root.join("inner")).unwrap();
         }
         assert_eq!(read(&workspace, "src/main.rs").unwrap(), "fn main() {}\n");
-        assert_eq!(read(&workspace, "binary"), Err("file is not UTF-8 text"));
-        let big = read(&workspace, "big").unwrap();
-        // One 70 KiB line does not fit the cap: nothing is shown, the tail
-        // says how to continue, and no partial line is emitted.
-        assert!(big.starts_with("[lines 1-0 of 1]\n"), "{big}");
-        assert!(
-            big.ends_with("[1 more lines; continue with offset=1]"),
-            "{big}"
+        assert_eq!(
+            read(&workspace, "binary"),
+            Err("file is not UTF-8 text".into())
         );
-        assert_eq!(read(&workspace, "src"), Err("not a regular file"));
-        let state = Err("path is inside ahi's own directories, which tools cannot read");
+        assert!(read(&workspace, "big")
+            .unwrap_err()
+            .contains("requested line exceeds 64 KiB"));
+        assert_eq!(read(&workspace, "src"), Err("not a regular file".into()));
+        let state = Err("path is inside ahi's own directories, which tools cannot read".into());
         assert_eq!(read(&workspace, "state/models.json"), state);
         assert_eq!(list(&workspace, "state"), state);
         for (tool, path) in [
@@ -1339,25 +1354,28 @@ mod tests {
             };
             assert!(
                 matches!(
-                    result,
+                    result.as_ref().map_err(String::as_str),
                     Err("path must be spelled exactly as on disk; symbolic links and case variants are refused")
                         | Err("path does not exist or cannot be read")
                 ),
                 "{path}: {result:?}"
             );
         }
-        assert_eq!(list(&workspace, "src/main.rs"), Err("not a directory"));
+        assert_eq!(
+            list(&workspace, "src/main.rs"),
+            Err("not a directory".into())
+        );
         assert_eq!(
             read(&workspace, "missing"),
-            Err("path does not exist or cannot be read")
+            Err("path does not exist or cannot be read".into())
         );
         #[cfg(unix)]
         {
             let listing = list(&workspace, "").unwrap();
             assert_eq!(listing, "big\nbinary\ninner@\nlink@\nsrc/\nstate/");
             let escaped = "path must be spelled exactly as on disk; symbolic links and case variants are refused";
-            assert_eq!(read(&workspace, "link"), Err(escaped));
-            assert_eq!(read(&workspace, "inner/main.rs"), Err(escaped));
+            assert_eq!(read(&workspace, "link"), Err(escaped.into()));
+            assert_eq!(read(&workspace, "inner/main.rs"), Err(escaped.into()));
         }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
@@ -1399,10 +1417,18 @@ mod tests {
         );
         assert_eq!(
             page("ten.txt", Some(11), None),
-            Err("offset is past the end of the file")
+            Err("offset is past the end of the file".into())
         );
         assert_eq!(page("no-newline.txt", None, None).unwrap(), "a\nb");
         assert_eq!(page("empty.txt", None, None).unwrap(), "");
+        assert_eq!(
+            page("empty.txt", Some(1), Some(1)).unwrap(),
+            "[empty file]\n"
+        );
+        assert_eq!(
+            page("empty.txt", Some(2), None),
+            Err("offset is past the end of the file".into())
+        );
         // A file over the cap pages by bytes and says where to resume.
         let many: String = (1..=3000).map(|n| format!("{n:0>30}\n")).collect();
         fs::write(root.join("many.txt"), &many).unwrap();
@@ -1423,6 +1449,61 @@ mod tests {
             &first[first.len() - 60..]
         );
         assert!(first.len() <= read_file::MAX_BYTES + 128);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_emits_unambiguous_paths_for_filenames_containing_colons() {
+        let (root, workspace) = fixture("colon-search");
+        fs::write(root.join("notes"), "decoy").unwrap();
+        fs::write(root.join("notes:2:old.txt"), "\n\n\n\n\n\nneedle\n").unwrap();
+        let prepared = prepare(&call("s", SEARCH_FILES, json!({"pattern":"needle"}))).unwrap();
+        assert_eq!(
+            run_text(&prepared, &workspace).unwrap(),
+            r#""notes:2:old.txt":7:needle"#
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn paging_and_search_details_count_data_rows_not_protocol_notes() {
+        let (root, workspace) = fixture("tools-counts");
+        fs::write(root.join("lines.txt"), "first\r\nred\r\nred\r\n").unwrap();
+        let run = |name, args| {
+            let prepared = prepare(&call("c", name, args)).unwrap();
+            execute(
+                &prepared,
+                &workspace,
+                &crate::skills::Catalog::default(),
+                &[],
+                &NEVER,
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            run(READ_FILE, json!({"path":"lines.txt","offset":2,"limit":1})).detail,
+            Some(ToolDetail::Read { lines: 1, .. })
+        ));
+        let matches = run(SEARCH_FILES, json!({"pattern":"^red$","limit":1}));
+        assert!(matches
+            .content
+            .starts_with("lines.txt:2:red\n[1 more match"));
+        assert!(matches!(
+            matches.detail,
+            Some(ToolDetail::Search { matches: 1, .. })
+        ));
+        let no_matches = run(SEARCH_FILES, json!({"pattern":"^$"}));
+        assert_eq!(no_matches.content, "[no matches]");
+        assert!(matches!(
+            no_matches.detail,
+            Some(ToolDetail::Search { matches: 0, .. })
+        ));
+        assert!(matches!(
+            run(FIND_FILES, json!({"pattern":"*.no-such-extension"})).detail,
+            Some(ToolDetail::Find { matches: 0, .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1482,7 +1563,7 @@ mod tests {
         assert_eq!(find("", "d*", 200), "docs/\nsrc/deep/");
         assert_eq!(
             find("", "*.rs", 1),
-            "src/deep/lib.rs\n[1 more matches not shown; raise limit or narrow the pattern]"
+            "src/deep/lib.rs\n[1 more match not shown; raise limit or narrow the pattern]"
         );
         let search =
             |path: &str, pattern: &str, literal, ignore_case, glob: Option<&str>, limit| {
@@ -1523,7 +1604,7 @@ mod tests {
         );
         assert_eq!(
             search("", "fn main(", false, false, None, 100),
-            Err("invalid regular expression")
+            Err("invalid regular expression".into())
         );
         assert_eq!(
             search("", "nothing here", true, false, None, 100).unwrap(),
@@ -1531,7 +1612,7 @@ mod tests {
         );
         assert_eq!(
             search("src/main.rs", "x", true, false, None, 1),
-            Err("not a directory")
+            Err("not a directory".into())
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1584,7 +1665,7 @@ mod tests {
         // Ambiguous, then unique, then replace_all.
         assert_eq!(
             edit("src/lib.rs", "fn a() {}", "fn c() {}", false).err(),
-            Some("old text occurs more than once; include more context or set replace_all")
+            Some("old text occurs more than once (2 occurrences); include more context or set replace_all".into())
         );
         let done = edit("src/lib.rs", "fn b() {}", "fn b() {}\nfn d() {}", false).unwrap();
         assert_eq!(done.content, "edited lib.rs: 1 replacement, +2 -1 lines");
@@ -1599,32 +1680,32 @@ mod tests {
         assert_eq!(all.content, "edited lib.rs: 2 replacements, +2 -2 lines");
         assert_eq!(
             edit("src/lib.rs", "nowhere", "x", false).err(),
-            Some("old text not found in the file")
+            Some("old text not found in the file (0 occurrences)".into())
         );
         assert_eq!(
-            edit("src/missing.rs", "a", "b", false).err(),
+            edit("src/missing.rs", "a", "b", false).err().as_deref(),
             Some("path does not exist or cannot be read")
         );
         // Create, refuse to clobber, then overwrite explicitly.
         let created = write("src/new.rs", "pub fn n() {}\n", false).unwrap();
-        assert_eq!(created.content, "created new.rs: 1 lines");
+        assert_eq!(created.content, "created new.rs: 1 line");
         assert!(created.write.unwrap().before.is_none());
         assert_eq!(
-            write("src/new.rs", "x", false).err(),
+            write("src/new.rs", "x", false).err().as_deref(),
             Some("file exists; set overwrite to replace it")
         );
         let replaced = write("src/new.rs", "a\nb\nc\n", true).unwrap();
         assert_eq!(replaced.content, "replaced new.rs: 3 lines (was 1)");
         assert_eq!(
-            write("src/other.rs", "x", true).err(),
+            write("src/other.rs", "x", true).err().as_deref(),
             Some("file does not exist; overwrite applies to an existing file")
         );
         assert_eq!(
-            write("nodir/x.rs", "x", false).err(),
+            write("nodir/x.rs", "x", false).err().as_deref(),
             Some("path does not exist or cannot be read")
         );
         assert_eq!(
-            write("src", "x", true).err(),
+            write("src", "x", true).err().as_deref(),
             Some("path is not a regular file")
         );
         // Protected paths are refused at preparation, before any policy.
@@ -1683,11 +1764,11 @@ mod tests {
         #[cfg(unix)]
         {
             assert_eq!(
-                write("link.rs", "x", true).err(),
+                write("link.rs", "x", true).err().as_deref(),
                 Some("path is a symbolic link; writes never follow links")
             );
             assert_eq!(
-                edit("link.rs", "a", "b", false).err(),
+                edit("link.rs", "a", "b", false).err().as_deref(),
                 Some("path is a symbolic link; writes never follow links")
             );
             assert_eq!(
@@ -1697,7 +1778,7 @@ mod tests {
             );
         }
         assert_eq!(
-            write("state/models.json", "{}", true).err(),
+            write("state/models.json", "{}", true).err().as_deref(),
             Some("path is inside ahi's own directories, which tools cannot read")
         );
         fs::remove_dir_all(root).unwrap();
@@ -1800,14 +1881,17 @@ mod tests {
             list(&workspace, &abs("sub")).unwrap(),
             "data.bin\nnotes.txt"
         );
-        assert_eq!(read_abs(&workspace, &abs("sub")), Err("not a regular file"));
+        assert_eq!(
+            read_abs(&workspace, &abs("sub")),
+            Err("not a regular file".into())
+        );
         assert_eq!(
             read_abs(&workspace, &abs("sub/missing")),
-            Err("path does not exist or cannot be read")
+            Err("path does not exist or cannot be read".into())
         );
         assert_eq!(
             read_abs(&workspace, &state),
-            Err("path is inside ahi's own directories, which tools cannot read"),
+            Err("path is inside ahi's own directories, which tools cannot read".into()),
             "ahi's state stays excluded by absolute path too"
         );
         let find = run_text(
@@ -1836,25 +1920,30 @@ mod tests {
             },
             &workspace,
         );
+        let path = abs("sub/notes.txt");
+        // A Windows drive prefix contains a colon and is JSON-quoted just
+        // like a Unix filename containing a colon; UNC roots need no quotes.
+        let field = if path.contains(':') {
+            json!(path).to_string()
+        } else {
+            path
+        };
         assert_eq!(
             search.unwrap(),
-            format!(
-                "{}:1:outside text\n[1 binary or oversized files skipped]",
-                abs("sub/notes.txt")
-            )
+            format!("{field}:1:outside text\n[1 binary or oversized files skipped]")
         );
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(outside.join("sub/notes.txt"), outside.join("link"))
                 .unwrap();
             std::os::unix::fs::symlink(outside.join("sub"), outside.join("linkdir")).unwrap();
-            assert_eq!(read_abs(&workspace, &abs("link")), Err(spelling));
+            assert_eq!(read_abs(&workspace, &abs("link")), Err(spelling.into()));
             assert_eq!(
                 read_abs(&workspace, &abs("linkdir/notes.txt")),
-                Err(spelling),
+                Err(spelling.into()),
                 "a link in an ancestor is refused too"
             );
-            assert_eq!(list(&workspace, &abs("linkdir")), Err(spelling));
+            assert_eq!(list(&workspace, &abs("linkdir")), Err(spelling.into()));
         }
         let write = |path: &str, content: &str, overwrite| {
             run_text(
@@ -1871,7 +1960,7 @@ mod tests {
         };
         assert_eq!(
             write(&abs("sub/new.txt"), "fresh\n", false).unwrap(),
-            "created new.txt: 1 lines"
+            "created new.txt: 1 line"
         );
         assert_eq!(
             fs::read_to_string(outside.join("sub/new.txt")).unwrap(),
@@ -1879,20 +1968,20 @@ mod tests {
         );
         assert_eq!(
             write(&abs("missing/x.txt"), "x", false),
-            Err("path does not exist or cannot be read")
+            Err("path does not exist or cannot be read".into())
         );
         assert_eq!(
             write(&abs("sub"), "x", true),
-            Err("path is not a regular file")
+            Err("path is not a regular file".into())
         );
         assert_eq!(
             write(&state, "{}", true),
-            Err("path is inside ahi's own directories, which tools cannot read")
+            Err("path is inside ahi's own directories, which tools cannot read".into())
         );
         #[cfg(unix)]
         assert_eq!(
             write(&abs("link"), "x", true),
-            Err("path is a symbolic link; writes never follow links")
+            Err("path is a symbolic link; writes never follow links".into())
         );
         let edited = run_text(
             &PreparedCall {
@@ -2137,11 +2226,11 @@ mod tests {
             "exit 0 (no output)"
         );
         assert_eq!(
-            run(&["ahi-no-such-program-xyz"], "", 30).err(),
+            run(&["ahi-no-such-program-xyz"], "", 30).err().as_deref(),
             Some("cannot start the program (not found or not executable)")
         );
         assert_eq!(
-            run(&["sh", "-c", "sleep 5"], "", 1).err(),
+            run(&["sh", "-c", "sleep 5"], "", 1).err().as_deref(),
             Some("command timed out and was killed")
         );
         // A cancel kills the program and everything it started: the
@@ -2182,11 +2271,11 @@ mod tests {
         );
         assert!(big.content.len() < 34 * 1024);
         assert_eq!(
-            run(&["true"], "state", 30).err(),
+            run(&["true"], "state", 30).err().as_deref(),
             Some("path is inside ahi's own directories, which tools cannot read")
         );
         assert_eq!(
-            run(&["true"], "missing", 30).err(),
+            run(&["true"], "missing", 30).err().as_deref(),
             Some("path does not exist or cannot be read")
         );
         fs::remove_dir_all(root).unwrap();
@@ -2259,7 +2348,7 @@ mod timing {
                 started.elapsed()
             );
             let started = Instant::now();
-            let found = find_files::run(&workspace, &root, "", "*.rs", 1000).unwrap();
+            let (found, _) = find_files::run(&workspace, &root, "", "*.rs", 1000).unwrap();
             println!(
                 "  find *.rs: {} lines in {:?}",
                 found.lines().count(),
@@ -2273,10 +2362,10 @@ mod timing {
                 glob: None,
                 limit: 500,
             };
-            let hits = search_files::run(&workspace, &root, "", &query).unwrap();
+            let (_, hits) = search_files::run(&workspace, &root, "", &query).unwrap();
             println!(
-                "  search 'fn main': {} lines in {:?}",
-                hits.lines().count(),
+                "  search 'fn main': {} matches in {:?}",
+                hits,
                 started.elapsed()
             );
             let started = Instant::now();
@@ -2287,10 +2376,10 @@ mod timing {
                 glob: Some("*.rs"),
                 limit: 500,
             };
-            let hits = search_files::run(&workspace, &root, "", &query).unwrap();
+            let (_, hits) = search_files::run(&workspace, &root, "", &query).unwrap();
             println!(
-                "  search regex in *.rs: {} lines in {:?}",
-                hits.lines().count(),
+                "  search regex in *.rs: {} matches in {:?}",
+                hits,
                 started.elapsed()
             );
         }

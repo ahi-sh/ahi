@@ -13,7 +13,7 @@ pub(super) fn run(
     relative: &str,
     pattern: &str,
     limit: usize,
-) -> Result<String, &'static str> {
+) -> Result<(String, usize), &'static str> {
     if !directory.is_dir() {
         return Err("not a directory");
     }
@@ -45,13 +45,18 @@ pub(super) fn run(
         }
     }
     if matched == 0 {
-        return Ok("[no matches]".to_string());
+        return Ok(("[no matches]".to_string(), 0));
     }
     if matched > shown {
         out.push_str(&format!(
-            "\n[{} more matches not shown; raise limit or narrow the pattern]",
-            matched - shown
+            "\n[{} more {} not shown; raise limit or narrow the pattern]",
+            matched - shown,
+            if matched - shown == 1 {
+                "match"
+            } else {
+                "matches"
+            }
         ));
     }
-    Ok(out)
+    Ok((out, shown))
 }

@@ -32,6 +32,8 @@ def main() -> None:
     parser.add_argument("--binary", type=Path, default=Path("target/debug/ahi"))
     parser.add_argument("--capture-directory", type=Path)
     focused = parser.add_mutually_exclusive_group()
+    focused.add_argument("--startup-version-only", action="store_true",
+                         help="verify an incompatible local service is refused before the picker opens")
     focused.add_argument("--appearance-only", action="store_true",
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
@@ -40,6 +42,8 @@ def main() -> None:
                          help="verify workspace trust, mode cycling, policy bypass and revocation")
     focused.add_argument("--login-copy-only", action="store_true",
                          help="verify raw OAuth URL clipboard copy and cancellation with disposable adapters")
+    focused.add_argument("--post-tool-failure-only", action="store_true",
+                         help="verify a failed continuation never resends an already executed write")
     focused.add_argument("--stream-recovery-only", action="store_true",
                          help="verify live checkpoints and Ctrl+C recovery in both engines")
     focused.add_argument("--session-details-only", action="store_true",
@@ -188,7 +192,7 @@ def main() -> None:
             self.recent = b""
             os.write(self.fd, keys.encode())
 
-        def finish(self) -> str:
+        def finish(self, expected_code: int = 0) -> str:
             end = time.monotonic() + 10
             while time.monotonic() < end:
                 self.read()
@@ -196,7 +200,7 @@ def main() -> None:
                 if pid:
                     self.dead = True
                     self.read()
-                    assert os.waitstatus_to_exitcode(status) == 0, self.output
+                    assert os.waitstatus_to_exitcode(status) == expected_code, self.output
                     return self.output.decode(errors="replace")
             raise AssertionError("picker did not exit")
 
@@ -206,6 +210,37 @@ def main() -> None:
             if not self.dead:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
+
+    full_suite = not any(value for key, value in vars(args).items() if key.endswith('_only'))
+    if full_suite or args.startup_version_only:
+        with tempfile.TemporaryDirectory(prefix="ahi-version-", dir="/tmp") as temp, socket.socket(socket.AF_UNIX) as listener:
+            state = Path(temp)
+            path = state / "serve.sock"
+            listener.bind(str(path))
+            listener.listen()
+            listener.settimeout(5)
+            session = Session(state, command=("tui", "--socket", str(path)))
+            try:
+                # A liveness probe may connect and immediately close. Only a real
+                # health request needs an answer; never send the picker a key.
+                while True:
+                    conn, _ = listener.accept()
+                    with conn, conn.makefile("rb") as reader:
+                        conn.settimeout(5)
+                        line = reader.readline()
+                        if line:
+                            req = json.loads(line)
+                            assert req["method"] == "health", req
+                            conn.sendall((json.dumps({"id": req["id"], "result": {"version": "0.26.1"}}) + "\n").encode())
+                            break
+                output = session.finish(expected_code=1)
+                assert f"the server on {path} is ahi 0.26.1" in output and "ahi serve stop" in output, output
+                assert b"\x1b[?1049h" not in session.output, "entered alternate screen before refusing service"
+            finally:
+                session.close()
+        if args.startup_version_only:
+            print("PASS: stale local service refused before TUI startup, without input")
+            return
 
     if args.workspace_modes_only:
         queue_release = threading.Event()
@@ -557,6 +592,84 @@ def main() -> None:
             assert not (state / "credentials/openai.json").exists()
         print("PASS: borderless model/gateway/login screens; exact raw model ID and URL copies, unavailable clipboard, OSC52 payload, callback preservation and cancel")
         return
+
+    if full_suite or args.post_tool_failure_only:
+        for engine in ('standalone', 'service'):
+            requests = []
+
+            class WriteThenDisconnect(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    requests.append(body)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    if len(requests) != 1:
+                        # Break the stream *after* the write result was submitted.
+                        self.send_header('Content-Length', '500')
+                        self.end_headers()
+                        self.wfile.write(b': interrupted\n\n')
+                        return
+                    self.end_headers()
+                    call = dict(index=0, id='once', type='function', function=dict(name='write_file',
+                                arguments=json.dumps({'path': 'marker', 'content': 'written once'})))
+                    event = {'choices': [{'index': 0, 'delta': {'tool_calls': [call]}, 'finish_reason': 'tool_calls'}]}
+                    self.wfile.write(f'data: {json.dumps(event)}\n\ndata: [DONE]\n\n'.encode())
+
+                def log_message(self, *args):
+                    pass
+
+            with tempfile.TemporaryDirectory(prefix='ahi-post-tool-', dir='/tmp') as temp, ThreadingHTTPServer(('127.0.0.1', 0), WriteThenDisconnect) as gateway:
+                root = Path(temp)
+                state, work = root / 'state', root / 'work'
+                state.mkdir()
+                work.mkdir()
+                policy = root / 'policy.yaml'
+                policy.write_text('version: 1\nrules:\n- {id: write, action: file_write, match: {tool: write_file}, effect: approve}\n')
+                (state / 'models.json').write_text(json.dumps({'providers': {'local': {
+                    'baseUrl': f'http://127.0.0.1:{gateway.server_port}/v1', 'api': 'openai-completions',
+                    'models': [{'id': 'fixture'}]}}}))
+                sock = str(root / 'service.sock')
+                options = ('--standalone',) if engine == 'standalone' else ('--socket', sock)
+                command = ('tui', '--tools', str(policy), *options)
+                chat = Session(state, cwd=work, command=command)
+                worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    chat.expect('Models · Enter use model')
+                    chat.send('jjj\r')
+                    chat.expect('(local) fixture')
+                    chat.send('write the marker\r')
+                    chat.expect('check their effects')
+                    assert 'Enter resends' not in chat.screen()
+                    chat.send('\r/quit\r')
+                    chat.finish()
+                    path, = (state / 'sessions').glob('*.jsonl')
+                    entries = [json.loads(line) for line in path.read_text().splitlines()]
+                    assert [e['text'] for e in entries if e.get('role') == 'operator'] == ['write the marker']
+                    assert [e['result']['call_id'] for e in entries if e.get('role') == 'tool'] == ['once']
+                    assert (work / 'marker').read_text() == 'written once'
+                    assert len(requests) == 2 and requests[1]['messages'][-1]['tool_call_id'] == 'once'
+                    gateway.shutdown()
+                    worker.join(5)
+                    reopened = Session(state, cwd=work, command=(*command, '--session', path.stem))
+                    worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+                    worker.start()
+                    try:
+                        reopened.expect('resumed session')
+                        reopened.send('\r/quit\r')
+                        reopened.finish()
+                        assert len(requests) == 2
+                    finally:
+                        reopened.close()
+                finally:
+                    chat.close()
+                    gateway.shutdown()
+                    worker.join(5)
+                    if engine == 'service':
+                        subprocess.run([binary, '--state-dir', state, 'serve', '--socket', sock, 'stop'], capture_output=True, timeout=10)
+        print('PASS: one write, one correlated result, no blank-Enter replay before or after resume (both engines)')
+        if args.post_tool_failure_only:
+            return
 
     if args.stream_recovery_only:
         marker = "visible-stream-marker"
@@ -1786,7 +1899,7 @@ def main() -> None:
             session.expect("0.1% / 1M")
             path, headers, request = gateway_requests[-1]
             assert path == "/v1/chat/completions"
-            assert request["max_tokens"] == 4096
+            assert request["max_tokens"] == 32768
             assert request["stream_options"] == {"include_usage": True}
             assert not {"store", "reasoning_effort", "tools"} & request.keys()
             cache_path = metadata_state / "catalogs/home.json"
@@ -1873,9 +1986,13 @@ def main() -> None:
             session.send("verify missing terminator\r")
             session.expect("model response ended before [DONE]")
             assert "stream_options" not in gateway_requests[-1][2]
-            gateway_response["stream"] = usage_stream.replace('"stop"', '"length"')
+            # A textual tool marker is still partial prose, never a structured call.
+            gateway_response["stream"] = usage_stream.replace('"stop"', '"length"').replace(
+                'metadata confirmed', '<tool_call>unfinished example')
             session.send("verify explicit truncation\r")
-            session.expect("model response truncated by its output limit")
+            session.expect("<tool_call>unfinished example")
+            session.expect("request limit: 128 tokens")
+            session.expect("Ask for a shorter answer")
             gateway_response["stream"] = (
                 'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}\n\n'
                 'data: [DONE]\n\n'
@@ -2099,7 +2216,7 @@ def main() -> None:
             server_thread.join(timeout=5)
     print(
         "PASS: Pi-shaped catalog onboarding, authoritative /v1 Review and inference, metadata cache/restart/curation, "
-        "provider/model overrides, capped output fields, reported paid usage without cached-input double counting, "
+        "provider/model overrides, declared output limits without clamping, reported paid usage without cached-input double counting, "
         "usage omission, reasoning Off and assistant replay, finish-reason fallback with truncation/tool safety, "
         "ahi.tools.yaml-gated read_file with operator approve/deny, tool resubmission and cross-turn replay, "
         "exact UTF-8 byte boundaries without rejected HTTP requests, model names/limits/context, "

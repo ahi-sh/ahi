@@ -80,6 +80,21 @@ pub fn run(
             refresh_failed: !errors.is_empty(),
         });
     }
+    // Check the local daemon before either picker or chat enters raw mode.
+    // Keep this connection: selecting a model must not reconnect or recheck it.
+    let standalone = standalone || (cfg!(not(unix)) && socket.is_none() && via.is_none());
+    let local_client = if !standalone && via.is_none() {
+        let path = crate::serve::ensure_running(state, socket)?;
+        let mut client = crate::service::client::Client::listening(state, &path)
+            .map_err(|err| Error::new(err.message))?;
+        let health = client
+            .call("health", serde_json::json!({}))
+            .map_err(|err| Error::new(err.message))?;
+        crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)?;
+        Some(client)
+    } else {
+        None
+    };
     let mut picker = Picker::new(registry);
     // Cancelling startup exits, even if an old selection file exists. Only
     // Enter starts chat; cancelling /model instead keeps the active selection.
@@ -116,22 +131,15 @@ pub fn run(
             }
             pick(state, &mut picker, false)
         };
-        let engine = if standalone {
-            chat::Engine::Standalone { record }
-        } else if let Some(command) = via {
+        let engine = if let Some(client) = local_client {
+            chat::Engine::Service(client)
+        } else if let Some(command) = via.filter(|_| !standalone) {
             let argv = crate::service::via::split(command).map_err(Error::new)?;
             let client = crate::service::client::Client::via(&argv)
                 .map_err(|err| Error::new(err.message))?;
             chat::Engine::Service(client)
         } else {
-            let path = crate::serve::ensure_running(state, socket)?;
-            let mut client = crate::service::client::Client::open(state, Some(&path), false)
-                .map_err(|err| Error::new(err.message))?;
-            let health = client
-                .call("health", serde_json::json!({}))
-                .map_err(|err| Error::new(err.message))?;
-            crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)?;
-            chat::Engine::Service(client)
+            chat::Engine::Standalone { record }
         };
         let exit = match selected {
             Selected::Picked(selection) => chat::interact(

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::replay::Exchanges;
-use super::{emit, usage_event, RequestContext, StreamOutcome, DEFAULT_OUTPUT_BUDGET};
+use super::{emit, usage_event, RequestContext, StreamOutcome};
 use crate::chat::backend::sse::{SseError, SseReader};
 use crate::chat::backend::tool_call::ToolCallAssembler;
 use crate::chat::backend::ResponseEvent;
@@ -30,7 +30,9 @@ const MAX_THINKING_BYTES: usize = 256 * 1024;
 const MIN_THINKING_BUDGET: u64 = 1024;
 
 pub(super) fn request(context: &RequestContext<'_>) -> Result<Value> {
-    let max_tokens = context.output_budget().unwrap_or(DEFAULT_OUTPUT_BUDGET);
+    let max_tokens = context.output_budget().ok_or_else(|| Error::new(
+        "Anthropic Messages requires max_tokens; refresh the catalog or set this model's maxTokens in models.json"
+    ))?.get();
     let mut body = json!({
         "model": context.model,
         "max_tokens": max_tokens,
@@ -436,6 +438,13 @@ pub(super) fn read_stream(
                 if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
                     emit(sender, usage_event(metadata, input, output, cached))?;
                 }
+                if stop_reason.as_deref() == Some("max_tokens") {
+                    let saw_calls = slots
+                        .iter()
+                        .flatten()
+                        .any(|s| matches!(s.block, Block::ToolUse { .. }));
+                    return Err(super::output_limit(metadata.max_tokens, saw_calls));
+                }
                 let mut calls = ToolCallAssembler::default();
                 let mut call_index = 0;
                 let mut native = Vec::new();
@@ -491,11 +500,6 @@ pub(super) fn read_stream(
                     Some("tool_use") => {
                         return Err(Error::protocol(
                             "model stopped for tool use without any tool_use block",
-                        ))
-                    }
-                    Some("max_tokens") => {
-                        return Err(Error::limit(
-                            "Anthropic response truncated by its output limit",
                         ))
                     }
                     Some("refusal" | "sensitive") => {
@@ -660,7 +664,7 @@ mod tests {
                     json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":1}}),
                     json!({"type":"message_stop"}),
                 ],
-                "truncated",
+                "Ask for a shorter answer",
             ),
             (
                 vec![
@@ -810,8 +814,9 @@ mod tests {
             metadata: &ModelMetadata::default(),
             ..context
         };
-        let body = request(&context).unwrap();
-        assert_eq!(body["max_tokens"], 4096);
-        assert!(body.get("thinking").is_none());
+        assert!(request(&context)
+            .unwrap_err()
+            .to_string()
+            .contains("set this model's maxTokens"));
     }
 }

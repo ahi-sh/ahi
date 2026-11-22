@@ -1,5 +1,35 @@
 # ahi
 
+## Subagent design ([#123](https://github.com/iancleary/ahi/issues/123))
+
+**ahi owns the subagent; Rex keeps it attachable; ahi’s durable session store keeps its conversation recoverable.**
+
+- **ahi** admits each task, enforces the delegated mode against the workspace’s active permissions at admission, runs the child, and reports its status.
+- **Rex** gives each child its own multiplexer session. Clients can attach and detach without owning or cancelling the run.
+- **Durable history** uses ahi’s session recorder and JSONL store, with tool presentation records from `ahi-durable`. Rex scrollback is useful to an attached client, but it is not the authoritative transcript or proof that a run completed.
+
+**Idle means ready for another turn, not closed.** In this design, the child ahi process stays at its prompt in the same Rex session until the orchestrator or the child explicitly closes it. A follow-up starts a new run in the same ahi conversation with a fresh permission check.
+
+The child reports its state to Rex through the **Program Status Protocol (OSC 7501)**: `working` during a run, `blocked` when waiting for input, and `idle` when ready. `done` or `error` reports how the last run ended, not that the child exited. Clients can use Rex to see which child needs attention without parsing its screen. For the recorded outcome of a particular run, the orchestrator queries ahi by run ID.
+
+## Delegation glossary
+
+| Term | Meaning in ahi |
+| --- | --- |
+| **Delegation** | Asking another ahi worker to carry out a bounded task under an approved mode. |
+| **Orchestrator** | The parent that delegates work, tracks its outcome, and decides whether to follow up, cancel a run, or close a child. The parent can keep chatting while the child works. |
+| **Subagent (child)** | The ahi worker that does the delegated work. A resident child stays open between runs. Its **child ID** identifies it across those runs. |
+| **ahi session** | The child’s recorded conversation: prompts, replies, tool calls, and results. A follow-up uses that history; closing the live child does not delete it. |
+| **Rex session** | The multiplexer session that hosts the live child. Its **Rex session ID** tells a client where to attach, not which run to inspect. |
+| **Run (assignment)** | One admitted piece of work, from acceptance to completion, failure, cancellation, or timeout. Its **run ID** identifies the work to inspect or cancel. For a local Rex child, this is the **assignment ID**. The first run uses the child ID; later runs have distinct IDs. |
+| **Turn** | One prompt and the model and tool calls needed to answer it. Prompts queued together at admission can span several turns in one run. A follow-up submitted later starts a new run in the same ahi session. |
+| **Admission** | The service’s permission check before accepting a run. The delegated mode cannot grant more than the caller or the workspace permits at that moment; a follow-up cannot widen the child’s existing permissions. |
+| **Idle** | The child is open and ready for another run. Detaching disconnects a client; cancelling stops a run; closing ends the live child. |
+
+For tool, policy, and terminal-host terminology, see the [general glossary](#glossary).
+
+## Overview
+
 `ahi` is a Rust library and command-line tool for working on software projects:
 
 - **Terminal assistant:** `ahi tui` streams model responses from OpenAI and configured gateways, with workspace tools, saved sessions, and configurable execution permissions.
@@ -341,9 +371,9 @@ rules:
 
 #### Requests and limits
 
-Token usage comes only from reported responses. Known catalog context capacity feeds the context meter; complete price/usage information enables cumulative reported-usage cost in Commands, not a claim about the provider's billing total. Reasoning effort is sent only when model metadata explicitly permits it and thinking is not Off. Gateways with a declared `maxTokens` receive a conservative output budget of `min(4096, maxTokens)` through the declared token field; browser-token Responses requests omit unsupported output-limit fields. Exact serialized request-byte limits are enforced before submission. Only one turn runs at a time; Enter preserves the next draft while a reply is active.
+Token usage comes only from reported responses. Known catalog context capacity feeds the context meter; complete price/usage information enables cumulative reported-usage cost in Commands, not a claim about the provider's billing total. Reasoning effort is sent only when model metadata explicitly permits it and thinking is not Off. ahi passes the model’s declared `maxTokens` unchanged. Without one, Chat Completions and gateway Responses leave the output limit to the provider. Browser-login Responses always omits that field. Anthropic Messages requires `max_tokens`: refresh the catalog to pick up the provider’s limit, or set `maxTokens` on the model in `models.json` if the catalog omits it. If a provider cuts a reply short, streamed text stays visible; ahi neither retries automatically nor executes any tool calls from the cut-off reply. Exact serialized request-byte limits are enforced before submission. Only one turn runs at a time; Enter preserves the next draft while a reply is active.
 
-Requests refuse redirects, have a 120-second timeout, and cap events at 1 MiB and the total stream at 16 MiB. A gateway that cannot be reached (DNS or connection failure) gets three connection attempts with short pauses; generation is never automatically retried, and after a connection failure **Enter** on a blank input resends the same message. OpenAI can renew once and resubmit after a definitive pre-stream HTTP 401; ambiguous failures or failures after content never retry generation. **Esc** cancels a streaming response: the partial reply is kept and sent with the next message, and the connection is closed at the next read. Exiting chat does the same without the notice. Neither can make a provider stop generating before it notices the closed socket.
+Requests refuse redirects, have a 120-second timeout, and cap events at 1 MiB and the total stream at 16 MiB. A gateway that cannot be reached (DNS or connection failure) gets three connection attempts with short pauses; generation is never automatically retried. After a connection failure, blank **Enter** offers to resend only when the last conversation row is your prompt—not after a partial reply or tool result. If a tool already ran, inspect its effects and send a new prompt. If the service loses the submit reply or the event connection, check the reported session and run ID before retrying; losing the connection is not proof the work stopped. OpenAI can renew once and resubmit after a definitive pre-stream HTTP 401; ambiguous failures or failures after content never retry generation. **Esc** cancels a streaming response: the partial reply is kept and sent with the next message, and the connection is closed at the next read. Exiting chat does the same without the notice. Neither can make a provider stop generating before it notices the closed socket.
 
 #### Commands popup
 
@@ -373,7 +403,7 @@ Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the
 
 #### The chat and the server
 
-`ahi tui` runs its turns through the session service. When no `ahi serve` answers on the socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`; `--socket <path>` names another), the chat starts one detached, with its output in `<state>/serve.log`, waits up to two seconds for it to answer, and attaches. Two chats started together end up on one server. The server outlives the chat and never idles out, so the next chat, `ahi exec`, or another ahi-protocol client can find it running; `ahi serve stop` ends it. In this mode the server records the session and the screen is a client: the same transcript, tools, approval dialog, `/model`, `/thinking`, and `--resume`, with the approval answered over the socket. `--standalone` runs the engine inside the chat as before and records the session itself; `--no-history` applies there. On Windows the chat is always standalone.
+`ahi tui` checks the local session service version before opening the interactive model picker or a resumed chat. If the versions differ, it prints the error in the calling terminal and exits without stopping the server. When no `ahi serve` answers on the socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`; `--socket <path>` names another), the chat starts one detached, with its output in `<state>/serve.log`, waits up to two seconds for it to answer, and attaches. Two chats started together end up on one server. The server outlives the chat and never idles out, so the next chat, `ahi exec`, or another ahi-protocol client can find it running; `ahi serve stop` ends it. In this mode the server records the session and the screen is a client: the same transcript, tools, approval dialog, `/model`, `/thinking`, and `--resume`, with the approval answered over the socket. `--standalone` runs the engine inside the chat as before and records the session itself; `--no-history` applies there. On Windows the chat is always standalone.
 
 **Developing the TUI:** Run `just tui` from the checkout (or use
 `cargo run -- tui --standalone` without `just`). This runs the checkout's engine
@@ -420,7 +450,7 @@ removed_emphasis = "#8c3232"
 
 Missing files or keys use these defaults without writing configuration. Invalid colors, unknown keys, and invalid padding values stop startup with the filename and parse error. Complete examples are in `examples/tui/`. Menu colors and syntax-token palettes are not configurable through these files yet.
 
-Edit previews show all generated unified-diff hunks with old/new line numbers, red removed text, green added text, and stronger backgrounds for changed words. Long diff lines wrap instead of being clipped at 400 characters; previews no longer stop at 200 rows. Command-output and read-preview limits are unchanged. Tool presentation is recorded with the session: edit before/after text, command argv and separated output streams, search/read metadata, exit codes, and durations survive resume and export/import. The service-backed live TUI uses the same records. Older sessions without presentation metadata still load with their original plain previews. Presentation data is not sent to the model.
+Edit previews show all generated unified-diff hunks with old/new line numbers, red removed text, green added text, and stronger backgrounds for changed words. Long diff lines wrap instead of being clipped at 400 characters; previews no longer stop at 200 rows. Ctrl+O shows the local capture, not the exact bytes sent to the model. When the turn’s tool-output budget cuts the model-facing result, the collapsed and expanded headers say so. `run_command` reports the subprocess exit code in new tool records and in `exec -v`; an approved program that exits 126 is a failed command, not a policy denial. Search results JSON-quote paths containing colons or quotes; ambiguous historical rows stay readable without a guessed file link. Command-output and read-preview limits are unchanged. Tool presentation is recorded with the session: edit before/after text, command argv and separated output streams, search/read metadata, exit codes, and durations survive resume and export/import. The service-backed live TUI uses the same records. Older sessions without presentation metadata still load with their original plain previews. Presentation data is not sent to the model.
 
 Each serialized tool detail is limited to 512 KiB to leave room for the bounded result text within the service's 2 MiB frame limit. Larger previews display an explicit omission explanation instead of a partial or misleading diff; the result and duration remain recorded. This applies in standalone and service-backed chat. Session files now retain more source/output data and can reach their existing 64 MiB budget sooner; keep exported sessions private.
 
@@ -490,13 +520,35 @@ Opens a shell in the opinionated development image that [iancleary/ahi-images](h
 
 The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default `ghcr.io/iancleary/ahi-dev`. The tag is the first of `--tag`, `tag` in `ahi.dev.yaml`, and `latest`, appended to that name: `ahi dev --tag edge` opens `ghcr.io/iancleary/ahi-dev:edge`. A reference that already names a tag or digest is never rewritten: it is used as is, `--tag` against it is an error, and a repository `tag` yields to a tagged `--image` or `AHI_DEV_IMAGE`. `ahi.dev.yaml` (`version: 1` with optional `image`, `tag`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell` (`bash` or `zsh` in the ahi-dev images), else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/zsh`, the images' login shell. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. The container hostname is the image's short name (`ahi-dev-rust`) and the mounted directory's name is passed as `AHI_DEV_PROJECT`, which the image's prompt shows as `dev@ahi-dev-rust:<version> <project>`. On Unix the owner of the mounted directory is passed as `AHI_HOST_UID` and `AHI_HOST_GID`; the ahi-dev entrypoint remaps its `dev` user to them so files written to the mount belong to the host user. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
 
+### Service-owned scratch delegation in a headless Rex block
+
+`ahi delegate launch` starts **the worker itself** in a new, dedicated session on an existing local Rex server, with no graphical client. The Unix `ahi serve` process admits the task and freezes the exact route and tool rules before asking Rex to start. The worker claims once, runs the model and its tools in private scratch, and returns a result over the same authenticated service connection. No parent transcript or approval grants are copied.
+
+```sh
+ahi delegate launch --server unix:///absolute/path/to/rex.sock \
+  --model gateway/model-id --prompt-file task.txt --dry-run
+# Remove --dry-run to launch. The first assignment ID is also the child ID.
+ahi delegate status RUN_ID --wait 30
+ahi delegate follow RUN_ID --prompt-file next.txt   # returns a new run ID
+ahi delegate cancel RUN_ID                        # cancel this run, not its child
+ahi delegate close CHILD_ID                       # explicitly end the live child
+```
+
+**Mode and lifetime.** A direct operator launch uses the current workspace’s startup mode (policy, remembered trust, or Plan). `--mode plan` narrows it; the flag cannot grant trust. The child retains deny, path and unattended approval restrictions. Trusted can narrow to a workspace mode, and Full Access can narrow to Trusted. Between named modes the service requires a provable subset of grants with deny rules preserved; incomparable modes are refused. Even an inherited Full Access label cannot unlock absolute paths, shell commands, skills or recursive delegation in the scratch profile. `--follow-up FILE` is repeatable: each prompt sees the child’s prior replies and tool results. The **run** continues through tool rounds and ends when the queue is empty, or earlier on failure, cancellation or the assignment deadline. The **worker** stays at its prompt. Enter a follow-up in Rex, or use `ahi delegate follow` with the last completed run ID. A stale run ID cannot create a sibling. Each follow-up rechecks the current workspace authority and the previous child ceiling; request a narrower mode if needed. Enter `/close` to end the child from its terminal. Admission is bounded to 16 prompts totaling 1 MiB; a turn exceeding 64 tool rounds fails. There is no synthetic “keep going” prompt. The result contains the final answer and `turns_completed`.
+
+**Calling model.** Set `AHI_DELEGATE_REX_SERVER` in the listening service’s environment to opt into the fixed `rex-scratch` profile. An authorized model can call `delegate` with `{"local":{"profile":"rex-scratch","mode":"plan"},"prompt":"Inspect scratch","follow_ups":["Summarize your findings"]}`. Launch returns a task reference instead of waiting. The parent can take another turn while the child runs. The owning parent can later use `{"local":{"profile":"rex-scratch","action":"status","run":"RUN_ID"}}`; use `follow` with a new top-level `prompt`, `cancel` to stop one run, or `close` to end the child. Omit `mode` to inherit. At admission the service checks the still-running parent session and run ID, its frozen permissions, and the origin workspace’s current trust and policy. A temporary parent-mode selection cannot override a revoked workspace grant. The model cannot pick another server, path or parent. Trusted and Full Access can call this profile; a workspace mode needs `allow.local_profiles: [rex-scratch]`. Remote `workers` grants do not authorize it. A model in Plan cannot delegate. The existing remote `delegate({worker,prompt,…})` protocol is unchanged; these local inheritance guarantees do not apply across a remote connector.
+
+**Recovery and retention.** Select a local Unix socket or loopback IP:port on the same host/account. `status` returns the verified Rex session and block IDs, the run result, and `lifecycle` (latest run, live state and transcript path). The durable transcript is a separate ahi session under the child’s private assignment directory, not a branch of the parent conversation. Read that file with `ahi session show /path/to/transcript.jsonl`, even after closing the child. After a crash, inspect the recorded history; nothing silently replays the last run. `status` reads structured service records, never PTY output. Losing a launch/claim/finish reply is not permission to retry. Cancellation is cooperative; closing a terminal client does not cancel the worker. A missing result is unknown, not success. Prompts, private admission records and results remain under `<state>/delegation/assignments/`; the scratch directory is under the service’s temp directory and is named in `assignment.scratch`. Remove them manually only after the worker stops. Neither mode restrictions nor the peer-checked socket isolate other processes running as the same OS account.
+
+For a disposable real-Rex check without a GUI, credentials or paid inference: `python3 scripts/smoke-rex-delegation.py --binary target/debug/ahi` (Unix, installed Rex CLI). It starts a fresh server on a private socket and uses a loopback model fixture.
+
 ### ahi sandbox
 
 Detection only in this version; nothing is confined yet. `ahi sandbox check` prints the platform, whether an outer sandbox is already active on the process, the evidence, and the backend `ahi sandbox run` would use, then exits 0. On Linux it reads `Seccomp:` and `NoNewPrivs:` from `/proc/self/status`, the active LSM list for Landlock, `bwrap` on `PATH` with the user-namespace limits, and container markers. A seccomp filter already active on the process (mode 2, as inside OpenShell) is reported as an outer sandbox, and ahi would run a child directly rather than nest a second filter. The backend order is Landlock plus seccomp, then `bwrap`, then none; macOS reports `sandbox-exec` as best effort because Apple treats it as deprecated; Windows reports a job object, which contains the process tree only. The probes read files and `PATH` and need no unsafe code; the definitive OpenShell test, a `seccomp` call returning `EPERM`, arrives with `ahi sandbox run`. `ahi doctor` carries the same one-line summary.
 
 ## Glossary
 
-These terms describe ahi's boundaries, not interchangeable names for the same subsystem.
+For children, sessions, runs, and turns, see the [delegation glossary](#delegation-glossary).
 
 | Term | Meaning in ahi |
 | --- | --- |
@@ -512,9 +564,7 @@ These terms describe ahi's boundaries, not interchangeable names for the same su
 | **Terminal / shell / UI client** | A terminal supplies program input/output; a shell is one program that can run in it. A graphical UI client displays terminals. Ahi does not manage the external client's windows, layout, or focus. |
 | **Execution target** | The selected server/core and local or remote execution namespace. Native Windows and WSL are different targets, even on one physical computer. |
 | **Terminal handle** | A backend- and target-qualified native terminal ID. It is not an ahi session ID, worker label, or currently focused pane. Local core IDs are not portable to another machine. |
-| **Ahi session / turn** | A session is a recorded conversation and its execution history. A turn is one submitted request and the model/tool work needed to answer it. A Rex session is a separate native resource container. |
 | **Session service / connector** | `ahi serve` owns structured session operations. `ahi connect` carries that protocol over stdio, including through SSH. `hc connect` carries a different protocol. |
-| **Worker / delegation / orchestration** | A worker is an ahi service receiving a task. Delegation submits that task through an explicitly configured connector. Scheduling and coordinating multiple workers are not terminal-host responsibilities. |
 | **Program status** | Advisory OSC 7501 reports such as working or blocked. They are neither structured agent replies nor authorization or proof that a process exited. |
 | **Durability / ledger** | Stored conversation and execution facts, including tool presentation details. Rendering and authorization remain application responsibilities. |
 | **Conversation resume / crash recovery** | Resume restores a saved conversation. Crash recovery would reconcile unfinished effects and permissions; it is not implemented by conversation resume. |
