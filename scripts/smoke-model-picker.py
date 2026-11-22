@@ -334,12 +334,18 @@ def main() -> None:
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
-                        chat.expect("Plan · Shift+Tab to review trust")
+                        chat.expect("Plan · Alt+M to review trust")
                         chat.absent("Trust this workspace?")
+                        chat.send("\x1b[Z")  # Shift+Tab: effort, never authority
+                        chat.expect("(local) fixture • minimal")
+                        chat.expect("Plan · Alt+M to review trust")
                         redraw_release.clear()
                         chat.send("redraw-probe\r")
+                        chat.expect("Thinking...")
+                        chat.send("\x0f")  # Inspect, then collapse the same in-flight text.
                         chat.expect("Cleaned up")
-                        assert chat.screen().count("Cleaned up") == 1
+                        chat.send("\x0f")
+                        chat.absent("Cleaned up")
                         redraw_release.set()
                         chat.expect("Cleaned up the README’s introduction and organization:")
                         chat.expect("• Summarized the changes.")
@@ -353,21 +359,21 @@ def main() -> None:
                                 chat.read()
                             assert chat.screen().count("Cleaned up the README’s introduction and organization:") == turns, (engine, chat.screen())
                         chat.send("draft-preserved")
-                        chat.send("\x1b[Z")
+                        chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Shift+Tab for Plan")
+                        chat.expect("Trusted · Alt+M for Plan")
                         chat.expect("draft-preserved")
                         assert len(list((state / "workspace-trust").iterdir())) == 1
                         assert not (work / "ahi.tools.yaml").exists()
-                        chat.send("\x1b[Z")
-                        chat.expect("Plan · Shift+Tab for Trusted")
+                        chat.send("\x1bm")
+                        chat.expect("Plan · Alt+M for Trusted")
                         chat.send("\r")
                         chat.expect("mode-fixture-complete")
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
-                        chat.send("\x1b[Z")
-                        chat.expect("Trusted · Shift+Tab for Plan")
+                        chat.send("\x1bm")
+                        chat.expect("Trusted · Alt+M for Plan")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
                         deadline = time.monotonic() + 5
@@ -405,13 +411,13 @@ def main() -> None:
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("\x1b")
-                        chat.expect("Trusted · Shift+Tab for Plan")
+                        chat.expect("Trusted · Alt+M for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("f")
-                        chat.expect("Full Access · Shift+Tab for Plan")
+                        chat.expect("Full Access · Alt+M for Plan")
                         chat.send("write outside\r")
                         external = work.parent / "external-marker"
                         deadline = time.monotonic() + 8
@@ -419,10 +425,10 @@ def main() -> None:
                             chat.read()
                             time.sleep(0.025)
                         assert external.read_text() == "confirmed outside write"
-                        chat.send("\x1b[Z")
-                        chat.expect("Plan · Shift+Tab for Trusted")
-                        chat.send("\x1b[Z")
-                        chat.expect("Trusted · Shift+Tab for Plan")
+                        chat.send("\x1bm")
+                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.send("\x1bm")
+                        chat.expect("Trusted · Alt+M for Plan")
                         # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
@@ -432,15 +438,15 @@ def main() -> None:
                         (work / "marker").unlink()
                         queue_release.clear()
                         chat.send("queue-turn\r")
-                        chat.expect("mode-stream-waiting")
-                        chat.send("\x1b[Z")
+                        chat.expect("Thinking...")
+                        chat.send("\x1bm")
                         chat.expect("Trusted → Plan next turn")
                         queue_release.set()
                         deadline = time.monotonic() + 5
                         while not (work / "marker").exists():
                             chat.read()
                             assert time.monotonic() < deadline
-                        chat.expect("Plan · Shift+Tab for Trusted")
+                        chat.expect("Plan · Alt+M for Trusted")
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
@@ -456,21 +462,21 @@ def main() -> None:
                     (work / "ahi.modes.yaml").write_text(policy)
                     chat = Session(state, cwd=work, columns=120, rows=35, command=command)
                     try:
-                        chat.expect("review · Shift+Tab for Plan")
+                        chat.expect("review · Alt+M for Plan")
                         chat.absent("Trust this workspace?")
-                        chat.send("\x1b[Z")
-                        chat.expect("Plan · Shift+Tab to review trust")
+                        chat.send("\x1bm")
+                        chat.expect("Plan · Alt+M to review trust")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
-                        chat.send("\x1b[Z")
+                        chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("\x1b")
                         chat.absent("Trust this workspace?")
-                        chat.expect("Plan · Shift+Tab to review trust")
-                        chat.send("\x1b[Z")
+                        chat.expect("Plan · Alt+M to review trust")
+                        chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Shift+Tab for editing")
+                        chat.expect("Trusted · Alt+M for editing")
                         chat.absent("Bypass tool policy")
                         chat.send("permissive policy bypass\r")
                         deadline = time.monotonic() + 5
@@ -479,16 +485,16 @@ def main() -> None:
                             assert time.monotonic() < deadline
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
-                        chat.send("\x1b[Z")
-                        chat.expect("editing · Shift+Tab for review")
+                        chat.send("\x1bm")
+                        chat.expect("editing · Alt+M for review")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("review\r")
-                        chat.expect("review · Shift+Tab for Plan")
+                        chat.expect("review · Alt+M for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("edit\r")
-                        chat.expect("editing · Shift+Tab for review")
+                        chat.expect("editing · Alt+M for review")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("named permission check\r")
@@ -716,7 +722,7 @@ def main() -> None:
                     try:
                         chat.expect("resumed session")
                         chat.send("produce some prose\r")
-                        chat.expect(marker)
+                        chat.expect("Thinking...")
                         deadline = time.monotonic() + 5
                         while True:
                             entries = [json.loads(line) for line in path.read_text().splitlines()]
@@ -725,6 +731,7 @@ def main() -> None:
                             assert time.monotonic() < deadline, "visible prefix was not checkpointed"
                             time.sleep(.05)
                         assert not any(entry["type"] == "turn" for entry in entries)
+                        chat.absent(marker)  # Rendering is quiet; the checkpoint is not.
                         if mode != "crash":
                             chat.send("\x03")
                             chat.finish()
@@ -945,6 +952,28 @@ def main() -> None:
             session.expect("Skills: operator/review-two")
             session.absent("Skills [")
             session.capture("inline-skill-completion")
+            session.send("\x15")  # Ctrl+U stashes without submitting the selected skill.
+            session.absent("before $operator/review-two after")
+            session.send("later draft\x1b[A")
+            session.expect("before $operator/review-two after")
+            session.expect("Skills: operator/review-two")
+            session.send("\x1b[B")
+            session.expect("later draft")
+            session.absent("Skills: operator/review-two")
+            session.send("\x12missing")  # Ctrl+R, no match, cancel without touching draft.
+            session.expect("[no match]")
+            session.send("\x1b")
+            session.expect("later draft")
+            session.send("\x15new review-two note\x15")  # stash two more inputs
+            session.send("\x12review-two")
+            session.expect("new review-two note")
+            session.send("\x12")  # previous matching input, skipping 'later draft'
+            session.expect("before $operator/review-two after")
+            session.send("\r")  # accept for editing, not submission
+            session.expect("Skills: operator/review-two")
+            session.expect("before $operator/review-two after")
+            session.send("\x1b[B")
+            session.expect("later draft")
             session.send("\x03$rev")
             session.expect("Skills [Both]")
             session.send("\x1b")
@@ -1117,7 +1146,7 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("─ / commands ")
-            assert "Plan · Shift+Tab to review trust · /mode" in rows[-2]
+            assert "Plan · Alt+M to review trust · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # The configured inset is two cells; default vertical padding is one row.
@@ -1733,10 +1762,10 @@ def main() -> None:
             assert response_received.wait(timeout=5)
             session.send("/gateway\r")
             session.expect("/gateway")
-            session.expect("Working")
+            session.expect("Thinking...")
             assert "Gateway URL" not in session.screen()
             release_response.set()
-            session.absent("Working")
+            session.absent("Thinking...")
             assert "/gateway" in session.screen()
             assert gateway_requests[-1][2]["messages"] == [core,
                 {"role": "user", "content": "verify discovered gateway"},
@@ -1955,7 +1984,7 @@ def main() -> None:
             session.expect("(home) GLM-5.3-Flash-EXL3")
             session.send("verify persisted overrides\r")
             session.expect("metadata confirmed")
-            session.absent("Working")
+            session.absent("Thinking...")
             request = gateway_requests[-1][2]
             assert request["max_completion_tokens"] == 128
             assert "max_tokens" not in request
@@ -1968,7 +1997,7 @@ def main() -> None:
             session.send("\x1b")
             session.absent("Commands ·")
             session.send("\x03verify assistant replay\r")
-            session.absent("Working")
+            session.absent("Thinking...")
             deadline = time.monotonic() + 5
             while len(gateway_requests) < 2 and time.monotonic() < deadline:
                 session.read()
@@ -2091,7 +2120,7 @@ def main() -> None:
             session.expect("• off")
             session.send("verify reasoning off\r")
             session.expect("metadata confirmed")
-            session.absent("Working")
+            session.absent("Thinking...")
             assert "reasoning_effort" not in gateway_requests[-1][2]
             assert "stream_options" not in gateway_requests[-1][2]
             session.capture("metadata-restart-off")
@@ -2113,7 +2142,7 @@ def main() -> None:
             local_path.write_text(json.dumps(local_document))
             session.send("容量\r")
             session.expect("metadata confirmed")
-            session.absent("Working")
+            session.absent("Thinking...")
             assert gateway_requests[-1][2] == expected_request
             session.send("/")
             session.expect("usage $0.002875")
@@ -2124,7 +2153,7 @@ def main() -> None:
             gateway_response["stream"] = no_finish_stream.replace(',"prompt_tokens_details":{"cached_tokens":200}', '')
             session.send("容量\r")
             session.expect("metadata confirmed")
-            session.absent("Working")
+            session.absent("Thinking...")
             session.send("/")
             session.expect("Commands ·")
             session.absent("usage $")
@@ -2190,7 +2219,7 @@ def main() -> None:
             session.send("\x0f")
             session.expect("pub fn tool_fixture() {}")
             session.expect("tool result received")
-            session.absent("Working")
+            session.absent("Thinking...")
             followup = gateway_requests[-1][2]["messages"]
             assert followup[-2]["tool_calls"][0]["id"] == "call_1", followup
             assert followup[-1] == {"role": "tool", "tool_call_id": "call_1",
@@ -2201,7 +2230,7 @@ def main() -> None:
             session.send("n")
             session.expect("denied by the operator")
             session.expect("tool denial received")
-            session.absent("Working")
+            session.absent("Thinking...")
             replay = gateway_requests[-1][2]["messages"]
             # The earlier exchange is replayed on the later turn.
             assert any(message.get("tool_call_id") == "call_1" for message in replay), replay

@@ -19,6 +19,7 @@ use super::selection::{CursorMove, VisualMode};
 pub(crate) enum KeyAction {
     Submit,
     ClearInputOrExit,
+    StashInput,
     ExitIfInputEmpty,
     Cancel,
     ScrollTowardOlder,
@@ -26,6 +27,8 @@ pub(crate) enum KeyAction {
     JumpToTop,
     JumpToBottom,
     CycleThinkingLevel,
+    CycleMode,
+    SearchHistory,
     ToggleToolOutput,
     CycleSkillScope,
     CopySelection,
@@ -120,10 +123,23 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
     }
     match key.code {
         KeyCode::Enter => KeyAction::Submit,
+        KeyCode::BackTab
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+        {
+            KeyAction::CycleThinkingLevel
+        }
+        KeyCode::Tab if key.modifiers == KeyModifiers::SHIFT => KeyAction::CycleThinkingLevel,
         KeyCode::Tab => KeyAction::CycleSkillScope,
+        KeyCode::Char('m') if key.modifiers == KeyModifiers::ALT => KeyAction::CycleMode,
+        KeyCode::Char('r' | 'R') if key.modifiers == KeyModifiers::CONTROL => {
+            KeyAction::SearchHistory
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::ClearInputOrExit
         }
+        KeyCode::Char('u' | 'U') if key.modifiers == KeyModifiers::CONTROL => KeyAction::StashInput,
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::ExitIfInputEmpty
         }

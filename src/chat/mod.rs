@@ -11,6 +11,7 @@ pub(crate) mod backend;
 mod command;
 mod header;
 pub(crate) mod input;
+mod input_history;
 mod key_binding;
 mod location;
 mod mode;
@@ -105,13 +106,14 @@ struct ChatScreen {
     thinking: ThinkingLevel,
     messages: Vec<ChatMessage>,
     input: InputEditor,
+    input_history: input_history::InputHistory,
     location_os_icon: &'static str,
     location_directory: String,
     location_git: Option<location::GitStatus>,
     meters: SessionMeters,
     response_in_progress: bool,
     receiver: Option<Receiver<ResponseEvent>>,
-    assistant_open: bool,
+    streaming_reply: Option<usize>,
     approval: Option<approval::PendingApproval>,
     scroll_navigation: scroll_navigation::ScrollNavigation,
     mouse_capture: bool,
@@ -290,13 +292,14 @@ impl ChatScreen {
             thinking,
             messages: Vec::new(),
             input: InputEditor::new(),
+            input_history: Default::default(),
             location_os_icon: location::os_icon(),
             location_directory: String::new(),
             location_git: None,
             meters: SessionMeters::default(),
             response_in_progress: false,
             receiver: None,
-            assistant_open: false,
+            streaming_reply: None,
             approval: None,
             scroll_navigation: scroll_navigation::ScrollNavigation::default(),
             mouse_capture: true,
@@ -434,6 +437,8 @@ impl ChatScreen {
             exists: &exists,
             appearance: &self.appearance,
         };
+        let hidden = self.streaming_reply.filter(|_| !self.expanded_tools);
+        self.layout.set_hidden(hidden, &mut self.dirty);
         self.layout.sync(
             &self.messages,
             self.transcript_width,
@@ -575,9 +580,10 @@ impl ChatScreen {
             }
             return Ok(ScreenAction::Continue);
         }
-        if matches!(event, Event::Key(key) if key.code == KeyCode::BackTab && key.kind == KeyEventKind::Press)
-        {
-            self.modes.cycle();
+        if self.input_history.searching() {
+            if self.input_history.search_event(event, &mut self.input) {
+                self.dismiss_input_menus();
+            }
             return Ok(ScreenAction::Continue);
         }
         // In mouse-off mode, native selection belongs to the terminal.
@@ -770,8 +776,9 @@ impl ChatScreen {
                     {
                         return Ok(ScreenAction::Continue);
                     }
-                    self.input.clear();
-                    self.settings_menu.reset();
+                    self.input_history.take(&mut self.input);
+                    self.input_history.remember(InputEditor::from_text(command));
+                    self.dismiss_input_menus();
                     return self.dispatch_command(command, backend);
                 }
                 _ => {}
@@ -779,6 +786,15 @@ impl ChatScreen {
         }
         match action {
             KeyAction::Ignore | KeyAction::CycleSkillScope => Ok(ScreenAction::Continue),
+            KeyAction::SearchHistory => {
+                self.input_history.start_search();
+                self.dismiss_input_menus();
+                Ok(ScreenAction::Continue)
+            }
+            KeyAction::CycleMode => {
+                self.modes.cycle();
+                Ok(ScreenAction::Continue)
+            }
             KeyAction::Cancel => {
                 // A selection or a pending approval owns Esc first; with
                 // neither, Esc stops the streaming response.
@@ -802,11 +818,24 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Submit => self.submit_input(backend),
+            KeyAction::StashInput => {
+                if !text.trim().is_empty() {
+                    if text.len() > input_history::InputHistory::MAX_BYTES {
+                        self.push_notice(
+                            "Draft exceeds the 64 KiB recall limit; input kept.".into(),
+                        );
+                    } else {
+                        self.remember_input();
+                    }
+                }
+                Ok(ScreenAction::Continue)
+            }
             KeyAction::ClearInputOrExit => {
                 if self.input.is_blank() {
                     Ok(ScreenAction::Exit)
                 } else {
-                    self.input.clear();
+                    self.input_history.take(&mut self.input);
+                    self.dismiss_input_menus();
                     Ok(ScreenAction::Continue)
                 }
             }
@@ -847,6 +876,17 @@ impl ChatScreen {
             KeyAction::ScrollTowardNewer => {
                 let page = self.transcript_height.max(1);
                 self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(page);
+                Ok(ScreenAction::Continue)
+            }
+            KeyAction::Edit(key @ (input::EditorKey::Up | input::EditorKey::Down)) => {
+                let older = key == input::EditorKey::Up;
+                if !self
+                    .input
+                    .move_vertical(self.transcript_width, if older { -1 } else { 1 })
+                {
+                    self.input_history.navigate(&mut self.input, older);
+                    self.dismiss_input_menus();
+                }
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Edit(key) => {
@@ -1099,7 +1139,6 @@ impl ChatScreen {
                         let finished = self.apply_event(event);
                         if finished {
                             self.response_in_progress = false;
-                            self.assistant_open = false;
                             break;
                         }
                     }
@@ -1109,7 +1148,7 @@ impl ChatScreen {
                     }
                     Err(TryRecvError::Disconnected) => {
                         self.response_in_progress = false;
-                        self.assistant_open = false;
+                        self.streaming_reply = None;
                         break;
                     }
                 }
@@ -1140,7 +1179,8 @@ impl ChatScreen {
 
     fn draw(&mut self, frame: &mut ratatui_core::terminal::Frame) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
-        let input = self.input.viewport(
+        let preview = self.input_history.search_preview();
+        let input = preview.as_ref().unwrap_or(&self.input).viewport(
             frame.area().width as usize,
             frame.area().height.saturating_sub(3) as usize,
         );
@@ -1214,7 +1254,7 @@ impl ChatScreen {
             let verb = match self.reconnecting {
                 Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
                 None if self.live_command.is_some() => "Running command".to_string(),
-                None => "Working".to_string(),
+                None => "Thinking...".to_string(),
             };
             let clock = self
                 .turn_started
@@ -1338,10 +1378,21 @@ impl ChatScreen {
         self.modes.draw(frame, &self.workspace_root);
     }
 
+    fn dismiss_input_menus(&mut self) {
+        self.settings_menu.dismissed = true;
+        self.skill_menu.dismissed = true;
+    }
+
+    fn remember_input(&mut self) {
+        let entry = self.input_history.take(&mut self.input);
+        self.input_history.remember(entry);
+        self.dismiss_input_menus();
+    }
+
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
         if matches!(self.input.contents().trim(), "/mode" | "/mode revoke") {
             let text = self.input.contents();
-            self.input.clear();
+            self.remember_input();
             return self.dispatch_command(text.trim(), backend);
         }
         if !self.modes.has_policy
@@ -1383,9 +1434,7 @@ impl ChatScreen {
             return Ok(ScreenAction::Continue);
         }
         let skills = self.input.selected_skills();
-        self.input.clear();
-        self.skill_menu.dismissed = true;
-        self.settings_menu.reset();
+        self.remember_input();
         if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim(), backend);
         }
@@ -1444,7 +1493,7 @@ impl ChatScreen {
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.live_command = None;
-        self.assistant_open = false;
+        self.streaming_reply = None;
         self.turn_started = Some(Instant::now());
         self.report_status(crate::program_status::State::Working, "");
     }
@@ -1525,6 +1574,8 @@ impl ChatScreen {
                     self.recorder.cancel_turn();
                 }
                 self.recorder.reset();
+                self.input_history = Default::default();
+                self.input.clear();
                 backend.reset();
                 self.live_command = None;
                 self.messages.clear();
@@ -1535,7 +1586,7 @@ impl ChatScreen {
                 self.receiver = None;
                 self.approval = None;
                 self.response_in_progress = false;
-                self.assistant_open = false;
+                self.streaming_reply = None;
                 self.resend_available = false;
                 Ok(ScreenAction::Continue)
             }
@@ -1644,14 +1695,15 @@ impl ChatScreen {
             }
             ResponseEvent::TextDelta(text) => {
                 self.recorder.text(&text);
-                if !self.assistant_open {
-                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
-                    self.assistant_open = true;
+                let index = self.streaming_message();
+                self.messages[index].text.push_str(&text);
+                if self.expanded_tools {
+                    if index + 1 == self.messages.len() {
+                        self.mark_appended_last();
+                    } else {
+                        self.mark_dirty(index);
+                    }
                 }
-                if let Some(message) = self.messages.last_mut() {
-                    message.text.push_str(&text);
-                }
-                self.mark_appended_last();
                 false
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
@@ -1659,17 +1711,12 @@ impl ChatScreen {
                 // are replayed with their results on later requests. They are
                 // on disk before any of them runs.
                 self.recorder.calls(&calls, native.as_ref());
-                if !self.assistant_open {
-                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
-                }
+                let index = self.streaming_message();
                 let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
                 self.report_status(crate::program_status::State::Working, &names.join(", "));
-                let last = self.messages.len().saturating_sub(1);
-                if let Some(message) = self.messages.last_mut() {
-                    message.tool = Some(ToolPayload::Calls { calls, native });
-                }
-                self.mark_dirty(last);
-                self.assistant_open = false;
+                self.messages[index].tool = Some(ToolPayload::Calls { calls, native });
+                self.mark_dirty(index);
+                self.streaming_reply = None;
                 false
             }
             ResponseEvent::ToolApprovalRequested(request) => {
@@ -1689,7 +1736,7 @@ impl ChatScreen {
                 self.mark_dirty(pending.notice_index);
                 // Replacing an unanswered approval drops its reply: a denial.
                 self.approval = Some(pending);
-                self.assistant_open = false;
+                self.streaming_reply = None;
                 false
             }
             ResponseEvent::Usage {
@@ -1784,7 +1831,7 @@ impl ChatScreen {
                 } else {
                     self.push_message(message);
                 }
-                self.assistant_open = false;
+                self.streaming_reply = None;
                 false
             }
             ResponseEvent::Completed => {
@@ -1833,6 +1880,9 @@ impl ChatScreen {
                 true
             }
         };
+        if finished {
+            self.streaming_reply = None;
+        }
         if let Some(previous_rows) = previous_rows {
             let current_rows = self.row_count();
             self.scroll_from_bottom = self
@@ -1852,6 +1902,16 @@ impl ChatScreen {
         } else {
             "mouse off: select/copy text with your terminal or Ctrl+S; use Page Up/Page Down to scroll, /mouse on for mouse controls".to_string()
         });
+    }
+
+    fn streaming_message(&mut self) -> usize {
+        if let Some(index) = self.streaming_reply {
+            return index;
+        }
+        let index = self.messages.len();
+        self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
+        self.streaming_reply = Some(index);
+        index
     }
 
     fn push_notice(&mut self, text: String) {
@@ -1933,25 +1993,15 @@ impl ChatScreen {
         self.approval = None;
         // The alert below says what happened; no footer row for a cancel.
         self.turn_started = None;
-        let partial = self.assistant_open
-            && self
-                .messages
-                .last()
-                .is_some_and(|message| message.role == TranscriptRole::Assistant);
-        let kept = if partial {
-            let empty = self
-                .messages
-                .last()
-                .is_some_and(|message| message.text.is_empty() && message.tool.is_none());
-            if empty {
-                self.messages.pop();
-                self.mark_dirty(self.messages.len());
+        let kept = self.streaming_reply.take().is_some_and(|index| {
+            if self.messages[index].text.is_empty() {
+                self.messages.remove(index);
+                self.mark_dirty(index);
+                false
+            } else {
+                true
             }
-            !empty
-        } else {
-            false
-        };
-        self.assistant_open = false;
+        });
         self.push_alert(if kept {
             "response cancelled; the partial reply above stays in the transcript".to_string()
         } else {
@@ -2436,7 +2486,7 @@ mod tests {
         let hint = draw_lines(&mut screen, 100, 12);
         assert!(hint
             .iter()
-            .any(|row| row.contains("Working · 0.0s · Esc cancels")));
+            .any(|row| row.contains("Thinking... · 0.0s · Esc cancels")));
         backend
             .sender
             .as_ref()
@@ -2444,7 +2494,9 @@ mod tests {
             .send(ResponseEvent::TextDelta("partial ans".to_string()))
             .unwrap();
         screen.poll_backend();
-        assert_eq!(screen.messages().last().unwrap().text, "partial ans");
+        assert!(!draw_lines(&mut screen, 100, 12)
+            .join("\n")
+            .contains("partial ans"));
 
         screen
             .apply_action(KeyAction::Cancel, &mut backend)
@@ -2474,7 +2526,8 @@ mod tests {
         screen.poll_backend();
         assert_eq!(screen.messages()[1].text, "partial ans");
         let finished = draw_lines(&mut screen, 100, 12);
-        assert!(!finished.iter().any(|row| row.contains("Working")));
+        assert!(finished.iter().any(|row| row.contains("partial ans")));
+        assert!(!finished.iter().any(|row| row.contains("Thinking...")));
 
         // The next message carries the partial reply and not the alert.
         screen.set_input_text("continue");
@@ -3016,6 +3069,76 @@ mod tests {
     }
 
     #[test]
+    fn arrows_recall_submitted_inputs_without_submitting_or_losing_an_unsent_draft() {
+        use crossterm::event::KeyCode::*;
+        let state = crate::fixture_directory::create_unique_fixture_directory("input-recall");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("先\nsecond");
+        press(&mut screen, &mut backend, Enter);
+        screen.poll_backend();
+        screen.set_input_text("/plain");
+        press(&mut screen, &mut backend, Enter);
+        screen.set_input_text("later!");
+        press(&mut screen, &mut backend, Left);
+        press(&mut screen, &mut backend, Up);
+        assert_eq!(screen.input_text(), "/plain");
+        press(&mut screen, &mut backend, Up); // not trapped in the slash menu
+        assert_eq!(screen.input_text(), "先\nsecond");
+        press(&mut screen, &mut backend, Up); // cursor moves to the first row
+        press(&mut screen, &mut backend, Down);
+        assert_eq!(screen.input_text(), "先\nsecond");
+        press(&mut screen, &mut backend, Down);
+        assert_eq!(screen.input_text(), "/plain");
+        assert_eq!(backend.requests.len(), 1);
+        press(&mut screen, &mut backend, Enter); // explicit local command, restore draft
+        press(&mut screen, &mut backend, Char('?'));
+        assert_eq!(screen.input_text(), "later?!");
+        screen.set_input_text("/clear");
+        press(&mut screen, &mut backend, Enter);
+        press(&mut screen, &mut backend, Up);
+        assert_eq!(screen.input_text(), "");
+        assert_eq!(backend.requests.len(), 1);
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn stashed_slash_command_survives_an_intervening_submission_without_running() {
+        use crossterm::event::{KeyCode::*, KeyEvent, KeyModifiers};
+        let state = crate::fixture_directory::create_unique_fixture_directory("stash-command");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        let stash = Event::Key(KeyEvent::new(Char('u'), KeyModifiers::CONTROL));
+        screen.set_input_text("/clear");
+        screen
+            .apply_terminal_event(stash.clone(), &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "");
+        screen.set_input_text("real question");
+        press(&mut screen, &mut backend, Enter);
+        screen.poll_backend();
+        press(&mut screen, &mut backend, Up);
+        assert_eq!(screen.input_text(), "real question");
+        press(&mut screen, &mut backend, Up);
+        assert_eq!(screen.input_text(), "/clear");
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(
+            backend.requests[0].messages.last().unwrap().text,
+            "real question"
+        );
+        assert!(!screen.messages.is_empty()); // recall didn't execute /clear
+        let large = "x".repeat(input_history::InputHistory::MAX_BYTES + 1);
+        screen.set_input_text(&large);
+        screen.apply_terminal_event(stash, &mut backend).unwrap();
+        assert_eq!(screen.input_text(), large); // never clear a draft we couldn't retain
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
     fn multiline_paste_stays_in_draft_until_enter() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -3249,7 +3372,7 @@ mod tests {
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2].starts_with("─ / commands "));
-        assert!(idle[idle.len() - 2].contains("Policy · Shift+Tab for Plan · /mode"));
+        assert!(idle[idle.len() - 2].contains("Policy · Alt+M for Plan · /mode"));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()
@@ -3268,14 +3391,14 @@ mod tests {
 
         screen.response_in_progress = true;
         let working = draw_lines(&mut screen, 120, 16);
-        assert!(working[working.len() - 4].starts_with("⠹ Working "));
+        assert!(working[working.len() - 4].starts_with("⠹ Thinking... "));
         assert!(working[working.len() - 4].ends_with(" 28.4% / 272k ──"));
         let next = draw_lines(&mut screen, 120, 16);
-        assert!(next[next.len() - 4].starts_with("⠸ Working "));
+        assert!(next[next.len() - 4].starts_with("⠸ Thinking... "));
         screen.response_in_progress = false;
         let finished = draw_lines(&mut screen, 120, 16);
         assert!(finished[finished.len() - 4].starts_with("──"));
-        assert!(!finished[finished.len() - 4].contains("Working"));
+        assert!(!finished[finished.len() - 4].contains("Thinking..."));
         let _ = fs::remove_dir_all(state);
     }
 
@@ -3633,6 +3756,9 @@ mod tests {
         let mut backend = RecordingBackend {
             requests: Vec::new(),
         };
+        screen
+            .apply_action(KeyAction::ToggleToolOutput, &mut backend)
+            .unwrap();
         screen.set_input_text("draft stays here");
         screen.apply_event(ResponseEvent::TextDelta(
             (0..30).map(|n| format!("line {n:02}\n")).collect(),
@@ -4089,6 +4215,7 @@ mod tests {
         screen.apply_event(ResponseEvent::TextDelta(
             (0..40).map(|n| format!("line {n:02}\n")).collect(),
         ));
+        screen.apply_event(ResponseEvent::Completed);
         let bottom = draw_lines(&mut screen, 60, 12);
         assert!(bottom[0].contains("Top (Ctrl+K)"));
         let mouse = |kind, row| {
@@ -4494,7 +4621,7 @@ mod tests {
         let rows = draw_lines(&mut screen, 100, 12);
         assert!(rows
             .iter()
-            .any(|row| row.contains("Working · 0.0s · Esc cancels")));
+            .any(|row| row.contains("Thinking... · 0.0s · Esc cancels")));
         let sender = backend.sender.as_ref().unwrap();
         sender.send(ResponseEvent::TextDelta("hi".into())).unwrap();
         sender.send(ResponseEvent::Completed).unwrap();

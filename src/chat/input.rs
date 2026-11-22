@@ -42,6 +42,7 @@ pub(crate) enum EditorKey {
     Newline,
 }
 
+#[derive(Clone)]
 pub(crate) struct InputEditor {
     lines: Vec<String>,
     line: usize,
@@ -59,7 +60,6 @@ impl InputEditor {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn from_text(text: &str) -> Self {
         let lines: Vec<String> = if text.is_empty() {
             vec![String::new()]
@@ -80,8 +80,9 @@ impl InputEditor {
         match key {
             EditorKey::Left => self.move_left(),
             EditorKey::Right => self.move_right(),
-            EditorKey::Up => self.move_vertical(width, -1),
-            EditorKey::Down => self.move_vertical(width, 1),
+            EditorKey::Up | EditorKey::Down => {
+                self.move_vertical(width, if key == EditorKey::Up { -1 } else { 1 });
+            }
             EditorKey::Home => self.move_home(),
             EditorKey::End => self.move_end(),
             EditorKey::Backspace => self.backspace(),
@@ -357,12 +358,16 @@ impl InputEditor {
         }
     }
 
-    fn move_vertical(&mut self, width: usize, delta: isize) {
+    /// False means the cursor was already on the requested visual edge.
+    pub(super) fn move_vertical(&mut self, width: usize, delta: isize) -> bool {
         let layout = self.layout(width);
         let target = layout
             .cursor_row
             .saturating_add_signed(delta)
             .min(layout.rows.len() - 1);
+        if target == layout.cursor_row {
+            return false;
+        }
         let row = &layout.rows[target];
         let mut cells = 0;
         let mut column = row.column;
@@ -375,6 +380,7 @@ impl InputEditor {
         }
         self.line = row.line;
         self.column = column;
+        true
     }
 
     fn move_home(&mut self) {
