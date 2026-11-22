@@ -10,7 +10,7 @@ pub(super) enum Dialog {
     Trust,
     Choose,
     /// Confirms the built-in Full Access choice for this process only. It is
-    /// reached from the picker alone: never from startup, Shift+Tab, or a
+    /// reached from the picker alone: never from startup, Alt+M, or a
     /// policy, and confirming it records nothing on disk.
     FullAccess,
 }
@@ -101,8 +101,8 @@ impl Modes {
     }
     pub fn cycle_hint(&self) -> String {
         self.cycle_target().map_or_else(
-            || "Shift+Tab to review trust".into(),
-            |mode| format!("Shift+Tab for {}", mode.label()),
+            || "Alt+M to review trust".into(),
+            |mode| format!("Alt+M for {}", mode.label()),
         )
     }
     pub fn cycle(&mut self) {
@@ -228,7 +228,7 @@ impl Modes {
         );
         let (title, body) = match dialog {
             Dialog::Trust => (" Trust this workspace? ", format!("{}\n\nRead, edit, run commands, delegate to configured workers, and use repo/operator skills and bundled scripts. Commands run with your account's access. This is NOT a sandbox.\n\n[t] Trust and continue (remember this workspace)\n[r] Continue in Plan (no workspace edits or host commands)\n[Esc] Cancel\n\nTrust is stored outside the checkout; /mode revoke removes it.", root.display())),
-            Dialog::FullAccess => (" Full Access to this host? ", format!("{}\n\nFile tools may read and change files outside this workspace on the host running the turn. File contents may be sent to the model provider. Commands have the same host access as in Trusted.\n\n[f] Use Full Access for this session (not remembered)\n[Esc] Cancel\n\nNothing is stored; Shift+Tab or /mode leaves it.", root.display())),
+            Dialog::FullAccess => (" Full Access to this host? ", format!("{}\n\nFile tools may read and change files outside this workspace on the host running the turn. File contents may be sent to the model provider. Commands have the same host access as in Trusted.\n\n[f] Use Full Access for this session (not remembered)\n[Esc] Cancel\n\nNothing is stored; Alt+M or /mode leaves it.", root.display())),
             Dialog::Choose => {
                 use ahi_widgets::{List, ListItem, ListState};
                 use ratatui_core::style::{Color, Style};
@@ -351,27 +351,27 @@ mod tests {
             selected: ReadOnly,
             ..Default::default()
         };
-        assert_eq!(modes.cycle_hint(), "Shift+Tab to review trust");
+        assert_eq!(modes.cycle_hint(), "Alt+M to review trust");
         modes.cycle();
         assert!(matches!(modes.dialog, Some(Dialog::Trust)));
         modes.trusted = true;
         modes.dialog = None;
-        assert_eq!(modes.cycle_hint(), "Shift+Tab for Trusted");
+        assert_eq!(modes.cycle_hint(), "Alt+M for Trusted");
         modes.cycle();
-        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
+        assert_eq!(modes.cycle_hint(), "Alt+M for Plan");
         modes.has_policy = true;
         modes.named = vec![Named("dev".into()), Named("review".into())];
         for (hint, target) in [
-            ("Shift+Tab for dev", Named("dev".into())),
-            ("Shift+Tab for review", Named("review".into())),
-            ("Shift+Tab for Plan", ReadOnly),
+            ("Alt+M for dev", Named("dev".into())),
+            ("Alt+M for review", Named("review".into())),
+            ("Alt+M for Plan", ReadOnly),
         ] {
             assert_eq!(modes.cycle_hint(), hint);
             modes.cycle();
             assert_eq!(modes.selected, target);
         }
         modes.selected = FullAccess;
-        assert_eq!(modes.cycle_hint(), "Shift+Tab for Plan");
+        assert_eq!(modes.cycle_hint(), "Alt+M for Plan");
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
         remember(&state, &root, true).unwrap();
         let mut modes = Modes::startup(&root, &state, None).unwrap();
         assert_eq!(modes.selected, ExecutionMode::ReadWrite);
-        // Shift+Tab never lands on Full Access, from any mode.
+        // Alt+M never lands on Full Access, from any mode.
         for _ in 0..6 {
             modes.cycle();
             assert_ne!(modes.selected, ExecutionMode::FullAccess);
@@ -424,7 +424,7 @@ mod tests {
         assert!(modes.dialog.is_none());
         assert_eq!(modes.status(), "Full Access");
         assert_eq!(modes.color(), ratatui_core::style::Color::Red);
-        // One Shift+Tab leaves it, and a fresh start never selects it: only
+        // One Alt+M leaves it, and a fresh start never selects it: only
         // workspace trust was stored.
         modes.cycle();
         assert_eq!(modes.selected, ExecutionMode::ReadOnly);

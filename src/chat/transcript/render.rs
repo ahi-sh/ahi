@@ -151,6 +151,7 @@ impl Styled {
 
 /// Wrapped rows for a message list, kept up to date incrementally.
 pub(crate) struct TranscriptLayout {
+    hidden: Option<usize>, // active assistant message in compact view
     width: usize,
     rows: Vec<TranscriptRow>,
     /// Row index where each laid-out message begins, separator included.
@@ -171,10 +172,23 @@ pub(crate) enum Dirty {
 impl TranscriptLayout {
     pub(crate) fn new() -> Self {
         Self {
+            hidden: None,
             width: 0,
             rows: Vec::new(),
             starts: Vec::new(),
             last_len: 0,
+        }
+    }
+
+    pub(in crate::chat) fn set_hidden(&mut self, index: Option<usize>, dirty: &mut Dirty) {
+        if self.hidden != index {
+            let from = self.hidden.into_iter().chain(index).min().unwrap();
+            let previous = match *dirty {
+                Dirty::From(i) => i,
+                Dirty::AppendedLast => self.starts.len().saturating_sub(1),
+            };
+            *dirty = Dirty::From(from.min(previous));
+            self.hidden = index;
         }
     }
 
@@ -202,9 +216,11 @@ impl TranscriptLayout {
         let keep_rows = self.starts.get(from).copied().unwrap_or(self.rows.len());
         self.rows.truncate(keep_rows);
         self.starts.truncate(from);
-        for message in &messages[from..] {
+        for (index, message) in messages.iter().enumerate().skip(from) {
             self.starts.push(self.rows.len());
-            layout_message(&mut self.rows, message, width, options);
+            if self.hidden != Some(index) {
+                layout_message(&mut self.rows, message, width, options);
+            }
         }
         if let Some(last) = messages.last() {
             self.last_len = last.text.len();

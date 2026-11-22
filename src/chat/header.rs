@@ -37,7 +37,7 @@ pub(crate) fn text(
             "no ahi.tools.yaml: tools off"
         }
     );
-    let keys_line = "/ for commands · Ctrl+S selects · /mouse toggles native selection";
+    let keys_line = "/ for commands · ↑/↓ recall · Ctrl+R searches · Ctrl+U stashes draft · Shift+Tab thinking · Ctrl+S selects · /mouse toggles native selection";
     let setup = if tools_configured {
         String::new()
     } else {
