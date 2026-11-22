@@ -630,6 +630,8 @@ cargo build --release
 
 `ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
 
+Deterministic Python tests live in `tests/python/`. Run them from the repository root with `uv run --no-project --python 3.11 --with-requirements tests/python/requirements.txt python -m pytest -q` (or install that requirements file in a Python 3.11+ venv and run `python -m pytest -q`). The tests need no network or model after dependency installation. PTY checks and opt-in live evaluations remain explicit `scripts/` commands; pytest never launches them by discovery.
+
 For real terminal verification on POSIX, build and run the maintained workflow against that exact executable:
 
 ```sh

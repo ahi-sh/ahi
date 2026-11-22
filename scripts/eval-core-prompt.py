@@ -13,11 +13,14 @@ import subprocess
 from threading import Thread
 from urllib.parse import urlsplit
 
+from merge_eval import merge_answer_supported, merge_topics, seed_merges
+
 
 ROUNDS, TOKENS = 5, 768
 SKILLS = ['repo/amber', 'repo/cobalt', 'repo/mica']
 FACT_PATH = 'docs/station.conf'
 QUESTIONS = {
+    'merges': 'what were the last two git merges about?',
     'question': 'Which beacon is configured for this station? Give its value and repository path. Do not edit.',
     'edit': 'Change only port=8010 to port=8020 in app.conf. Run verify-fixture afterwards. Report the result as JSON with exit_code and diagnostic fields.',
     'catalog': 'Which skills were already loaded for this turn (not merely available)? Do not load more. Return a JSON array of scoped IDs.',
@@ -29,12 +32,17 @@ def scripted(case, n, fact, diagnostic):
     def call(name, arguments):
         return {'tool_calls': [{'index': 0, 'id': f'call_{n}', 'type': 'function', 'function': {
             'name': name, 'arguments': json.dumps(arguments)}}]}
-    if case == 'question' and n == 1:
+    if case == 'merges' and n == 1:
+        delta = call('git_inspect', {'operation': 'log'})
+    elif case == 'question' and n == 1:
         delta = call('read_file', {'path': FACT_PATH})
     elif case == 'edit' and n == 1:
         delta = call('edit_file', {'path': 'app.conf', 'old': '8010', 'new': '8020'})
     elif case == 'edit' and n == 2:
         delta = call('run_command', {'argv': ['verify-fixture']})
+    elif case == 'merges':
+        beacon, relay = merge_topics(fact)
+        delta = {'content': f'{relay} limits retries to 3; {beacon} sets the interval to 30.'}
     else:
         delta = {'content': {'question': f'{FACT_PATH}: {fact}', 'edit': json.dumps({'exit_code': 7, 'diagnostic': diagnostic}),
                              'catalog': '[]', 'preload': '["repo/cobalt"]'}[case]}
@@ -97,6 +105,8 @@ def run(binary, arm, case, model, endpoint, out, fact, diagnostic):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 if body['model'] != model or body.get('max_completion_tokens', body.get('max_tokens')) != TOKENS:
                     raise ValueError('model/output budget mismatch')
+                if case == 'merges' and body.get('reasoning_effort') != 'high':
+                    raise ValueError('merge fixture requires high reasoning effort')
                 system = [m for m in body['messages'] if m['role'] == 'system']
                 if len(system) != int(arm == 'candidate') or (system and not system[0]['content']):
                     raise ValueError(f'{arm}: wrong binary or unexpected prompt count')
@@ -133,6 +143,9 @@ def run(binary, arm, case, model, endpoint, out, fact, diagnostic):
         check.write_text(f'#!/bin/sh\necho {diagnostic} >&2\nexit 7\n')
         check.chmod(0o700)
         rules = [('tool_call', {'tool': t}) for t in ('read_file', 'find_files', 'list_dir', 'search_files')]
+        if case == 'merges':
+            seed_merges(work, fact)
+            rules.append(('tool_call', {'tool': 'git_inspect'}))
         if case == 'edit':
             rules += [('file_write', {'path': 'app.conf'}), ('command', {'argv': ['verify-fixture']})]
         if case in ('catalog', 'preload'):
@@ -140,15 +153,18 @@ def run(binary, arm, case, model, endpoint, out, fact, diagnostic):
         policy = root / 'policy.yaml'
         policy.write_text(json.dumps({'version': 1, 'default': 'deny', 'rules': [dict(
             id=f'r{i}', action=a, match=m, effect='approve') for i, (a, m) in enumerate(rules)]}))
+        metadata = {'id': model, 'maxTokens': TOKENS}
+        if case == 'merges':
+            metadata.update(reasoning=True, compat={'supportsReasoningEffort': True})
         (state / 'models.json').write_text(json.dumps({'providers': {'eval': {
             'baseUrl': f'http://127.0.0.1:{server.server_port}/v1', 'apiKey': 'gateway', 'api': 'openai-completions',
-            'models': [{'id': model, 'maxTokens': TOKENS}]}}}))
+            'models': [metadata]}}}))
         before = snapshot(work)
         runner = Thread(target=server.serve_forever)
         runner.start()
         try:
             proc = subprocess.run([binary, '--state-dir', state, 'exec', '--standalone', '--format', 'json',
-                                   '--timeout', '75', '--model', f'eval/{model}', '--thinking', 'off', '--tools', policy,
+                                   '--timeout', '75', '--model', f'eval/{model}', '--thinking', 'high' if case == 'merges' else 'off', '--tools', policy,
                                    '--workdir', work, *(['--skill', 'repo/cobalt'] if case == 'preload' else []),
                                    '-p', QUESTIONS[case]], cwd=work, env={'HOME': str(root), 'PATH': str(bins)},
                                   text=True, capture_output=True, timeout=90)
@@ -162,7 +178,9 @@ def run(binary, arm, case, model, endpoint, out, fact, diagnostic):
         answer = result.get('text', '')
         evidence = [e['result']['content'] for e in records if e.get('exit_code') == 0]
         ok = not proc.returncode and result.get('status') == 'ok' and not errors and bool(requests)
-        if case == 'question':
+        if case == 'merges':
+            ok &= merge_answer_supported(answer, fact, records)
+        elif case == 'question':
             ok &= fact in answer and FACT_PATH in answer and any(fact in s for s in evidence)
         elif case == 'edit':
             before['app.conf'] = b'port=8020\nkeep=true\n'
@@ -193,6 +211,7 @@ def main():
     for flag in ('baseline', 'candidate', 'out'):
         parser.add_argument('--' + flag, type=Path, required=True)
     parser.add_argument('--live-url', help='opt in to paid inference; Chat Completions gateway base, e.g. https://host/v1')
+    parser.add_argument('--case', choices=QUESTIONS, help='run just this workflow pair')
     parser.add_argument('--model', help='explicit served model ID (required for live)')
     args = parser.parse_args()
     endpoint = urlsplit(args.live_url) if args.live_url else None
@@ -205,7 +224,7 @@ def main():
     fact, diagnostic = secrets.token_hex(6), 'CHECK-' + secrets.token_hex(5)
     print('LIVE inference' if endpoint else 'SCRIPTED loopback (not model evidence)', flush=True)
     good = True
-    for case in QUESTIONS:
+    for case in ([args.case] if args.case else QUESTIONS):
         controls = []
         for arm in ('baseline', 'candidate'):
             passed, control = run(getattr(args, arm).resolve(), arm, case, args.model or 'fixture', endpoint,
