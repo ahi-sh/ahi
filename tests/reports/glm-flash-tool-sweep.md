@@ -2,6 +2,8 @@
 
 **30/30 behavior checks passed** in a single post-fix sweep: ten fresh model turns, 26 recorded tool results, eight tool names, one model (`home/GLM-5.3-Flash-EXL3`), macOS arm64. This is not a count of bugs or a pass-rate estimate for future model runs. After the final wording changes, both affected groups ran again: 9/9. A separate live standalone TUI turn was observed at 100×36 and 62×24.
 
+Follow-up: [tool results across the TUI, model request, and session store](tool-interface-boundaries.md) documents the five interface regressions and their deterministic checks.
+
 ## What actually broke
 
 | Area | Reproduction and observation | Fix |

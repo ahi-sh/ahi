@@ -26,7 +26,7 @@ path = "src/main.rs"
 [dependencies]
 git2 = { version = "=0.21.0", default-features = false }
 tempfile = "=3.27.0"
-ahi-durable = { path = "crates/ahi-durable", version = "=0.1.0" }
+ahi-durable = { path = "crates/ahi-durable", version = "=0.1.1" }
 clap = { version = "=4.6.9", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.11"

@@ -42,6 +42,8 @@ def main() -> None:
                          help="verify workspace trust, mode cycling, policy bypass and revocation")
     focused.add_argument("--login-copy-only", action="store_true",
                          help="verify raw OAuth URL clipboard copy and cancellation with disposable adapters")
+    focused.add_argument("--post-tool-failure-only", action="store_true",
+                         help="verify a failed continuation never resends an already executed write")
     focused.add_argument("--stream-recovery-only", action="store_true",
                          help="verify live checkpoints and Ctrl+C recovery in both engines")
     focused.add_argument("--session-details-only", action="store_true",
@@ -209,8 +211,8 @@ def main() -> None:
                 os.kill(self.pid, 9)
                 os.waitpid(self.pid, 0)
 
-    if args.startup_version_only or not any((args.workspace_modes_only, args.appearance_only,
-            args.skill_picker_only, args.login_copy_only, args.stream_recovery_only, args.session_details_only)):
+    full_suite = not any(value for key, value in vars(args).items() if key.endswith('_only'))
+    if full_suite or args.startup_version_only:
         with tempfile.TemporaryDirectory(prefix="ahi-version-", dir="/tmp") as temp, socket.socket(socket.AF_UNIX) as listener:
             state = Path(temp)
             path = state / "serve.sock"
@@ -590,6 +592,84 @@ def main() -> None:
             assert not (state / "credentials/openai.json").exists()
         print("PASS: borderless model/gateway/login screens; exact raw model ID and URL copies, unavailable clipboard, OSC52 payload, callback preservation and cancel")
         return
+
+    if full_suite or args.post_tool_failure_only:
+        for engine in ('standalone', 'service'):
+            requests = []
+
+            class WriteThenDisconnect(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    requests.append(body)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    if len(requests) != 1:
+                        # Break the stream *after* the write result was submitted.
+                        self.send_header('Content-Length', '500')
+                        self.end_headers()
+                        self.wfile.write(b': interrupted\n\n')
+                        return
+                    self.end_headers()
+                    call = dict(index=0, id='once', type='function', function=dict(name='write_file',
+                                arguments=json.dumps({'path': 'marker', 'content': 'written once'})))
+                    event = {'choices': [{'index': 0, 'delta': {'tool_calls': [call]}, 'finish_reason': 'tool_calls'}]}
+                    self.wfile.write(f'data: {json.dumps(event)}\n\ndata: [DONE]\n\n'.encode())
+
+                def log_message(self, *args):
+                    pass
+
+            with tempfile.TemporaryDirectory(prefix='ahi-post-tool-', dir='/tmp') as temp, ThreadingHTTPServer(('127.0.0.1', 0), WriteThenDisconnect) as gateway:
+                root = Path(temp)
+                state, work = root / 'state', root / 'work'
+                state.mkdir()
+                work.mkdir()
+                policy = root / 'policy.yaml'
+                policy.write_text('version: 1\nrules:\n- {id: write, action: file_write, match: {tool: write_file}, effect: approve}\n')
+                (state / 'models.json').write_text(json.dumps({'providers': {'local': {
+                    'baseUrl': f'http://127.0.0.1:{gateway.server_port}/v1', 'api': 'openai-completions',
+                    'models': [{'id': 'fixture'}]}}}))
+                sock = str(root / 'service.sock')
+                options = ('--standalone',) if engine == 'standalone' else ('--socket', sock)
+                command = ('tui', '--tools', str(policy), *options)
+                chat = Session(state, cwd=work, command=command)
+                worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    chat.expect('Models · Enter use model')
+                    chat.send('jjj\r')
+                    chat.expect('(local) fixture')
+                    chat.send('write the marker\r')
+                    chat.expect('check their effects')
+                    assert 'Enter resends' not in chat.screen()
+                    chat.send('\r/quit\r')
+                    chat.finish()
+                    path, = (state / 'sessions').glob('*.jsonl')
+                    entries = [json.loads(line) for line in path.read_text().splitlines()]
+                    assert [e['text'] for e in entries if e.get('role') == 'operator'] == ['write the marker']
+                    assert [e['result']['call_id'] for e in entries if e.get('role') == 'tool'] == ['once']
+                    assert (work / 'marker').read_text() == 'written once'
+                    assert len(requests) == 2 and requests[1]['messages'][-1]['tool_call_id'] == 'once'
+                    gateway.shutdown()
+                    worker.join(5)
+                    reopened = Session(state, cwd=work, command=(*command, '--session', path.stem))
+                    worker = threading.Thread(target=gateway.serve_forever, daemon=True)
+                    worker.start()
+                    try:
+                        reopened.expect('resumed session')
+                        reopened.send('\r/quit\r')
+                        reopened.finish()
+                        assert len(requests) == 2
+                    finally:
+                        reopened.close()
+                finally:
+                    chat.close()
+                    gateway.shutdown()
+                    worker.join(5)
+                    if engine == 'service':
+                        subprocess.run([binary, '--state-dir', state, 'serve', '--socket', sock, 'stop'], capture_output=True, timeout=10)
+        print('PASS: one write, one correlated result, no blank-Enter replay before or after resume (both engines)')
+        if args.post_tool_failure_only:
+            return
 
     if args.stream_recovery_only:
         marker = "visible-stream-marker"

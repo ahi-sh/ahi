@@ -45,7 +45,15 @@ impl Ledger {
     /// One call returned.
     pub fn returned(&mut self, exit_code: i32, record: Option<&ToolRecord>) {
         self.pending = self.pending.saturating_sub(1);
-        if exit_code == EXIT_DENIED {
+        if exit_code == EXIT_DENIED
+            && !matches!(
+                record,
+                Some(ToolRecord::Command {
+                    ran: Some(true),
+                    ..
+                })
+            )
+        {
             self.denied += 1;
         } else if exit_code != 0 {
             self.errors += 1;

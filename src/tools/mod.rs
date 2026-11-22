@@ -379,7 +379,7 @@ pub(super) fn schemas(
             },
             SEARCH_FILES => ToolSchema {
                 name: SEARCH_FILES,
-                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending; binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.".into(),
+                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending. Paths containing colons, quotes or control characters are JSON-quoted; use the decoded path with other tools. Binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1449,6 +1449,20 @@ mod tests {
             &first[first.len() - 60..]
         );
         assert!(first.len() <= read_file::MAX_BYTES + 128);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_emits_unambiguous_paths_for_filenames_containing_colons() {
+        let (root, workspace) = fixture("colon-search");
+        fs::write(root.join("notes"), "decoy").unwrap();
+        fs::write(root.join("notes:2:old.txt"), "\n\n\n\n\n\nneedle\n").unwrap();
+        let prepared = prepare(&call("s", SEARCH_FILES, json!({"pattern":"needle"}))).unwrap();
+        assert_eq!(
+            run_text(&prepared, &workspace).unwrap(),
+            r#""notes:2:old.txt":7:needle"#
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -375,6 +375,45 @@ fn headless_takes_files_outside_the_workdir_and_writes_the_document_once() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_child_exit_is_not_a_successful_command_or_a_policy_denial() {
+    for code in [7, 126] {
+        let (url, gateway) = loopback(tool_round(
+            &[(
+                "cmd",
+                "run_command",
+                serde_json::json!({"argv":["sh","-c",format!("printf fixture-diagnostic >&2; exit {code}")]}),
+            )],
+            "diagnosed",
+        ));
+        let dir = fixture(&url);
+        fs::write(dir.join("work/ahi.tools.yaml"), "version: 1\nrules:\n  - {id: command, action: command, match: {argv: [sh, -c]}, effect: approve}\n").unwrap();
+        let output = exec(&dir, &["-p", "run fixture", "-v", "--format", "json"]);
+        assert!(output.status.success(), "{}", err(&output)); // model handled the tool failure
+        assert!(err(&output).contains(&format!("tool run_command . exit {code}")));
+        let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(doc["tools"]["errors"], 1);
+        assert_eq!(doc["tools"]["denied"], 0);
+        assert_eq!(doc["ledger"][0]["exit_code"], code);
+        let calls = gateway.join().unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_str(calls[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        let result = wire["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(result["tool_call_id"], "cmd");
+        assert_eq!(
+            result["content"],
+            format!("exit {code}\n--- stderr\nfixture-diagnostic")
+        );
+        let shown = ahi(&dir)
+            .args(["session", "show", doc["session"].as_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out(&shown).contains(&format!("[tool exit {code}]")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[test]
 fn tools_run_under_policy_and_an_ask_is_denied_headless() {
     let (url, gateway) = loopback(tool_round(

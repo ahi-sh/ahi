@@ -1806,21 +1806,24 @@ impl ChatScreen {
                 self.approval = None;
                 self.recorder
                     .fail_turn(&format!("{kind:?}").to_ascii_lowercase(), &message);
-                // A connection failure left the transcript as the operator
-                // sent it (or ending in tool results): the same request can
-                // go again. A partial reply at the tail cannot.
+                // A service turn takes a new operator prompt, not an in-flight
+                // tool continuation. Never turn a failed continuation into a
+                // fresh prompt that could repeat the preceding side effects.
+                let tail = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| !m.role.is_notice())
+                    .map(|m| m.role);
                 self.resend_available = kind == crate::error::ErrorKind::Transport
-                    && self
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| !message.role.is_notice())
-                        .is_some_and(|message| {
-                            matches!(
-                                message.role,
-                                TranscriptRole::Operator | TranscriptRole::Tool { .. }
-                            )
-                        });
+                    && tail == Some(TranscriptRole::Operator);
+                let message = if kind == crate::error::ErrorKind::Transport
+                    && matches!(tail, Some(TranscriptRole::Tool { .. }))
+                {
+                    format!("{message}. Tools already returned; check their effects before sending a new prompt.")
+                } else {
+                    message
+                };
                 self.report_status(
                     crate::program_status::State::Error,
                     &format!("{kind:?}").to_ascii_lowercase(),

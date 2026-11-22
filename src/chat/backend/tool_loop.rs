@@ -24,7 +24,7 @@ use ahi_durable::{ToolDetail, ToolRecord};
 
 /// Tool content returned to the model within one operator turn.
 pub(super) const MAX_TURN_OUTPUT_BYTES: usize = 256 * 1024;
-const PREVIEW_LINES: usize = 8;
+pub(crate) const PREVIEW_LINES: usize = 8;
 const PREVIEW_LINE_CHARS: usize = 200;
 
 pub(super) const EXIT_OK: i32 = 0;
@@ -600,14 +600,23 @@ impl ToolRuntime {
                 if let Some(report) = skill {
                     record = Some(self.record_skill(&report, "ok"));
                 }
-                if let Some(report) = command {
-                    record = Some(self.record_command(prepared, &report, "ok", Some(true)));
-                }
+                let exit_code = if let Some(report) = command {
+                    let code = report.exit_code.unwrap_or(-1);
+                    record = Some(self.record_command(
+                        prepared,
+                        &report,
+                        if code == 0 { "ok" } else { "failed" },
+                        Some(true),
+                    ));
+                    code
+                } else {
+                    EXIT_OK
+                };
                 if let Some(report) = delegation {
                     record = Some(self.record_delegation(&report, "ok"));
                 }
                 Outcome {
-                    exit_code: EXIT_OK,
+                    exit_code,
                     output: format!(
                         "{} {}\n{}",
                         prepared.tool,
@@ -863,6 +872,10 @@ impl ToolRuntime {
             }
             outcome.content.truncate(cut);
             outcome.content.push_str(NOTICE);
+            // The local preview/capture is not a copy of the provider request.
+            outcome
+                .output
+                .insert_str(0, crate::chat::transcript::MODEL_CUT_PREFIX);
         }
         self.output_bytes = self.output_bytes.saturating_add(outcome.content.len());
     }

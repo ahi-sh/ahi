@@ -61,6 +61,12 @@ pub(crate) enum ToolPayload {
     },
 }
 
+/// Prefix of a *presentation* whose local capture exceeds the bytes passed
+/// back to the model. Normal previews begin with the tool name, never data
+/// from the result body. Kept in display text so old JSONL stays readable.
+pub(crate) const MODEL_CUT_PREFIX: &str =
+    "[model-facing tool result truncated by the turn budget]\n";
+
 impl ChatMessage {
     pub(crate) fn model_change(gateway: &str, model: &str) -> Self {
         Self::new(

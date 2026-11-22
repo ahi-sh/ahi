@@ -1853,7 +1853,7 @@ fn command_rules_match_argv_prefixes_show_the_command_and_grant_the_rule_prefix(
         vec![
             ("c1".into(), 0, "exit 0\n--- stdout\nhello".into()),
             ("c2".into(), 0, "exit 0 (no output)".into()),
-            ("c3".into(), 0, "exit 2 (no output)".into()),
+            ("c3".into(), 2, "exit 2 (no output)".into()),
             ("c4".into(), 126, "denied: denied by rule no-rm".into()),
             ("c5".into(), 0, "exit 0\n--- stdout\nagain".into()),
         ]
@@ -2486,27 +2486,51 @@ fn a_cancelled_approval_runs_no_call_in_a_mixed_batch() {
 
 #[test]
 fn the_turn_output_bound_is_a_cap_including_diagnostics() {
-    let (url, _server) = server_sequence(vec![
+    let (url, server) = server_sequence(vec![
         calls_stream(&[("c1", "read_file", json!({"path": "src/big.txt"}))]),
         calls_stream(&[("c2", "read_file", json!({"path": "src/big.txt"}))]),
         calls_stream(&[("c3", "read_file", json!({"path": "src/big.txt"}))]),
         calls_stream(&[("c4", "read_file", json!({"path": "src/big.txt"}))]),
-        calls_stream(&[("c5", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c5", "read_file", json!({"path": "src/markers.txt"}))]),
+        calls_stream(&[("c6", "read_file", json!({"path": "src/a.rs"}))]),
         text_stream("done"),
     ]);
     let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
-    fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(64 * 1024)).unwrap();
+    fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(60 * 1024)).unwrap();
+    let markers = format!(
+        "BEGIN\n{}\nMIDDLE\n{}\nLOCAL_END",
+        "x".repeat(8192),
+        "界".repeat(6000)
+    );
+    fs::write(fixture.workspace.join("src/markers.txt"), markers).unwrap();
     let events = collect(&mut fixture.backend(), request());
     let results = results(&events);
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 6);
+    assert_eq!(results[5].1, super::super::tool_loop::EXIT_ERROR);
+    assert!(results[5].2.contains("budget") && results[5].2.len() <= 64);
     let total: usize = results.iter().map(|(_, _, content)| content.len()).sum();
     // Content is capped; each call may add one fixed truncation notice.
     assert!(
-        total <= super::super::tool_loop::MAX_TURN_OUTPUT_BYTES + 5 * 64,
+        total <= super::super::tool_loop::MAX_TURN_OUTPUT_BYTES + results.len() * 64,
         "{total}"
     );
     assert!(results[3].2.len() <= 64 * 1024 + 64);
-    assert!(results[4].2.contains("budget") && results[4].2.len() <= 64);
+    let requests = server.join().unwrap();
+    let final_request = request_body(requests.last().unwrap());
+    let markers = final_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "c5")
+        .unwrap();
+    let model = markers["content"].as_str().unwrap();
+    assert_eq!(model, results[4].2);
+    assert!(model.starts_with("BEGIN\n") && model.contains("\nMIDDLE\n"));
+    assert!(
+        model.ends_with("[truncated: tool output budget for this turn is exhausted]")
+            && !model.contains("LOCAL_END")
+    );
+    assert!(events.iter().any(|e| matches!(e, ResponseEvent::ToolResult { call_id, output, .. } if call_id == "c5" && output.starts_with(crate::chat::transcript::MODEL_CUT_PREFIX) && output.ends_with("LOCAL_END"))));
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));
 }
 

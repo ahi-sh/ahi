@@ -477,6 +477,8 @@ fn follow(
                     // The preview's first line is `<tool> <target>`, with
                     // `: <reason>` after it for a denial or an error.
                     let target = first
+                        .strip_prefix(crate::chat::transcript::MODEL_CUT_PREFIX)
+                        .unwrap_or(first)
                         .lines()
                         .next()
                         .unwrap_or_default()

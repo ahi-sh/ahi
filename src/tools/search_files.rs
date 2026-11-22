@@ -241,6 +241,15 @@ impl<'a> Scanner<'a> {
         if buffer[..buffer.len().min(SNIFF)].contains(&0) {
             return FileResult::Skipped;
         }
+        // Keep the ordinary path:line:text spelling. JSON-quote paths that
+        // would make the delimiter ambiguous, including literal quote names.
+        let encoded;
+        let path = if relative.contains([':', '"']) || relative.chars().any(char::is_control) {
+            encoded = serde_json::to_string(relative).expect("strings serialize as JSON");
+            &encoded
+        } else {
+            relative
+        };
         let mut hits = Hits::default();
         let mut line_number = 1usize;
         let mut counted_to = 0usize;
@@ -272,7 +281,7 @@ impl<'a> Scanner<'a> {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let text = String::from_utf8_lossy(line);
             let text = text.trim_end();
-            hits.rendered.push_str(relative);
+            hits.rendered.push_str(path);
             hits.rendered.push(':');
             hits.rendered.push_str(&line_number.to_string());
             hits.rendered.push(':');

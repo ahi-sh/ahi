@@ -189,13 +189,13 @@ impl ServiceBackend {
         }
         Ok(session)
     }
-    /// Settings, then a subscription from the tip, then the turn: the
-    /// session id and the run id, or the first refusal.
-    fn start_turn(
+    /// Reconnectable setup. Nothing here may submit work to the model.
+    fn prepare_turn(
         &mut self,
         request: &ChatRequest,
         prompt: &str,
-    ) -> Result<(String, String), String> {
+        run_id: &str,
+    ) -> Result<(String, Value), String> {
         if request.mode != crate::tool_policy::ExecutionMode::Policy {
             let health = self.call("health", json!({}))?;
             if health["execution_modes"] != true {
@@ -220,7 +220,7 @@ impl ServiceBackend {
             mode: request.mode.clone(),
             prompt: prompt.to_string(),
             skills: request.skills.clone(),
-            run_id: None,
+            run_id: Some(run_id.into()),
             prompt_sha256: None,
             workdir: Some(self.workdir.clone()),
             tools: self.actions.clone(),
@@ -236,12 +236,8 @@ impl ServiceBackend {
             "session.subscribe",
             json!({"session": session, "after": tip}),
         )?;
-        let answer = self.call(
-            "turn.submit",
-            crate::service::wire::turn_params(&session, &turn),
-        )?;
-        let run_id = answer["run_id"].as_str().unwrap_or_default().to_string();
-        Ok((session, run_id))
+        let params = crate::service::wire::turn_params(&session, &turn);
+        Ok((session, params))
     }
 }
 
@@ -277,11 +273,12 @@ impl CompletionBackend for ServiceBackend {
         // Prepare, subscribe from the tip, submit. A dead server fails the
         // first call of that; one reconnect and one retry, then the failure
         // is the operator's to read.
-        let (session, run_id) = match self.start_turn(&request, &prompt) {
+        let run_id = crate::session::run_id();
+        let (session, params) = match self.prepare_turn(&request, &prompt, &run_id) {
             Ok(started) => started,
             Err(first) => match self
                 .reconnect()
-                .and_then(|()| self.start_turn(&request, &prompt))
+                .and_then(|()| self.prepare_turn(&request, &prompt, &run_id))
             {
                 Ok(started) => started,
                 Err(message) => {
@@ -297,6 +294,20 @@ impl CompletionBackend for ServiceBackend {
                 }
             },
         };
+        // Once submit is sent, losing the reply is not evidence it failed.
+        // Never re-submit here or offer a blind blank-Enter retry.
+        let failure = match self.call("turn.submit", params) {
+            Ok(reply) if reply["run_id"].as_str() == Some(&run_id) => None,
+            Ok(_) => Some("unexpected run id in submit reply".to_string()),
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            let _ = sender.send(ResponseEvent::Failed {
+                kind: ErrorKind::Other,
+                message: format!("{err}; not resubmitted. Check session {session}, run {run_id} before retrying."),
+            });
+            return receiver;
+        }
         self.running = Some(run_id.clone());
         let client = Arc::clone(&self.client);
         let events = self
@@ -403,8 +414,8 @@ fn follow(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = sender.send(ResponseEvent::Failed {
-                    message: "the connection to the service closed".to_string(),
-                    kind: ErrorKind::Transport,
+                    message: format!("the connection to the service closed; outcome unknown. Check session {session}, run {run_id} before retrying."),
+                    kind: ErrorKind::Other,
                 });
                 return;
             }
@@ -449,9 +460,8 @@ fn follow(
                     false
                 } else {
                     let _ = sender.send(ResponseEvent::Failed {
-                        message: "fell behind the service's events and could not resubscribe"
-                            .to_string(),
-                        kind: ErrorKind::Transport,
+                        message: format!("could not resubscribe; outcome unknown. Check session {session}, run {run_id} before retrying."),
+                        kind: ErrorKind::Other,
                     });
                     true
                 }
@@ -857,6 +867,40 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert!(seen[0].contains("restart the chat"), "{}", seen[0]);
         gateway.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn losing_the_submit_reply_never_reconnects_and_submits_again() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("lost-submit");
+        let state = Directories::single_root(dir.clone());
+        let socket =
+            std::env::temp_dir().join(format!("ahi-submit-{}.sock", crate::session::run_id()));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader = BufReader::new(stream.try_clone().unwrap());
+            for line in reader.lines() {
+                let req: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                if req["method"] == "turn.submit" {
+                    // Accept the request, then drop the connection without a reply.
+                    return req["params"]["run_id"].as_str().unwrap().to_owned();
+                }
+                writeln!(stream, "{}", json!({"id":req["id"], "result":{"tip":0}})).unwrap();
+            }
+            panic!("no submit");
+        });
+        let client = Client::listening(&state, &socket).unwrap();
+        let mut backend = ServiceBackend::new(client, Some("session-A".into()), dir.clone(), None)
+            .with_reconnect(Box::new(|| panic!("must not reconnect to retry a submit")));
+        let rx = backend.submit(request("write a marker"));
+        let run_id = peer.join().unwrap();
+        assert!(crate::session::valid_run_id(&run_id));
+        assert!(
+            matches!(rx.recv_timeout(Duration::from_secs(8)).unwrap(), ResponseEvent::Failed {kind: ErrorKind::Other,message} if message.contains(&format!("session session-A, run {run_id}")))
+        );
+        fs::remove_file(socket).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 
