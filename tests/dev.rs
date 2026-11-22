@@ -274,7 +274,7 @@ fn flavor_selects_the_shell_or_run_image_without_changing_argv() {
     for (args, tail) in [
         (
             vec!["--flavor", "rust"],
-            vec!["ghcr.io/iancleary/ahi-dev-rust:latest", "fish"],
+            vec!["ghcr.io/ahi-sh/ahi-dev-rust:latest", "fish"],
         ),
         (
             vec![
@@ -289,7 +289,7 @@ fn flavor_selects_the_shell_or_run_image_without_changing_argv() {
                 "print(1 + 2)",
             ],
             vec![
-                "ghcr.io/iancleary/ahi-dev-python:edge",
+                "ghcr.io/ahi-sh/ahi-dev-python:edge",
                 "python",
                 "-c",
                 "print(1 + 2)",
@@ -369,7 +369,13 @@ fn status_reports_the_flavor_source_and_preserves_the_workspace_tag() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", text(&output));
-    assert!(text(&output).contains("image: ghcr.io/iancleary/ahi-dev-fpga-sim:pinned (from --flavor, tag from ahi.dev.yaml)"), "{}", text(&output));
+    assert!(
+        text(&output).contains(
+            "image: ghcr.io/ahi-sh/ahi-dev-fpga-sim:pinned (from --flavor, tag from ahi.dev.yaml)"
+        ),
+        "{}",
+        text(&output)
+    );
 }
 
 #[cfg(unix)]

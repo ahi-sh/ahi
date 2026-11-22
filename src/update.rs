@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::VERSION;
 
-const REPO_SLUG: &str = "iancleary/ahi";
+const REPO_SLUG: &str = "ahi-sh/ahi";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release_binary_assets.yml";
 const ATTESTATION_PREDICATE_TYPE: &str = "https://slsa.dev/provenance/v1";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);

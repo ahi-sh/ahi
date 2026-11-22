@@ -1,7 +1,7 @@
 //! `ahi dev`: pull or build the opinionated development image and open a
 //! shell in it with the working directory mounted.
 //!
-//! The image is defined and published by `iancleary/ahi-images`; this module
+//! The image is defined and published by `ahi-sh/ahi-images`; this module
 //! only references, pulls, builds, inspects, removes, and runs it through a
 //! container runtime (`podman` or `docker`) found on `PATH`. Nothing here
 //! reads a Containerfile: `build` pulls the published image unless `--from`
@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::yaml_safe::check_config_yaml;
 
 /// The image the `ahi-images` repository publishes, without a tag.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/iancleary/ahi-dev";
+pub const DEFAULT_IMAGE: &str = "ghcr.io/ahi-sh/ahi-dev";
 /// Tag appended to an image reference that has none, unless `--tag` or the
 /// repository's `ahi.dev.yaml` chooses another.
 pub const DEFAULT_TAG: &str = "latest";
@@ -351,7 +351,7 @@ fn executable_names(name: &str) -> impl Iterator<Item = String> + '_ {
 
 /// The image's short name for use as the container hostname: the last path
 /// component without its tag or digest, reduced to the characters a hostname
-/// allows. `ghcr.io/iancleary/ahi-dev-rust:latest` becomes `ahi-dev-rust`.
+/// allows. `ghcr.io/ahi-sh/ahi-dev-rust:latest` becomes `ahi-dev-rust`.
 pub fn image_short_name(image: &str) -> String {
     let last = image.rsplit('/').next().unwrap_or(image);
     let bare = last.split(['@', ':']).next().unwrap_or(last);
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(
             image_reference(&image, source, DEFAULT_TAG, TagSource::Default).unwrap(),
             (
-                "ghcr.io/iancleary/ahi-dev:latest".to_string(),
+                "ghcr.io/ahi-sh/ahi-dev:latest".to_string(),
                 TagSource::Default
             )
         );
@@ -839,11 +839,11 @@ mod tests {
     #[test]
     fn the_hostname_is_the_image_short_name() {
         assert_eq!(
-            image_short_name("ghcr.io/iancleary/ahi-dev-rust:latest"),
+            image_short_name("ghcr.io/ahi-sh/ahi-dev-rust:latest"),
             "ahi-dev-rust"
         );
         assert_eq!(
-            image_short_name("ghcr.io/iancleary/ahi-dev@sha256:abc"),
+            image_short_name("ghcr.io/ahi-sh/ahi-dev@sha256:abc"),
             "ahi-dev"
         );
         assert_eq!(image_short_name("Local_Image:1"), "local-image");

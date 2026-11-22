@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap an attested Apple Silicon release. No sudo or shell profile edits.
 set -euo pipefail
-repo=iancleary/ahi
+repo=ahi-sh/ahi
 usage() { echo 'Usage: bash scripts/install-macos.sh [vMAJOR.MINOR.PATCH]'; echo 'Installs to ${AHI_INSTALL_DIR:-$HOME/.local/bin}/ahi. Requires gh auth login.'; }
 case ${1:-} in -h|--help) usage; exit 0;; esac
 [[ $# -le 1 ]] || { usage >&2; exit 2; }

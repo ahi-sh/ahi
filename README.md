@@ -1,6 +1,6 @@
 # ahi
 
-## Subagent design ([#123](https://github.com/iancleary/ahi/issues/123))
+## Subagent design ([#123](https://github.com/ahi-sh/ahi/issues/123))
 
 **ahi owns the subagent; Rex keeps it attachable; ahi’s durable session store keeps its conversation recoverable.**
 
@@ -40,6 +40,8 @@ Tool permissions depend on the selected workspace mode. Define named modes in `a
 
 ## Installation
 
+**Upgrading from `v0.28.0` or earlier?** The first `ahi-sh` release requires [one manual upgrade](MIGRATING.md#one-manual-upgrade-after-the-github-organization-transfer). Do not bypass an attestation failure in the old updater.
+
 Every platform can install from crates.io with Rust 1.88 or newer from [rustup](https://rustup.rs/):
 
 ```sh
@@ -51,14 +53,14 @@ Run the same command again to update. Linux, Windows, and Apple Silicon Macs can
 
 ### Linux
 
-Statically linked archives for **x86_64** and **aarch64** are on the [latest release](https://github.com/iancleary/ahi/releases/latest).
+Statically linked archives for **x86_64** and **aarch64** are on the [latest release](https://github.com/ahi-sh/ahi/releases/latest).
 
 1. Download `ahi-<version>-linux-<architecture>.tar.gz` and `ahi-<version>-sha256sums.txt`.
 2. [Verify the checksum and the GitHub build-provenance attestation](#verifying-downloads) before extracting.
 3. Extract and install `ahi` somewhere on your `PATH`:
 
    ```sh
-   VERSION=0.6.0 ARCH=x86_64   # or aarch64
+   VERSION=0.28.1 ARCH=x86_64   # or aarch64
    tar -xzf "ahi-$VERSION-linux-$ARCH.tar.gz"
    install -D -m 755 ahi "$HOME/.local/bin/ahi"
    ahi --version
@@ -68,14 +70,14 @@ Afterwards `ahi update` replaces the binary with the next release's archive, ver
 
 ### Windows
 
-An **x86_64** archive is on the [latest release](https://github.com/iancleary/ahi/releases/latest).
+An **x86_64** archive is on the [latest release](https://github.com/ahi-sh/ahi/releases/latest).
 
 1. Download `ahi-<version>-windows-x86_64.tar.gz` and `ahi-<version>-sha256sums.txt`.
 2. [Verify the checksum and attestation](#verifying-downloads). In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` gives the checksum to compare with the sums file, and `gh attestation verify` checks provenance.
 3. Extract in PowerShell and put `ahi.exe` on your user `PATH`:
 
    ```powershell
-   tar -xzf ahi-0.6.0-windows-x86_64.tar.gz
+   tar -xzf ahi-0.28.1-windows-x86_64.tar.gz
    .\ahi.exe --version
    ```
 
@@ -88,8 +90,8 @@ An **x86_64** archive is on the [latest release](https://github.com/iancleary/ah
 On **Apple Silicon**, install GitHub CLI and run `gh auth login`. From the release checkout, run `bash scripts/install-macos.sh`. Or download the installer from the same tag you intend to install:
 
 ```sh
-tag=v0.26.1
-curl -fLsS "https://raw.githubusercontent.com/iancleary/ahi/$tag/scripts/install-macos.sh" -o install-macos.sh
+tag=v0.28.1
+curl -fLsS "https://raw.githubusercontent.com/ahi-sh/ahi/$tag/scripts/install-macos.sh" -o install-macos.sh
 bash install-macos.sh "$tag"
 ```
 
@@ -515,26 +517,26 @@ Sign in with ChatGPT using the current direct-token browser flow. Prints the URL
 
 ### ahi dev
 
-Opens a shell in the opinionated development image that [iancleary/ahi-images](https://github.com/iancleary/ahi-images) publishes as `ghcr.io/iancleary/ahi-dev:latest` (Fedora, a non-root `dev` user with sudo, git, ripgrep, fd, bat, jq, tmux, vim, zsh). ahi does not contain a Containerfile; it drives a container runtime, `podman` or `docker`, found on `PATH`. Without a subcommand it pulls the image when it is missing and runs it interactively with the working directory mounted at `/work`. Only the working directory is mounted: the ahi directories, the home directory, and the container socket stay outside, and the image runs as its own `dev` user. `ahi dev` is a reproducible shell, not a security boundary; its properties are the container runtime's.
+Opens a shell in the opinionated development image that [ahi-sh/ahi-images](https://github.com/ahi-sh/ahi-images) publishes as `ghcr.io/ahi-sh/ahi-dev:latest` (Fedora, a non-root `dev` user with sudo, git, ripgrep, fd, bat, jq, tmux, vim, zsh). ahi does not contain a Containerfile; it drives a container runtime, `podman` or `docker`, found on `PATH`. Without a subcommand it pulls the image when it is missing and runs it interactively with the working directory mounted at `/work`. Only the working directory is mounted: the ahi directories, the home directory, and the container socket stay outside, and the image runs as its own `dev` user. `ahi dev` is a reproducible shell, not a security boundary; its properties are the container runtime's.
 
 | Command | Effect |
 | --- | --- |
 | `ahi dev` | Pull if missing, then open the shell. Exits with the shell's exit code. |
-| `ahi dev --flavor rust` | Open a shell in `ghcr.io/iancleary/ahi-dev-rust`. The same flag works with the existing verbs, e.g. `ahi dev --flavor python run -- uv run pytest` or `ahi dev --flavor fpga status`. |
+| `ahi dev --flavor rust` | Open a shell in `ghcr.io/ahi-sh/ahi-dev-rust`. The same flag works with the existing verbs, e.g. `ahi dev --flavor python run -- uv run pytest` or `ahi dev --flavor fpga status`. |
 | `ahi dev build` | Pull the image. With `--from <dir>`, build `images/dev` from that local `ahi-images` checkout and tag it with the image reference instead. |
 | `ahi dev run -- <command>` | Pull if missing, then run the command in the image with argv passed through untouched. Exits with the command's exit code; stdout and stderr pass through, so it pipes. |
 | `ahi dev shell` | Open the shell in an image that is already present; never pulls. |
 | `ahi dev status` | Print the runtime, the image reference and where it came from, the mount, and the local image id and creation time. |
 | `ahi dev clean` | Remove the local image. |
 
-`--flavor NAME` selects `ghcr.io/iancleary/ahi-dev-NAME` by convention, without a registry lookup or a built-in list. Use lowercase letters or digits, optionally grouped with hyphens. Normal tag selection still applies (`ahi dev --flavor rust --tag edge`); a valid name does not guarantee an image has been published. Use `--image` instead for arbitrary references or digests. `--flavor` conflicts with `--image` and `--from` (local builds use `images/dev`). Selecting a flavor does not grant device access or change sandbox policy. To make bare `ahi dev` use a variant in a project, keep the full reference in `ahi.dev.yaml`:
+`--flavor NAME` selects `ghcr.io/ahi-sh/ahi-dev-NAME` by convention, without a registry lookup or a built-in list. Use lowercase letters or digits, optionally grouped with hyphens. Normal tag selection still applies (`ahi dev --flavor rust --tag edge`); a valid name does not guarantee an image has been published. Use `--image` instead for arbitrary references or digests. `--flavor` conflicts with `--image` and `--from` (local builds use `images/dev`). Selecting a flavor does not grant device access or change sandbox policy. To make bare `ahi dev` use a variant in a project, keep the full reference in `ahi.dev.yaml`:
 
 ```yaml
 version: 1
-image: ghcr.io/iancleary/ahi-dev-rust
+image: ghcr.io/ahi-sh/ahi-dev-rust
 ```
 
-The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default `ghcr.io/iancleary/ahi-dev`. The tag is the first of `--tag`, `tag` in `ahi.dev.yaml`, and `latest`, appended to that name: `ahi dev --tag edge` opens `ghcr.io/iancleary/ahi-dev:edge`. A reference that already names a tag or digest is never rewritten: it is used as is, `--tag` against it is an error, and a repository `tag` yields to a tagged `--image` or `AHI_DEV_IMAGE`. `ahi.dev.yaml` (`version: 1` with optional `image`, `tag`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell` (`bash` or `zsh` in the ahi-dev images), else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/zsh`, the images' login shell. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. The container hostname is the image's short name (`ahi-dev-rust`) and the mounted directory's name is passed as `AHI_DEV_PROJECT`, which the image's prompt shows as `dev@ahi-dev-rust:<version> <project>`. On Unix the owner of the mounted directory is passed as `AHI_HOST_UID` and `AHI_HOST_GID`; the ahi-dev entrypoint remaps its `dev` user to them so files written to the mount belong to the host user. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
+The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default `ghcr.io/ahi-sh/ahi-dev`. The tag is the first of `--tag`, `tag` in `ahi.dev.yaml`, and `latest`, appended to that name: `ahi dev --tag edge` opens `ghcr.io/ahi-sh/ahi-dev:edge`. A reference that already names a tag or digest is never rewritten: it is used as is, `--tag` against it is an error, and a repository `tag` yields to a tagged `--image` or `AHI_DEV_IMAGE`. `ahi.dev.yaml` (`version: 1` with optional `image`, `tag`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell` (`bash` or `zsh` in the ahi-dev images), else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/zsh`, the images' login shell. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. The container hostname is the image's short name (`ahi-dev-rust`) and the mounted directory's name is passed as `AHI_DEV_PROJECT`, which the image's prompt shows as `dev@ahi-dev-rust:<version> <project>`. On Unix the owner of the mounted directory is passed as `AHI_HOST_UID` and `AHI_HOST_GID`; the ahi-dev entrypoint remaps its `dev` user to them so files written to the mount belong to the host user. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
 
 ### Service-owned scratch delegation in a headless Rex block
 
@@ -605,7 +607,7 @@ On Unix every `ahi` directory ahi creates is mode `0700`, and every file it writ
 
 ## Verifying downloads
 
-A published GitHub release for tag `v<version>` with Apple Silicon support carries six assets. `<version>` is the SemVer string without the leading `v` (tag `v0.6.0` uses `0.6.0`).
+A published GitHub release for tag `v<version>` with Apple Silicon support carries six assets. `<version>` is the SemVer string without the leading `v` (tag `v0.28.1` uses `0.28.1`).
 
 - `ahi-<version>-linux-x86_64.tar.gz`
 - `ahi-<version>-linux-aarch64.tar.gz`
@@ -616,15 +618,24 @@ A published GitHub release for tag `v<version>` with Apple Silicon support carri
 
 Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the Windows and macOS archives are built natively and are not promised to be bit-reproducible. Both checksum manifests use `sha256sum` format.
 
-From the directory that contains the downloaded files, for release `0.6.0`:
+For an organization release, download the archive and its matching manifest, then verify both. For example, on Linux:
 
 ```sh
-sha256sum --check --ignore-missing ahi-0.6.0-sha256sums.txt
-gh attestation verify ahi-0.6.0-linux-x86_64.tar.gz --repo iancleary/ahi
-gh attestation verify ahi-0.6.0-sha256sums.txt --repo iancleary/ahi
+set -e
+tag=v0.28.1
+repo=ahi-sh/ahi
+archive=ahi-${tag#v}-linux-x86_64.tar.gz
+sums=ahi-${tag#v}-sha256sums.txt
+commit=$(gh api "repos/$repo/commits/$tag" --jq .sha)
+for file in "$sums" "$archive"; do
+  gh attestation verify "$file" --repo "$repo" --source-ref "refs/tags/$tag" \
+    --source-digest "$commit" --signer-workflow "$repo/.github/workflows/release_binary_assets.yml" \
+    --predicate-type https://slsa.dev/provenance/v1
+done
+sha256sum --check --ignore-missing "$sums"
 ```
 
-`sha256sum --check` uses the filenames recorded in the sums file, so the archive has to sit beside that file; `--ignore-missing` skips the archives you did not download. Verify each archive you use the same way, and replace `0.6.0` with the release that was downloaded.
+`sha256sum --check` uses the filenames recorded in the sums file, so the archive has to sit beside that file; `--ignore-missing` skips the archives you did not download. Verify each archive you use the same way, and replace `v0.28.1` with the organization release that was downloaded.
 
 ## Development
 

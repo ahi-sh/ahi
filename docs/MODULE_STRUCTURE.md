@@ -1,6 +1,6 @@
 # Proposed ahi module and workspace structure
 
-Planning reference for [issue #98](https://github.com/iancleary/ahi/issues/98).
+Planning reference for [issue #98](https://github.com/ahi-sh/ahi/issues/98).
 This describes a target layout, not an approved bulk migration.
 
 ## Implementation status

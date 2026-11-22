@@ -227,7 +227,7 @@ enum Command {
     Login,
     /// Open a shell, or run a command, in the development image with the working directory at /work.
     ///
-    /// Needs podman or docker on PATH. The image comes from iancleary/ahi-images.
+    /// Needs podman or docker on PATH. The image comes from ahi-sh/ahi-images.
     /// Without a subcommand the image is pulled when missing and a shell opens.
     /// Only the working directory is mounted; this is a reproducible shell, not
     /// a security boundary.
@@ -352,10 +352,10 @@ enum SandboxCommand {
 struct DevArgs {
     #[command(subcommand)]
     command: Option<DevCommand>,
-    /// Image name without a tag. Outranks AHI_DEV_IMAGE, `image` in ahi.dev.yaml, and ~/.config/ahi/dev-image [default: ghcr.io/iancleary/ahi-dev]
+    /// Image name without a tag. Outranks AHI_DEV_IMAGE, `image` in ahi.dev.yaml, and ~/.config/ahi/dev-image [default: ghcr.io/ahi-sh/ahi-dev]
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
-    /// Select ghcr.io/iancleary/ahi-dev-NAME (e.g. rust or python). Cannot be combined with --image or --from.
+    /// Select ghcr.io/ahi-sh/ahi-dev-NAME (e.g. rust or python). Cannot be combined with --image or --from.
     #[arg(long, global = true, value_name = "NAME")]
     flavor: Option<crate::dev::Flavor>,
     /// Image tag: latest, edge, or a dated tag. Outranks `tag` in ahi.dev.yaml. Not allowed when the image already has a tag [default: latest]
@@ -370,7 +370,7 @@ struct DevArgs {
     /// Pull or build again even when the image is present.
     #[arg(long, global = true)]
     rebuild: bool,
-    /// Build images/dev from this local iancleary/ahi-images checkout instead of pulling.
+    /// Build images/dev from this local ahi-sh/ahi-images checkout instead of pulling.
     #[arg(long, global = true, value_name = "DIR")]
     from: Option<PathBuf>,
 }

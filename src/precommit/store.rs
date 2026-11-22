@@ -35,7 +35,7 @@ impl Store {
             if !readme.exists() {
                 fs::write(
                     &readme,
-                    "This directory is maintained by ahi.\nSee https://github.com/iancleary/ahi\nObjects under objects/sha256 are content-addressed. A read-only store is valid when those objects were baked into the image.\n",
+                    "This directory is maintained by ahi.\nSee https://github.com/ahi-sh/ahi\nObjects under objects/sha256 are content-addressed. A read-only store is valid when those objects were baked into the image.\n",
                 )
                 .map_err(|err| Error::new(format!("failed to write cache README: {err}")))?;
             }
