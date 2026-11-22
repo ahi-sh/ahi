@@ -281,7 +281,8 @@ def main() -> None:
                     delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
                     finish = "tool_calls"
                 elif body["messages"][-1]["role"] == "tool":
-                    delta = {"content": "mode-fixture-complete"}
+                    last_prompt = next(m['content'] for m in reversed(body['messages']) if m['role'] == 'user')
+                    delta = {"content": "<tool_call>not another call" if last_prompt == "draft-preserved" else "mode-fixture-complete"}
                     finish = "stop"
                 else:
                     delta = {"tool_calls": [{"index": 0, "id": "write-mode", "type": "function",
@@ -369,7 +370,9 @@ def main() -> None:
                         chat.send("\x1bm")
                         chat.expect("Plan · Alt+M for Trusted")
                         chat.send("\r")
-                        chat.expect("mode-fixture-complete")
+                        chat.expect("<tool_call>not another call")
+                        chat.expect("write_file marker · Plan blocks workspace writes, commands and delegation")
+                        chat.absent("Tool-call markup was returned as text")  # This turn did receive structured calls.
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
                         chat.send("\x1bm")
