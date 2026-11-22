@@ -347,7 +347,7 @@ fn complete(
             );
             let body = protocol::request_body(connection.protocol, &context)?;
             cancelled(cancel)?;
-            let response = send(agent, state, &connection, &body, sender, cancel)?;
+            let response = send(agent, state, &connection, &body, sender, cancel, deadline)?;
             let outcome = decode(connection.protocol, &context, response, sender, cancel)?;
             match outcome {
                 StreamOutcome::Stopped => return Ok(()),
@@ -428,6 +428,7 @@ fn send(
     body: &[u8],
     sender: &Sender<ResponseEvent>,
     cancel: &Arc<AtomicBool>,
+    deadline: Option<Instant>,
 ) -> Result<ureq::http::Response<ureq::Body>> {
     match &connection.transport {
         CompletionTransport::OpenAiResponses => {
@@ -440,6 +441,18 @@ fn send(
                     .post(url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "text/event-stream");
+                if let Some(deadline) = deadline {
+                    // A bounded gateway turn can spend most of its budget awaiting
+                    // the first prefill. Share the remaining time across rounds and
+                    // connection attempts; retain the existing settlement grace.
+                    call = call
+                        .config()
+                        .timeout_global(Some(
+                            deadline.saturating_duration_since(Instant::now())
+                                + Duration::from_secs(1),
+                        ))
+                        .build();
+                }
                 for (name, value) in headers {
                     call = call.header(name, value);
                 }
