@@ -69,11 +69,34 @@ pub enum Action {
     Clean,
 }
 
+/// A suffix in the ahi-images naming convention, not an image reference or a catalog entry.
+#[derive(Debug, Clone)]
+pub struct Flavor(String);
+
+impl std::str::FromStr for Flavor {
+    type Err = &'static str;
+
+    fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
+        if name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        }) {
+            Ok(Self(name.to_owned()))
+        } else {
+            Err("use lowercase letters or digits separated by single hyphens; use --image for a full reference")
+        }
+    }
+}
+
 /// Flags shared by every `ahi dev` action.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// `--image`.
     pub image: Option<String>,
+    /// `--flavor`: shorthand for a published image name.
+    pub flavor: Option<Flavor>,
     /// `--tag`.
     pub tag: Option<String>,
     /// `--shell`.
@@ -92,6 +115,7 @@ pub struct Options {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageSource {
     Flag,
+    Flavor,
     Environment,
     RepoFile,
     ConfigFile,
@@ -102,6 +126,7 @@ impl ImageSource {
     fn label(self) -> &'static str {
         match self {
             ImageSource::Flag => "--image",
+            ImageSource::Flavor => "--flavor",
             ImageSource::Environment => IMAGE_ENV,
             ImageSource::RepoFile => REPO_FILE_NAME,
             ImageSource::ConfigFile => IMAGE_FILE,
@@ -433,6 +458,12 @@ impl Session {
     /// Resolve everything from the flags, the environment, and the config
     /// directory. Does not touch the runtime yet.
     pub fn resolve(options: &Options, dirs: &Directories) -> Result<Self> {
+        // Global flags can occur on opposite sides of a dev subcommand.
+        if options.flavor.is_some() && (options.image.is_some() || options.from.is_some()) {
+            return Err(Error::new(
+                "--flavor cannot be combined with --image or --from",
+            ));
+        }
         let workdir = env::current_dir()
             .map_err(|err| Error::new(format!("failed to read the working directory: {err}")))?;
         let repo = load_repo_preferences(&workdir)?;
@@ -442,12 +473,15 @@ impl Session {
             repo.runtime.as_deref(),
         )?;
         let config_file = fs::read_to_string(dirs.config.join(IMAGE_FILE)).ok();
-        let (image, source) = resolve_image(
-            options.image.as_deref(),
-            env::var(IMAGE_ENV).ok().as_deref(),
-            repo.image.as_deref(),
-            config_file.as_deref(),
-        );
+        let (image, source) = match &options.flavor {
+            Some(flavor) => (format!("{DEFAULT_IMAGE}-{}", flavor.0), ImageSource::Flavor),
+            None => resolve_image(
+                options.image.as_deref(),
+                env::var(IMAGE_ENV).ok().as_deref(),
+                repo.image.as_deref(),
+                config_file.as_deref(),
+            ),
+        };
         let (tag, tag_source) = resolve_tag(options.tag.as_deref(), repo.tag.as_deref());
         let (image, tag_source) = image_reference(&image, source, &tag, tag_source)?;
         let shell = resolve_shell(
@@ -531,7 +565,7 @@ impl Session {
     pub fn exec(&self, command: &[OsString]) -> Result<ExitStatus> {
         if !self.image_present()? {
             return Err(Error::new(format!(
-                "image {} is not present; run `ahi dev build` or `ahi dev` first",
+                "image {} is not present; use `ahi dev build` with the same image selection first",
                 self.image
             )));
         }
@@ -568,7 +602,9 @@ impl Session {
             .output()
             .map_err(|err| self.spawn_error(err))?;
         if !output.status.success() {
-            println!("local image: not present (run `ahi dev build`)");
+            println!(
+                "local image: not present (use `ahi dev build` with the same image selection)"
+            );
             return Ok(());
         }
         let text = String::from_utf8_lossy(&output.stdout);
