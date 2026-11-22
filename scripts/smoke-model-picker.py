@@ -1682,7 +1682,9 @@ def main() -> None:
             assert path == "/v1/chat/completions"
             assert {name.lower(): value for name, value in headers.items()}["authorization"] == "Bearer gateway"
             assert request["model"] == "served/model"
-            assert request["messages"] == [{"role": "user", "content": "verify discovered gateway"}]
+            core, question = request["messages"]
+            assert core["role"] == "system" and core["content"]
+            assert question == {"role": "user", "content": "verify discovered gateway"}
             configured = json.loads((gateway_state / "models.json").read_text())
             configured["providers"]["discovered"]["apiKey"] = "$AHI_GATEWAY_FIXTURE_KEY"
             configured["providers"]["discovered"]["headers"] = {"X-Fixture": "$AHI_GATEWAY_FIXTURE_HEADER"}
@@ -1736,7 +1738,7 @@ def main() -> None:
             release_response.set()
             session.absent("Working")
             assert "/gateway" in session.screen()
-            assert gateway_requests[-1][2]["messages"] == [
+            assert gateway_requests[-1][2]["messages"] == [core,
                 {"role": "user", "content": "verify discovered gateway"},
                 {"role": "assistant", "content": "gateway workflow confirmed"},
                 {"role": "user", "content": "verify retained context"},
@@ -1970,7 +1972,7 @@ def main() -> None:
             deadline = time.monotonic() + 5
             while len(gateway_requests) < 2 and time.monotonic() < deadline:
                 session.read()
-            assert gateway_requests[-1][2]["messages"][1]["reasoning_content"] == ""
+            assert gateway_requests[-1][2]["messages"][2]["reasoning_content"] == ""
 
             def reload_metadata() -> None:
                 local_path.write_text(json.dumps(local_document))
@@ -2095,7 +2097,7 @@ def main() -> None:
             session.capture("metadata-restart-off")
             expected_request = {
                 "model": "GLM-5.3-Flash-EXL3", "stream": True,
-                "messages": [{"role": "user", "content": "容量"}],
+                "messages": [core, {"role": "user", "content": "容量"}],
                 "max_completion_tokens": 128, "store": False,
             }
             exact_bytes = len(json.dumps(expected_request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

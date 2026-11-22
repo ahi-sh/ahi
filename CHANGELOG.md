@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.27.0
+
+- All three model protocols now receive the same short instructions to investigate within scope, preserve unrelated work and report verified effects. They do not appear in session history or grant new permissions. See the [wire checks and opt-in workflow evaluation](tests/reports/core-prompt-eval.md).
+
+- Check for a client/service version mismatch before entering the model picker. Show child command exit status, distinguish model-truncated tool output from local captures, and avoid resubmitting after a lost turn acknowledgment. Read ranges and search links preserve ambiguous filenames and source text.
 
 - Stop clamping model output to 4,096 tokens. Use the advertised model limit, or omit the field when the protocol allows it. Anthropic Messages requires a catalog or configured `maxTokens`. If a provider cuts a reply short, report the requested limit when known and suggest a next step without retrying or running calls from that reply.
 

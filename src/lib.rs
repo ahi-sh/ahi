@@ -23,6 +23,7 @@ pub mod service;
 pub mod session;
 mod shlex;
 pub mod skills;
+mod system_prompt;
 pub mod term;
 pub mod terminal_host;
 mod tool_policy;
