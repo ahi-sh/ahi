@@ -270,6 +270,110 @@ fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
 
 #[cfg(unix)]
 #[test]
+fn flavor_selects_the_shell_or_run_image_without_changing_argv() {
+    for (args, tail) in [
+        (
+            vec!["--flavor", "rust"],
+            vec!["ghcr.io/iancleary/ahi-dev-rust:latest", "fish"],
+        ),
+        (
+            vec![
+                "run",
+                "--flavor",
+                "python",
+                "--tag",
+                "edge",
+                "--",
+                "python",
+                "-c",
+                "print(1 + 2)",
+            ],
+            vec![
+                "ghcr.io/iancleary/ahi-dev-python:edge",
+                "python",
+                "-c",
+                "print(1 + 2)",
+            ],
+        ),
+    ] {
+        let fixture = Fixture::new("dev-preset");
+        let runtime = fake_runtime(&fixture.0);
+        let output = fixture
+            .ahi()
+            .env("AHI_DEV_IMAGE", "example.invalid/other")
+            .args(["dev", "--runtime"])
+            .arg(runtime)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", text(&output));
+        let log = fs::read_to_string(fixture.0.join("runtime.log")).unwrap();
+        let run: Vec<_> = log
+            .trim_end_matches("--\n")
+            .rsplit("--\n")
+            .next()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(run[0], "run");
+        assert!(run.ends_with(&tail), "{run:?}");
+    }
+}
+
+#[test]
+fn flavor_rejects_conflicts_and_invalid_suffixes_before_runtime_lookup() {
+    let fixture = Fixture::new("dev-flavor-invalid");
+    for (args, diagnostic) in [
+        (
+            vec!["--image", "other", "status", "--flavor", "rust"],
+            "--flavor cannot be combined",
+        ),
+        (
+            vec!["--flavor", "fpga", "build", "--from", "."],
+            "--flavor cannot be combined",
+        ),
+        (
+            vec!["--flavor", "org/other"],
+            "use --image for a full reference",
+        ),
+        (
+            vec!["--flavor", "rust:edge"],
+            "use --image for a full reference",
+        ),
+    ] {
+        let output = fixture
+            .ahi()
+            .args(["dev", "--runtime", "no-such-runtime"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(text(&output).contains(diagnostic), "{}", text(&output));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_the_flavor_source_and_preserves_the_workspace_tag() {
+    let fixture = Fixture::new("dev-flavor-status");
+    let runtime = fake_runtime(&fixture.0);
+    fs::write(
+        fixture.0.join("ahi.dev.yaml"),
+        "version: 1\nimage: custom\ntag: pinned\n",
+    )
+    .unwrap();
+    let output = fixture
+        .ahi()
+        .args(["dev", "--flavor", "fpga-sim", "status", "--runtime"])
+        .arg(runtime)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("image: ghcr.io/iancleary/ahi-dev-fpga-sim:pinned (from --flavor, tag from ahi.dev.yaml)"), "{}", text(&output));
+}
+
+#[cfg(unix)]
+#[test]
 fn run_passes_the_command_through_untouched_and_pulls_first() {
     let fixture = Fixture::new("dev-run");
     let runtime = fake_runtime(&fixture.0);

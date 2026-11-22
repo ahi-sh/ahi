@@ -355,6 +355,9 @@ struct DevArgs {
     /// Image name without a tag. Outranks AHI_DEV_IMAGE, `image` in ahi.dev.yaml, and ~/.config/ahi/dev-image [default: ghcr.io/iancleary/ahi-dev]
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
+    /// Select ghcr.io/iancleary/ahi-dev-NAME (e.g. rust or python). Cannot be combined with --image or --from.
+    #[arg(long, global = true, value_name = "NAME")]
+    flavor: Option<crate::dev::Flavor>,
     /// Image tag: latest, edge, or a dated tag. Outranks `tag` in ahi.dev.yaml. Not allowed when the image already has a tag [default: latest]
     #[arg(long, global = true, value_name = "TAG")]
     tag: Option<String>,
@@ -606,6 +609,7 @@ fn dev(cli: &Cli, args: &DevArgs) -> ExitCode {
     };
     let options = Options {
         image: args.image.clone(),
+        flavor: args.flavor.clone(),
         tag: args.tag.clone(),
         shell: args.shell.clone(),
         runtime: args.runtime.clone(),
