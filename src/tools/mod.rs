@@ -1920,12 +1920,17 @@ mod tests {
             },
             &workspace,
         );
+        let path = abs("sub/notes.txt");
+        // A Windows drive prefix contains a colon and is JSON-quoted just
+        // like a Unix filename containing a colon; UNC roots need no quotes.
+        let field = if path.contains(':') {
+            json!(path).to_string()
+        } else {
+            path
+        };
         assert_eq!(
             search.unwrap(),
-            format!(
-                "{}:1:outside text\n[1 binary or oversized files skipped]",
-                abs("sub/notes.txt")
-            )
+            format!("{field}:1:outside text\n[1 binary or oversized files skipped]")
         );
         #[cfg(unix)]
         {
