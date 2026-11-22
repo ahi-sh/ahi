@@ -1,0 +1,8 @@
+{
+  "prompt": "Read bounds.py. Its upper bound should be exclusive. Change only the comparison operator and report which function you fixed.",
+  "input": "bounds.py",
+  "before": "def within_window(value, limit):\n    return value <= limit\n",
+  "after": "def within_window(value, limit):\n    return value < limit\n",
+  "marker": "within_window",
+  "answer": "within_window"
+}

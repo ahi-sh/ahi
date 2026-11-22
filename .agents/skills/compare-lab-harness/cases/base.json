@@ -1,0 +1,7 @@
+{
+  "prompt": "Read build-note.txt and report the board revision it names.",
+  "input": "build-note.txt",
+  "before": "Board revision: Finch-C7\n",
+  "marker": "Finch-C7",
+  "answer": "Finch-C7"
+}
