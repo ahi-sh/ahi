@@ -6,7 +6,7 @@ name: publish
 # pull requests, and pull_request_target do not run this file, so a pull
 # request cannot publish and cannot read the token from this workflow.
 # Forks do not receive the upstream secret. The publish job also refuses
-# every repository other than iancleary/ahi, and it refuses a release whose
+# every repository other than ahi-sh/ahi, and it refuses a release whose
 # ref is not a tag.
 on:
   release:
@@ -66,7 +66,7 @@ jobs:
 
   publish:
     needs: ci
-    if: github.event_name == 'release' && github.event.action == 'published' && startsWith(github.ref, 'refs/tags/') && github.repository == 'iancleary/ahi'
+    if: github.event_name == 'release' && github.event.action == 'published' && startsWith(github.ref, 'refs/tags/') && github.repository == 'ahi-sh/ahi' && github.repository_id == '1433547180'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -93,7 +93,7 @@ jobs:
 
       - name: Publish to crates.io
         # The token is mapped only in this step, only in this job, and only
-        # after the job condition has matched a tag release in iancleary/ahi.
+        # after the job condition has matched a tag release in ahi-sh/ahi.
         # The ci job above does not receive the token. The script publishes
         # all in-repo dependencies (including ahi-durable) first when their
         # pinned versions are not on crates.io yet, then ahi.

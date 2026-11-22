@@ -1,3 +1,11 @@
+# One manual upgrade after the GitHub organization transfer
+
+`v0.28.0` was the last release signed by `iancleary/ahi`. The planned baseline for `ahi-sh/ahi` is `v0.28.1`. GitHub redirects repository links, but a redirect does not change the signing identity of an existing archive. Do not use an old `ahi update` to cross this boundary or disable verification.
+
+Once `v0.28.1` is published, install it once using `cargo install ahi --locked --version 0.28.1`, or use the [platform instructions](README.md#installation) for that exact release. On Apple Silicon use the installer **from the new tag**, not an old local copy. Check `ahi --version` and that your shell resolves the binary you replaced (`command -v ahi` or `Get-Command ahi`). Subsequent `ahi update` calls on supported platforms trust only the `ahi-sh/ahi` release workflow. No sessions, credentials or workspace configuration need to move.
+
+The same baseline changes the `ahi dev` default and `--flavor NAME` to `ghcr.io/ahi-sh/ahi-dev` and `ghcr.io/ahi-sh/ahi-dev-NAME`. Fully qualified references in `ahi.dev.yaml`, `AHI_DEV_IMAGE`, `dev-image` and `--image` are **not** rewritten. To opt into the new packages, update those references yourself; for digest pins, verify the new image and use its published digest rather than substituting the owner. `ahi dev status` checks the selection without pulling. There is no fallback to the old registry owner.
+
 # Shared skill directories
 
 Skills now use `.agents/skills/<name>/SKILL.md` in the workspace and
