@@ -4,6 +4,10 @@ Skills are bounded instructions and supporting text, not permission grants.
 The TUI, `ahi exec` (including `--headless`), and the session service use the
 same discovery and loading implementation.
 
+To compare Pi and ahi on the same inference-lab model, start with the repo's
+[headless benchmark skill](../.agents/skills/benchmark-lab-harness/SKILL.md).
+Its loopback rehearsal needs neither a live gateway nor personal model settings.
+
 ## Discovery and metadata
 
 ahi discovers `<workspace>/.agents/skills/<name>/SKILL.md` and

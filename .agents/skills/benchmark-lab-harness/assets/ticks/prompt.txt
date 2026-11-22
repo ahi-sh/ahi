@@ -1,0 +1,1 @@
+Fix timer_due in timer.c so it works when the 32-bit tick counter rolls over. Preserve its signature. Change no other file.

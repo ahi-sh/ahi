@@ -1,0 +1,11 @@
+version: 1
+default: deny
+rules:
+  - id: read-timer
+    action: tool_call
+    match: {tool: read_file, path: timer.c}
+    effect: approve
+  - id: edit-timer
+    action: file_write
+    match: {tool: edit_file, path: timer.c}
+    effect: approve
