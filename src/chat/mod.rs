@@ -164,6 +164,9 @@ struct ChatScreen {
     actions_file: Option<std::path::PathBuf>,
 }
 
+const TOOL_MARKUP_NOTICE: &str =
+    "Tool-call markup was returned as text. No tool ran. Resubmit the question to retry.";
+
 pub(crate) struct ChatExit {
     pub(crate) session: Option<String>,
     pub(crate) conversation: String,
@@ -181,6 +184,7 @@ impl ChatScreen {
                     TranscriptRole::Notice if message.text.starts_with("Switched model to ") => {
                         "Session"
                     }
+                    TranscriptRole::Notice if message.text == TOOL_MARKUP_NOTICE => "Session",
                     TranscriptRole::Operator => "You",
                     TranscriptRole::Assistant if !message.text.is_empty() => "Assistant",
                     _ => return None,
@@ -1838,13 +1842,21 @@ impl ChatScreen {
                 self.approval = None;
                 self.recorder.end_turn();
                 let answer = self
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|message| matches!(message.role, TranscriptRole::Assistant))
-                    .map(|message| message.text.clone())
-                    .unwrap_or_default();
-                self.report_status(crate::program_status::State::Done, &answer);
+                    .streaming_reply
+                    .map_or("", |i| self.messages[i].text.as_str());
+                self.report_status(crate::program_status::State::Done, answer);
+                // Diagnose the current completed reply only. Quoted markup is
+                // never authority to dispatch a call, infer a denial or retry.
+                if answer.trim_start().starts_with("<tool_call>")
+                    && !self
+                        .messages
+                        .iter()
+                        .rev()
+                        .take_while(|m| m.role != TranscriptRole::Operator)
+                        .any(|m| m.tool.is_some())
+                {
+                    self.push_notice(TOOL_MARKUP_NOTICE.into());
+                }
                 self.push_turn_footer("done in");
                 true
             }
@@ -4601,6 +4613,41 @@ mod tests {
         assert_eq!(stored.clock, preferences::Clock::Utc);
         assert_eq!(stored.editor.as_deref(), Some("zed"));
         assert!(!stored.markdown);
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn markup_only_answer_stays_visible_without_dispatch_or_retry() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("markup-notice");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("what were the last two git merges about?");
+        press_hanging(&mut screen, &mut backend, KeyCode::Enter);
+        let sender = backend.sender.as_ref().unwrap();
+        for part in ["<tool_", "call>git_inspect"] {
+            sender.send(ResponseEvent::TextDelta(part.into())).unwrap();
+        }
+        screen.poll_backend();
+        let streaming = draw_lines(&mut screen, 110, 20).join("\n");
+        assert!(streaming.contains("Thinking...") && !streaming.contains("<tool_call>"));
+        sender.send(ResponseEvent::Completed).unwrap();
+        screen.poll_backend();
+        let completed = draw_lines(&mut screen, 110, 20).join("\n");
+        assert!(completed.contains("<tool_call>git_inspect"));
+        assert_eq!(completed.matches("No tool ran.").count(), 1);
+        assert_eq!(backend.requests.len(), 1);
+        let exit = screen.exit_output(&backend);
+        assert!(exit
+            .conversation
+            .contains("Assistant: <tool_call>git_inspect"));
+        assert!(exit
+            .conversation
+            .contains("Session: Tool-call markup was returned as text. No tool ran."));
         let _ = std::fs::remove_dir_all(state);
     }
 

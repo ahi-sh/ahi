@@ -381,6 +381,8 @@ In the chat composer, **↑ / ↓** move through wrapped or multiline text first
 
 **Ctrl+R** searches these same entries, newest first. Type part of an input; press Ctrl+R again for an older match. Enter copies the match into the composer for editing, **not** submission; Esc or Ctrl+G cancels and keeps the draft and cursor untouched.
 
+If a completed reply starts with literal `<tool_call>` markup and that turn received no structured calls, chat keeps the original answer and adds a notice explaining that no tool ran. The notice also appears in the conversation printed on exit; it is not a policy denial or an automatic retry.
+
 During generation the chat normally shows **Thinking...** rather than painting each assistant token. The answer appears when the assistant finishes or requests tools. **Ctrl+O** lets you inspect the live reply and expanded tool results, then collapse them again. Approvals, command progress and errors remain visible. Interrupted or failed replies retain the text already received; the compact view does not change recording, provider requests or `ahi exec`.
 
 The shared **Commands** popup opens immediately when you type **`/`**. Keep typing to filter by command, alias, or action label; use **Up/Down** to select, **Enter** to apply, and **Esc** to dismiss without executing. Chat retains its draft on dismissal; Models/Catalog return to list navigation. Single-line command paste in Models/Catalog is bounded and never submits by itself. Chat additionally offers thinking levels, mouse mode, and conversation clearing. Commands are local actions, never model prompts, and exact typed commands continue to work. During an active response, Enter preserves most command drafts; press Enter again after the response finishes to apply them. `/quit` and `/mode` controls remain available, with mode changes queued for the next turn. **`$`** opens the separate skill picker, not Commands.
@@ -627,6 +629,8 @@ cargo build --release
 ```
 
 `ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
+
+Deterministic Python tests live in `tests/python/`. Run them from the repository root with `uv run --no-project --python 3.11 --with-requirements tests/python/requirements.txt python -m pytest -q` (or install that requirements file in a Python 3.11+ venv and run `python -m pytest -q`). The tests need no network or model after dependency installation. PTY checks and opt-in live evaluations remain explicit `scripts/` commands; pytest never launches them by discovery.
 
 For real terminal verification on POSIX, build and run the maintained workflow against that exact executable:
 

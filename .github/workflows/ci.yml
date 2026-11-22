@@ -66,6 +66,14 @@ jobs:
       - name: Build project
         run: cargo build --release --locked
 
+      - name: Offline Python tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ahi-pytest"
+          "$RUNNER_TEMP/ahi-pytest/bin/pip" install --require-hashes -r tests/python/requirements.txt
+          "$RUNNER_TEMP/ahi-pytest/bin/python" -m pytest -q
+
       - name: Published member crates match the tree
         # A member crate (crates/*) whose version is already on crates.io
         # must match the published authored files, or its version must
@@ -74,9 +82,7 @@ jobs:
         # token. Linux only: one run per push is enough.
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          python3 scripts/test_compare_published_member.py
-          bash scripts/check-published-members.sh
+        run: bash scripts/check-published-members.sh
 
       - name: cargo-deny and cargo-audit
         if: runner.os == 'Linux'

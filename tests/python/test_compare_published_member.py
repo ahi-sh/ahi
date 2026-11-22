@@ -32,7 +32,7 @@ class PublishedMemberTest(unittest.TestCase):
                             entry = tarfile.TarInfo(f'fixture-1.0.0/{name}')
                             entry.size = len(data)
                             archive.addfile(entry, io.BytesIO(data))
-                result = subprocess.run([sys.executable, Path(__file__).with_name('compare_published_member.py'),
+                result = subprocess.run([sys.executable, Path(__file__).resolve().parents[2] / 'scripts/compare_published_member.py',
                                          'fixture', '1.0.0', *paths], capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(changed is not None), result.stderr)
                 differences = [line.split() for line in result.stderr.splitlines() if line.startswith('  changed')]
