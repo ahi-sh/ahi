@@ -280,6 +280,7 @@ fn browser_request_fixture(
         response,
         &sender,
         &cancel,
+        None,
     );
     let events = receiver.try_iter().collect();
     let received = server.join().unwrap();
@@ -1335,6 +1336,195 @@ fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes(
     let (closed, waited) = server.join().unwrap();
     assert!(closed, "the client kept the connection open after cancel");
     assert!(waited < Duration::from_secs(3), "close took {waited:?}");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Read one fixture request to its end so the server can control the
+/// response timing afterwards.
+fn read_request(stream: &std::net::TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+}
+
+/// One Chat Completions delta that closes the stream with a finish reason.
+fn delta_with_finish(text: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]})
+    )
+}
+
+/// An interactive request has no total budget: a silent prefill outlasting
+/// the per-read poll keeps waiting and completes when bytes finally arrive.
+#[test]
+fn a_silent_stream_outlasts_the_read_poll_and_completes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        // Silent four times longer than the 50 ms poll below. A total
+        // request budget of this scale would end the stream here.
+        thread::sleep(Duration::from_millis(200));
+        stream
+            .write_all(delta_with_finish("ready").as_bytes())
+            .unwrap();
+        let _ = stream.write_all(b"data: [DONE]\n\n");
+    });
+    let state = state_for(&url);
+    let mut backend = backend(&state).with_read_poll(Duration::from_millis(50));
+    let events = collect(&mut backend, request());
+    let answer = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseEvent::TextDelta(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(answer, "ready");
+    assert!(
+        events
+            .last()
+            .is_some_and(|event| matches!(event, ResponseEvent::Completed)),
+        "{events:?}"
+    );
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Cancel ends a turn whose upstream has gone silent: the poll notices the
+/// cancel without any further bytes, and the connection closes.
+#[test]
+fn cancelling_a_silent_stream_closes_the_connection_without_more_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        let delta = |text: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
+            )
+        };
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.write_all(delta("partial").as_bytes()).unwrap();
+        // The client cancels while this read is blocked, and no further
+        // bytes ever come: the poll must close the connection anyway.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let closed = matches!(stream.read(&mut byte), Ok(0) | Err(_));
+        (closed, started.elapsed())
+    });
+    let state = state_for(&url);
+    let mut backend = backend(&state).with_read_poll(Duration::from_millis(50));
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::TextDelta(text) => {
+                assert_eq!(text, "partial");
+                break;
+            }
+            ResponseEvent::ContextWindow(_) | ResponseEvent::Usage { .. } => {}
+            other => panic!("unexpected event before the first delta: {other:?}"),
+        }
+    }
+    backend.cancel();
+    let mut events = Vec::new();
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(event) => {
+                let done = matches!(
+                    event,
+                    ResponseEvent::Completed | ResponseEvent::Failed { .. }
+                );
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("worker did not stop after cancel"),
+        }
+    }
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message == "response cancelled"),
+        "{events:?}"
+    );
+    let (closed, waited) = server.join().unwrap();
+    assert!(
+        closed,
+        "the client kept the silent connection open after cancel"
+    );
+    assert!(waited < Duration::from_secs(2), "close took {waited:?}");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// An explicit turn deadline still bounds the request: a bounded turn keeps
+/// one total budget covering connection, request, and response, expiring
+/// just after the deadline even though the stream stays silent.
+#[test]
+fn a_turn_deadline_still_ends_a_silent_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        // Headers only, then silence for the whole test.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let _ = stream.read(&mut byte);
+    });
+    let state = state_for(&url);
+    let mut backend = backend(&state).with_deadline(Instant::now() + Duration::from_millis(300));
+    let started = Instant::now();
+    let events = collect(&mut backend, request());
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { kind, .. }) if matches!(kind, ErrorKind::Transport)),
+        "{events:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "the request ended before its deadline: {:?}",
+        started.elapsed()
+    );
+    server.join().unwrap();
     let _ = fs::remove_dir_all(state);
 }
 
