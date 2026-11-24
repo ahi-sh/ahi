@@ -22,6 +22,10 @@ const GLOBAL: &str = "Global options";
 #[command(
     name = "ahi",
     version,
+    disable_version_flag = true,
+    arg(clap::Arg::new("version")
+        .short('V').long("version").action(clap::ArgAction::Version)
+        .help("Print the client version. For the number alone, use `ahi version release`.")),
     about = "Offline pre-commit runner, terminal chat, and development container launcher.",
     long_about = "Offline pre-commit runner, terminal chat, and development container launcher.\n\n\
         Hooks run only from this binary or from an approved local command; nothing is fetched or \
