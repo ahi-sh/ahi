@@ -22,6 +22,11 @@ use serde_json::{json, Value};
 use super::{Event, Service, ServiceError, ServiceResult, Submitted, TurnRequest};
 use crate::session::Status;
 
+/// Compatibility of the session wire, independent of the ahi release. Bump
+/// for incompatible message or required behavior changes in either direction;
+/// use health capabilities for optional features instead.
+pub(crate) const PROTOCOL_VERSION: u64 = 1;
+
 /// The longest turn the wire accepts, the same bound `delegate` puts on a
 /// worker. Longer is a client that should split its work.
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
@@ -320,6 +325,7 @@ pub(crate) fn dispatch(
     match request.method.as_str() {
         "health" => Ok(json!({
             "version": crate::VERSION,
+            "protocol_version": PROTOCOL_VERSION,
             "store": service.store_dir().display().to_string(),
             "open_turns": service.open_turns(),
             "scoped_skill_selection": true,

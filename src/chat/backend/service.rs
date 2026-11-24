@@ -80,7 +80,7 @@ impl ServiceBackend {
     }
 
     /// Reconnect through the local socket: `ensure_running`, then a new
-    /// client, then the version check, on the next turn after a dead one.
+    /// client, then the protocol check, on the next turn after a dead one.
     pub(crate) fn with_local_reconnect(
         mut self,
         state: crate::directories::Directories,
@@ -93,8 +93,7 @@ impl ServiceBackend {
             let health = client
                 .call_within("health", json!({}), QUICK_CALL)
                 .map_err(|err| err.message)?;
-            crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)
-                .map_err(|err| err.to_string())?;
+            crate::serve::check_protocol(&health, &path).map_err(|err| err.to_string())?;
             Ok(client)
         }));
         self

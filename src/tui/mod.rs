@@ -90,7 +90,7 @@ pub fn run(
         let health = client
             .call("health", serde_json::json!({}))
             .map_err(|err| Error::new(err.message))?;
-        crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)?;
+        crate::serve::check_protocol(&health, &path)?;
         Some(client)
     } else {
         None

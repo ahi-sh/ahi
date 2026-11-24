@@ -258,7 +258,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
                 let health = client
                     .call("health", json!({}))
                     .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
-                crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)
+                crate::serve::check_protocol(&health, &path)
                     .map_err(|err| (Exit::Config, err.to_string()))?;
             }
             client

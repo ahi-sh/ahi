@@ -704,6 +704,7 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     let health: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(health["id"], 7);
     assert_eq!(health["result"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(health["result"]["protocol_version"], 1);
     assert_eq!(health["result"]["open_turns"], 0);
     let subscribed: serde_json::Value =
         serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
@@ -1154,7 +1155,7 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
             let method = request["method"].as_str().unwrap_or_default().to_string();
             let result = match method.as_str() {
                 "health" => {
-                    serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "open_turns": 0})
+                    serde_json::json!({"version": "different-release", "protocol_version": 1, "open_turns": 0})
                 }
                 "session.create" => serde_json::json!({"id": "fake-session"}),
                 "session.get" => serde_json::json!({"id": "fake-session", "tip": 0}),

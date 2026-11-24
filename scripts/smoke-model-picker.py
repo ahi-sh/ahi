@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--capture-directory", type=Path)
     focused = parser.add_mutually_exclusive_group()
     focused.add_argument("--startup-version-only", action="store_true",
-                         help="verify an incompatible local service is refused before the picker opens")
+                         help="verify the picker accepts matching service protocols and refuses incompatible or legacy daemons")
     focused.add_argument("--appearance-only", action="store_true",
                          help="stop after local appearance, selection, and model-switch checks")
     focused.add_argument("--skill-picker-only", action="store_true",
@@ -219,27 +219,36 @@ def main() -> None:
             listener.bind(str(path))
             listener.listen()
             listener.settimeout(5)
-            session = Session(state, command=("tui", "--socket", str(path)))
-            try:
-                # A liveness probe may connect and immediately close. Only a real
-                # health request needs an answer; never send the picker a key.
-                while True:
-                    conn, _ = listener.accept()
-                    with conn, conn.makefile("rb") as reader:
-                        conn.settimeout(5)
-                        line = reader.readline()
-                        if line:
-                            req = json.loads(line)
-                            assert req["method"] == "health", req
-                            conn.sendall((json.dumps({"id": req["id"], "result": {"version": "0.26.1"}}) + "\n").encode())
-                            break
-                output = session.finish(expected_code=1)
-                assert f"the server on {path} is ahi 0.26.1" in output and "ahi serve stop" in output, output
-                assert b"\x1b[?1049h" not in session.output, "entered alternate screen before refusing service"
-            finally:
-                session.close()
+            for health, compatible in [
+                ({"version": "0.27.2"}, False),
+                ({"version": "other-release", "protocol_version": 2}, False),
+                ({"version": "other-release", "protocol_version": 1}, True),
+            ]:
+                session = Session(state, command=("tui", "--socket", str(path)))
+                try:
+                    # Ignore the empty liveness probe; answer the real handshake.
+                    while True:
+                        conn, _ = listener.accept()
+                        with conn, conn.makefile("rb") as reader:
+                            conn.settimeout(5)
+                            line = reader.readline()
+                            if line:
+                                req = json.loads(line)
+                                assert req["method"] == "health", req
+                                conn.sendall((json.dumps({"id": req["id"], "result": health}) + "\n").encode())
+                                break
+                    if compatible:
+                        session.expect("Models · Enter use model")
+                        session.send("q")
+                        session.finish()
+                    else:
+                        output = session.finish(expected_code=1)
+                        assert f"the server on {path} is ahi {health['version']}" in output and "ahi serve stop" in output, output
+                        assert b"\x1b[?1049h" not in session.output, "entered alternate screen before refusing service"
+                finally:
+                    session.close()
         if args.startup_version_only:
-            print("PASS: stale local service refused before TUI startup, without input")
+            print("PASS: picker accepts a different release with matching protocol; legacy and incompatible services refused before raw mode")
             return
 
     if args.workspace_modes_only:
