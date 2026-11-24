@@ -36,8 +36,18 @@ pub(crate) use unix::version;
 #[cfg(unix)]
 pub use unix::{connect, ensure_running, run, stop, try_connect};
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum VersionField {
+    Release,
+    Protocol,
+}
+
 #[cfg(not(unix))]
-pub(crate) fn version(_state: &Directories, _socket: Option<&Path>) -> Result<u8> {
+pub(crate) fn version(
+    _state: &Directories,
+    _socket: Option<&Path>,
+    _field: Option<VersionField>,
+) -> Result<u8> {
     Err(Error::new("ahi serve is not available on this platform"))
 }
 
@@ -338,29 +348,53 @@ mod unix {
     }
 
     /// Query even an incompatible daemon: this diagnostic never submits work.
-    pub(crate) fn version(state: &Directories, socket: Option<&Path>) -> Result<u8> {
+    pub(crate) fn version(
+        state: &Directories,
+        socket: Option<&Path>,
+        field: Option<super::VersionField>,
+    ) -> Result<u8> {
+        use super::VersionField;
         let path = socket_path(state, socket);
         let mut client = crate::service::client::Client::listening(state, &path)
             .map_err(|err| Error::new(err.message))?;
         let health = client
             .call_within("health", json!({}), Duration::from_secs(3))
             .map_err(|err| Error::new(err.message))?;
-        let release = health["version"]
-            .as_str()
-            .ok_or_else(|| Error::new("service health did not report an ahi release"))?;
-        let protocol = match health.get("protocol_version") {
-            None => "not reported".to_owned(),
-            Some(value) => value
-                .as_u64()
-                .ok_or_else(|| Error::new("service health reported an invalid protocol_version"))?
-                .to_string(),
+        let release = || {
+            health["version"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()))
+                .ok_or_else(|| Error::new("service health did not report a valid ahi release"))
         };
-        println!(
-            "Client: ahi {} (service protocol {})",
-            crate::VERSION,
-            wire::PROTOCOL_VERSION
-        );
-        println!("Server: ahi {release} (service protocol {protocol})");
+        let protocol = || {
+            health
+                .get("protocol_version")
+                .map(|v| {
+                    v.as_u64().ok_or_else(|| {
+                        Error::new("service health reported an invalid protocol_version")
+                    })
+                })
+                .transpose()
+        };
+        match field {
+            Some(VersionField::Release) => println!("{}", release()?),
+            Some(VersionField::Protocol) => println!(
+                "{}",
+                protocol()?.ok_or_else(|| Error::new(
+                    "service health did not report a protocol_version"
+                ))?
+            ),
+            None => {
+                let release = release()?;
+                let protocol = protocol()?.map_or_else(|| "not reported".into(), |v| v.to_string());
+                println!(
+                    "Client: ahi {} (service protocol {})",
+                    crate::VERSION,
+                    wire::PROTOCOL_VERSION
+                );
+                println!("Server: ahi {release} (service protocol {protocol})");
+            }
+        }
         Ok(0)
     }
 

@@ -651,6 +651,15 @@ cargo build --release
 
 `ahi --version` and `ahi version` print only the client release (`ahi` followed by the root manifest version and a newline), without contacting a daemon. From a checkout, use `cargo run -- --version` or `cargo run -- version`. `scripts/smoke-version.sh` checks that line against the root manifest.
 
+For CI, select a field to get just its value and a newline on stdout:
+
+| Field | Client (no daemon needed) | Running daemon (never starts one) |
+| --- | --- | --- |
+| Release, e.g. `0.28.1` | `ahi version release` | `ahi serve version release` |
+| Session protocol, e.g. `1` | `ahi version protocol` | `ahi serve version protocol` |
+
+From the checkout, for example: `protocol=$(cargo run --quiet -- version protocol)`. Server queries accept `--socket <path>`. If the server is unreachable or doesn't report the requested field, the command exits nonzero, writes a diagnostic to stderr, and prints nothing on stdout.
+
 Deterministic Python tests live in `tests/python/`. Run them from the repository root with `uv run --no-project --python 3.11 --with-requirements tests/python/requirements.txt python -m pytest -q` (or install that requirements file in a Python 3.11+ venv and run `python -m pytest -q`). The tests need no network or model after dependency installation. PTY checks and opt-in live evaluations remain explicit `scripts/` commands; pytest never launches them by discovery.
 
 For real terminal verification on POSIX, build and run the maintained workflow against that exact executable:

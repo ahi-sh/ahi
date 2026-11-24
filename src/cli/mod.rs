@@ -65,8 +65,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print this client's release (same as --version); do not contact a server.
-    Version,
+    /// Show this client's version without contacting a server. Select a field for scripts.
+    Version(VersionArgs),
     /// Control an external Rex or hc terminal host (not ahi's TUI or session protocol).
     TerminalHost(terminal_host::Options),
     /// Operator-only: run one bounded, tool-less child turn as a worker process in a Rex session (experimental).
@@ -243,12 +243,19 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServeCommand {
-    /// Show the client and running server releases and session protocols without starting a server.
-    Version,
+    /// Compare client and running server versions. Select a field for just the server's value.
+    Version(VersionArgs),
     /// Start the server detached when none answers, then print the socket path.
     Start,
     /// Ask the running server to cancel open turns and exit.
     Stop,
+}
+
+#[derive(clap::Args)]
+struct VersionArgs {
+    /// Print only this field, without a label.
+    #[arg(value_enum)]
+    field: Option<crate::serve::VersionField>,
 }
 
 #[derive(clap::Args)]
@@ -476,8 +483,14 @@ pub fn run() -> ExitCode {
     });
     precommit::warn_deprecated(&command);
     match &command {
-        Command::Version => {
-            println!("ahi {VERSION}");
+        Command::Version(args) => {
+            match args.field {
+                None => println!("ahi {VERSION}"),
+                Some(crate::serve::VersionField::Release) => println!("{VERSION}"),
+                Some(crate::serve::VersionField::Protocol) => {
+                    println!("{}", crate::service::wire::PROTOCOL_VERSION)
+                }
+            }
             ExitCode::SUCCESS
         }
         Command::TerminalHost(options) => ExitCode::from(terminal_host::run(options)),
@@ -538,7 +551,9 @@ pub fn run() -> ExitCode {
             verbose,
             command,
         } => with_directories(&cli, |state| match command {
-            Some(ServeCommand::Version) => crate::serve::version(&state, socket.as_deref()),
+            Some(ServeCommand::Version(args)) => {
+                crate::serve::version(&state, socket.as_deref(), args.field)
+            }
             Some(ServeCommand::Stop) => crate::serve::stop(&state, socket.as_deref()),
             Some(ServeCommand::Start) => {
                 let path = crate::serve::ensure_running(&state, socket.as_deref())?;
