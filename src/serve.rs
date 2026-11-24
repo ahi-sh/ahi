@@ -32,7 +32,24 @@ pub fn socket_path(state: &Directories, explicit: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(unix)]
+pub(crate) use unix::version;
+#[cfg(unix)]
 pub use unix::{connect, ensure_running, run, stop, try_connect};
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum VersionField {
+    Release,
+    Protocol,
+}
+
+#[cfg(not(unix))]
+pub(crate) fn version(
+    _state: &Directories,
+    _socket: Option<&Path>,
+    _field: Option<VersionField>,
+) -> Result<u8> {
+    Err(Error::new("ahi serve is not available on this platform"))
+}
 
 #[cfg(not(unix))]
 pub fn ensure_running(_state: &Directories, _socket: Option<&Path>) -> Result<PathBuf> {
@@ -58,17 +75,22 @@ pub fn connect(_state: &Directories, _socket: Option<&Path>) -> Result<u8> {
     Err(Error::new("ahi connect is not available on this platform"))
 }
 
-/// The server's version must be this binary's: the wire is one process
-/// talking to itself across time, and an upgraded binary must not keep
-/// using the old server's protocol. `Ok` when they match.
-pub fn check_version(found: &str, socket: &Path) -> crate::error::Result<()> {
-    if found == crate::VERSION {
-        return Ok(());
-    }
+/// Local clients can reuse a different ahi release, but not a service that
+/// speaks an unknown protocol. Do not replace a daemon that may own live turns.
+pub(crate) fn check_protocol(
+    health: &serde_json::Value,
+    socket: &Path,
+) -> crate::error::Result<()> {
+    use crate::service::wire::PROTOCOL_VERSION;
+    let protocol = match health.get("protocol_version") {
+        Some(value) if value.as_u64() == Some(PROTOCOL_VERSION) => return Ok(()),
+        Some(value) => format!("reports protocol_version {value}"),
+        None => "does not report a protocol_version".to_owned(),
+    };
+    let release = health["version"].as_str().unwrap_or("unknown");
     Err(crate::error::Error::new(format!(
-        "the server on {} is ahi {found} and this is ahi {}; run `ahi serve stop` and start again",
-        socket.display(),
-        crate::VERSION
+        "the server on {} is ahi {release} and {protocol}; this is ahi {} and requires service protocol {PROTOCOL_VERSION}. When ready to end active turns, run `ahi serve stop` (use the same --socket if specified), then retry",
+        socket.display(), crate::VERSION
     )))
 }
 
@@ -323,6 +345,57 @@ mod unix {
             path.display(),
             log_path.display()
         )))
+    }
+
+    /// Query even an incompatible daemon: this diagnostic never submits work.
+    pub(crate) fn version(
+        state: &Directories,
+        socket: Option<&Path>,
+        field: Option<super::VersionField>,
+    ) -> Result<u8> {
+        use super::VersionField;
+        let path = socket_path(state, socket);
+        let mut client = crate::service::client::Client::listening(state, &path)
+            .map_err(|err| Error::new(err.message))?;
+        let health = client
+            .call_within("health", json!({}), Duration::from_secs(3))
+            .map_err(|err| Error::new(err.message))?;
+        let release = || {
+            health["version"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()))
+                .ok_or_else(|| Error::new("service health did not report a valid ahi release"))
+        };
+        let protocol = || {
+            health
+                .get("protocol_version")
+                .map(|v| {
+                    v.as_u64().ok_or_else(|| {
+                        Error::new("service health reported an invalid protocol_version")
+                    })
+                })
+                .transpose()
+        };
+        match field {
+            Some(VersionField::Release) => println!("{}", release()?),
+            Some(VersionField::Protocol) => println!(
+                "{}",
+                protocol()?.ok_or_else(|| Error::new(
+                    "service health did not report a protocol_version"
+                ))?
+            ),
+            None => {
+                let release = release()?;
+                let protocol = protocol()?.map_or_else(|| "not reported".into(), |v| v.to_string());
+                println!(
+                    "Client: ahi {} (service protocol {})",
+                    crate::VERSION,
+                    wire::PROTOCOL_VERSION
+                );
+                println!("Server: ahi {release} (service protocol {protocol})");
+            }
+        }
+        Ok(0)
     }
 
     /// `ahi serve stop`: ask the server on the socket to exit.
@@ -599,14 +672,21 @@ mod unix {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_version_check_names_both_sides_and_the_remedy() {
-        let socket = std::path::Path::new("/run/ahi/serve.sock");
-        assert!(super::check_version(crate::VERSION, socket).is_ok());
-        let err = super::check_version("0.1.0", socket)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("is ahi 0.1.0"), "{err}");
-        assert!(err.contains(crate::VERSION), "{err}");
-        assert!(err.contains("ahi serve stop"), "{err}");
+    fn matching_release_does_not_override_an_unknown_protocol() {
+        use serde_json::json;
+        let socket = std::path::Path::new("/run/ahi/custom.sock");
+        for health in [
+            json!({"version": crate::VERSION}),
+            json!({"version": crate::VERSION, "protocol_version": 2}),
+            json!({"version": crate::VERSION, "protocol_version": "1"}),
+            json!({"version": crate::VERSION, "protocol_version": null}),
+        ] {
+            let err = super::check_protocol(&health, socket)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("/run/ahi/custom.sock"), "{err}");
+            assert!(err.contains("requires service protocol 1"), "{err}");
+            assert!(err.contains("ahi serve stop"), "{err}");
+        }
     }
 }

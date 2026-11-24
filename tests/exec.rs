@@ -559,6 +559,48 @@ fn a_timeout_closes_the_turn_as_timeout_with_exit_6_and_check_validates() {
 
 #[cfg(unix)]
 #[test]
+fn serve_version_fields_report_the_peer_not_the_client() {
+    use serde_json::json;
+    use std::os::unix::net::UnixListener;
+    let dir = fixture("http://127.0.0.1:1/");
+    let socket = dir.join("v.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let responder = thread::spawn(move || {
+        for health in [
+            json!({"version":"0.27.2"}),
+            json!({"version":"0.27.2"}),
+            json!({"version":"0.99.0", "protocol_version":42}),
+        ] {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&conn).read_line(&mut line).unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["method"], "health");
+            writeln!(conn, "{}", json!({"id":req["id"], "result":health})).unwrap();
+        }
+    });
+    for (field, status, expected) in [
+        ("release", 0, "0.27.2\n"),
+        ("protocol", 1, ""),
+        ("protocol", 0, "42\n"),
+    ] {
+        let output = ahi(&dir)
+            .args(["serve", "version", field, "--socket"])
+            .arg(&socket)
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), status, "{}", err(&output));
+        assert_eq!(out(&output), expected);
+        if status != 0 {
+            assert!(err(&output).contains("did not report a protocol_version"));
+        }
+    }
+    responder.join().unwrap();
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     let (url, gateway) = loopback(vec![stream(STREAM)]);
     let dir = fixture(&url);
@@ -582,6 +624,15 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
             0o600
         );
     }
+
+    let version = ahi(&dir)
+        .args(["serve", "version", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(code(&version), 0, "{}", err(&version));
+    let release = env!("CARGO_PKG_VERSION");
+    assert_eq!(out(&version), format!("Client: ahi {release} (service protocol 1)\nServer: ahi {release} (service protocol 1)\n"));
 
     // A second server on the same socket is refused.
     let second = ahi(&dir)
@@ -704,6 +755,7 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     let health: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(health["id"], 7);
     assert_eq!(health["result"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(health["result"]["protocol_version"], 1);
     assert_eq!(health["result"]["open_turns"], 0);
     let subscribed: serde_json::Value =
         serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
@@ -1154,7 +1206,7 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
             let method = request["method"].as_str().unwrap_or_default().to_string();
             let result = match method.as_str() {
                 "health" => {
-                    serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "open_turns": 0})
+                    serde_json::json!({"version": "different-release", "protocol_version": 1, "open_turns": 0})
                 }
                 "session.create" => serde_json::json!({"id": "fake-session"}),
                 "session.get" => serde_json::json!({"id": "fake-session", "tip": 0}),

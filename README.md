@@ -168,7 +168,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi --session <id>` / `ahi tui [--refresh] [--session <id>] [--standalone] [--socket <path>]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; turns run through `ahi serve`, started when needed, and every chat is recorded as a session. |
 | [`ahi session list\|show\|export\|import`](#ahi-session) | List recorded sessions, print one, copy one out of the store, or bring one in. |
 | [`ahi exec --model <gateway/model> (-p <text> \| --prompt-file <path> \| stdin)`](#ahi-exec) | One model turn from the command line, with tools under policy, a result document, and exit codes; the worker a coordinator runs over ssh. |
-| [`ahi serve [start\|stop]`, `ahi connect`](#ahi-serve) | Serve ahi's structured session protocol on a Unix socket; bridge stdio to that socket for `ssh host ahi connect`; `--via <command>` attaches a chat or a turn to a server elsewhere. |
+| [`ahi serve [start\|stop\|version]`, `ahi connect`](#ahi-serve) | Serve ahi's structured session protocol on a Unix socket; bridge stdio to that socket for `ssh host ahi connect`; `--via <command>` attaches a chat or a turn to a server elsewhere. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
@@ -413,7 +413,9 @@ Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the
 
 #### The chat and the server
 
-`ahi tui` checks the local session service version before opening the interactive model picker or a resumed chat. If the versions differ, it prints the error in the calling terminal and exits without stopping the server. When no `ahi serve` answers on the socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`; `--socket <path>` names another), the chat starts one detached, with its output in `<state>/serve.log`, waits up to two seconds for it to answer, and attaches. Two chats started together end up on one server. The server outlives the chat and never idles out, so the next chat, `ahi exec`, or another ahi-protocol client can find it running; `ahi serve stop` ends it. In this mode the server records the session and the screen is a client: the same transcript, tools, approval dialog, `/model`, `/thinking`, and `--resume`, with the approval answered over the socket. `--standalone` runs the engine inside the chat as before and records the session itself; `--no-history` applies there. On Windows the chat is always standalone.
+`ahi tui` checks the local service protocol before opening the interactive model picker or a resumed chat. `health` reports both the ahi release (`version`) and the session protocol (`protocol_version`, currently `1`). A newer client can reuse an older daemon that speaks the same protocol, including on reconnect and for local `ahi exec` turns. Optional features still require their advertised capabilities. The daemon continues running its original code until you restart it. To compare the client with the running daemon, use `ahi serve version` (from a checkout: `cargo run -- serve version`). It accepts `--socket <path>`, shows `not reported` for legacy daemons, and exits with an error if none answers; it never starts or stops one.
+
+If a daemon predates `protocol_version` (including `v0.28.1`) or advertises an incompatible protocol, the client reports the mismatch without stopping it. When active turns are finished, run `ahi serve stop` (with the same `--socket` if applicable), then `ahi tui`. The first upgrade from an unversioned daemon needs this restart once; ordinary compatible upgrades do not. When no `ahi serve` answers on the socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`; `--socket <path>` names another), the chat starts one detached, with its output in `<state>/serve.log`, waits up to two seconds for it to answer, and attaches. Two chats started together end up on one server. The server outlives the chat and never idles out, so the next chat, `ahi exec`, or another ahi-protocol client can find it running; `ahi serve stop` ends it. In this mode the server records the session and the screen is a client: the same transcript, tools, approval dialog, `/model`, `/thinking`, and `--resume`, with the approval answered over the socket. `--standalone` runs the engine inside the chat as before and records the session itself; `--no-history` applies there. On Windows the chat is always standalone.
 
 **Developing the TUI:** Run `just tui` from the checkout (or use
 `cargo run -- tui --standalone` without `just`). This runs the checkout's engine
@@ -647,7 +649,16 @@ cargo build --release
 ./target/release/ahi --version
 ```
 
-`ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
+`ahi --version` and `ahi version` print only the client release (`ahi` followed by the root manifest version and a newline), without contacting a daemon. From a checkout, use `cargo run -- --version` or `cargo run -- version`. `scripts/smoke-version.sh` checks that line against the root manifest.
+
+For CI, select a field to get just its value and a newline on stdout:
+
+| Field | Client (no daemon needed) | Running daemon (never starts one) |
+| --- | --- | --- |
+| Release, e.g. `0.28.1` | `ahi version release` | `ahi serve version release` |
+| Session protocol, e.g. `1` | `ahi version protocol` | `ahi serve version protocol` |
+
+From the checkout, for example: `protocol=$(cargo run --quiet -- version protocol)`. Server queries accept `--socket <path>`. If the server is unreachable or doesn't report the requested field, the command exits nonzero, writes a diagnostic to stderr, and prints nothing on stdout.
 
 Deterministic Python tests live in `tests/python/`. Run them from the repository root with `uv run --no-project --python 3.11 --with-requirements tests/python/requirements.txt python -m pytest -q` (or install that requirements file in a Python 3.11+ venv and run `python -m pytest -q`). The tests need no network or model after dependency installation. PTY checks and opt-in live evaluations remain explicit `scripts/` commands; pytest never launches them by discovery.
 
