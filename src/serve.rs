@@ -32,7 +32,14 @@ pub fn socket_path(state: &Directories, explicit: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(unix)]
+pub(crate) use unix::version;
+#[cfg(unix)]
 pub use unix::{connect, ensure_running, run, stop, try_connect};
+
+#[cfg(not(unix))]
+pub(crate) fn version(_state: &Directories, _socket: Option<&Path>) -> Result<u8> {
+    Err(Error::new("ahi serve is not available on this platform"))
+}
 
 #[cfg(not(unix))]
 pub fn ensure_running(_state: &Directories, _socket: Option<&Path>) -> Result<PathBuf> {
@@ -328,6 +335,33 @@ mod unix {
             path.display(),
             log_path.display()
         )))
+    }
+
+    /// Query even an incompatible daemon: this diagnostic never submits work.
+    pub(crate) fn version(state: &Directories, socket: Option<&Path>) -> Result<u8> {
+        let path = socket_path(state, socket);
+        let mut client = crate::service::client::Client::listening(state, &path)
+            .map_err(|err| Error::new(err.message))?;
+        let health = client
+            .call_within("health", json!({}), Duration::from_secs(3))
+            .map_err(|err| Error::new(err.message))?;
+        let release = health["version"]
+            .as_str()
+            .ok_or_else(|| Error::new("service health did not report an ahi release"))?;
+        let protocol = match health.get("protocol_version") {
+            None => "not reported".to_owned(),
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| Error::new("service health reported an invalid protocol_version"))?
+                .to_string(),
+        };
+        println!(
+            "Client: ahi {} (service protocol {})",
+            crate::VERSION,
+            wire::PROTOCOL_VERSION
+        );
+        println!("Server: ahi {release} (service protocol {protocol})");
+        Ok(0)
     }
 
     /// `ahi serve stop`: ask the server on the socket to exit.

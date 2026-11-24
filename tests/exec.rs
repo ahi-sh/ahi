@@ -583,6 +583,15 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
         );
     }
 
+    let version = ahi(&dir)
+        .args(["serve", "version", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(code(&version), 0, "{}", err(&version));
+    let release = env!("CARGO_PKG_VERSION");
+    assert_eq!(out(&version), format!("Client: ahi {release} (service protocol 1)\nServer: ahi {release} (service protocol 1)\n"));
+
     // A second server on the same socket is refused.
     let second = ahi(&dir)
         .args(["serve", "--socket", socket.to_str().unwrap()])

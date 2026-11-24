@@ -65,6 +65,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print this client's release (same as --version); do not contact a server.
+    Version,
     /// Control an external Rex or hc terminal host (not ahi's TUI or session protocol).
     TerminalHost(terminal_host::Options),
     /// Operator-only: run one bounded, tool-less child turn as a worker process in a Rex session (experimental).
@@ -241,6 +243,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServeCommand {
+    /// Show the client and running server releases and session protocols without starting a server.
+    Version,
     /// Start the server detached when none answers, then print the socket path.
     Start,
     /// Ask the running server to cancel open turns and exit.
@@ -472,6 +476,10 @@ pub fn run() -> ExitCode {
     });
     precommit::warn_deprecated(&command);
     match &command {
+        Command::Version => {
+            println!("ahi {VERSION}");
+            ExitCode::SUCCESS
+        }
         Command::TerminalHost(options) => ExitCode::from(terminal_host::run(options)),
         Command::Delegate(options) => match directories(&cli) {
             Ok(dirs) => ExitCode::from(delegate::run(&dirs, options)),
@@ -530,6 +538,7 @@ pub fn run() -> ExitCode {
             verbose,
             command,
         } => with_directories(&cli, |state| match command {
+            Some(ServeCommand::Version) => crate::serve::version(&state, socket.as_deref()),
             Some(ServeCommand::Stop) => crate::serve::stop(&state, socket.as_deref()),
             Some(ServeCommand::Start) => {
                 let path = crate::serve::ensure_running(&state, socket.as_deref())?;

@@ -259,10 +259,14 @@ fn expect_golden(name: &str, actual: &[u8]) {
 
 #[test]
 fn version_matches_package_exactly() {
-    let output = ahi().arg("--version").output().unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(text, format!("ahi {}\n", env!("CARGO_PKG_VERSION")));
+    for arg in ["--version", "version"] {
+        let output = ahi().arg(arg).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("ahi {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
 
 #[test]
