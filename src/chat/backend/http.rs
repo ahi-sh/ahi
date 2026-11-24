@@ -26,6 +26,16 @@ use crate::tool_policy::grants::SessionGrants;
 /// server may have received is never sent twice.
 const CONNECT_ATTEMPTS: u8 = 3;
 const CONNECT_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
+/// Bounded connection setup: DNS, proxy negotiation, and the TLS handshake.
+/// A model request itself has no total deadline; only reaching the gateway
+/// is bounded.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one transport read may sit silent before the reader rechecks
+/// cancellation. A poll expiry is not a failure: interactive requests have
+/// no total budget, so legitimate silent prefill or reasoning waits as long
+/// as the provider needs. The poll is what lets a cancel close a silent
+/// connection instead of parking on it until the peer speaks.
+const READ_POLL: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +63,9 @@ pub(crate) struct HttpBackend {
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
     agent: ureq::Agent,
+    /// Per-read poll of the interactive agent; tests shrink it to exercise
+    /// silent-stream timing at CI speed.
+    read_poll: Duration,
     /// The active turn's cancel flag; `submit` replaces it, `cancel` sets it.
     cancel: Arc<AtomicBool>,
     /// The active turn's worker, unparked by `cancel` so a backoff wait ends at once.
@@ -72,14 +85,19 @@ impl HttpBackend {
             frozen: None,
             grants: SessionGrants::default(),
             scratch: Default::default(),
-            agent: ureq::Agent::config_builder()
-                .max_redirects(0)
-                .timeout_global(Some(Duration::from_secs(120)))
-                .build()
-                .new_agent(),
+            read_poll: READ_POLL,
+            agent: model_agent(None, READ_POLL),
             cancel: Arc::new(AtomicBool::new(false)),
             worker: None,
         }
+    }
+
+    /// Shrink the per-read poll for controlled-timing tests.
+    #[cfg(test)]
+    pub(crate) fn with_read_poll(mut self, read_poll: Duration) -> Self {
+        self.read_poll = read_poll;
+        self.agent = model_agent(self.deadline, read_poll);
+        self
     }
 
     /// Read tool policy from `path` instead of the workspace's
@@ -131,21 +149,36 @@ impl HttpBackend {
 
     /// Bound the turn: no tool call starts past `deadline`, a command's own
     /// timeout is clamped to what remains, and a request that has not
-    /// answered by then fails soon after instead of waiting out the usual
-    /// request timeout. The caller still cancels at the deadline; this keeps
-    /// a call, or a blocked request, from outliving it by much.
+    /// answered by then fails soon after instead of waiting out the turn.
+    /// The caller still cancels at the deadline; this keeps a call, or a
+    /// blocked request, from outliving it by much. The whole remaining time
+    /// is available to one request: a long assignment is not silently cut
+    /// down to an arbitrary request cap.
     pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        self.agent = ureq::Agent::config_builder()
-            .max_redirects(0)
-            .timeout_global(Some(
-                (remaining + Duration::from_secs(1)).min(Duration::from_secs(120)),
-            ))
-            .build()
-            .new_agent();
+        self.agent = model_agent(self.deadline, self.read_poll);
         self
     }
+}
+
+/// The shared client for model requests. An unbounded turn has no total
+/// request budget: generation may take as long as the provider needs, with
+/// only connection setup bounded and a per-read poll keeping cancellation
+/// responsive while the stream is silent. A bounded turn keeps one total
+/// budget covering connection, request, and response, so it still fails
+/// soon after its deadline rather than hanging on a silent peer.
+fn model_agent(deadline: Option<Instant>, read_poll: Duration) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder().max_redirects(0);
+    config = match deadline {
+        Some(deadline) => config.timeout_global(Some(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(1),
+        )),
+        None => config
+            .timeout_resolve(Some(CONNECT_TIMEOUT))
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_per_read(Some(read_poll)),
+    };
+    config.build().new_agent()
 }
 
 impl CompletionBackend for HttpBackend {
@@ -219,30 +252,66 @@ impl CompletionBackend for HttpBackend {
     }
 }
 
-/// The response body, read until the turn is cancelled. A read blocked on a
-/// silent server returns when its next bytes arrive or the request deadline
-/// passes; the error then ends the stream and dropping the reader closes the
-/// connection, which is the only cancellation signal these APIs accept.
+/// The response body, read until the turn is cancelled. Each transport read
+/// is polled: a silent stretch outlasts the per-read poll without failing,
+/// because an interactive request has no total budget and a silent prefill
+/// is legitimate. The poll is what makes a cancel, or a turn deadline, land
+/// while the upstream is silent; the stream then errors and dropping the
+/// reader closes the connection, which is the only cancellation signal
+/// these APIs accept.
 struct CancelReader<R> {
     inner: R,
     cancel: Arc<AtomicBool>,
+    /// The turn deadline, if any; a poll expiry past it ends the stream.
+    deadline: Option<Instant>,
 }
 
 impl<R: Read> Read for CancelReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let aborted =
             || std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "response cancelled");
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(aborted());
+        loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(aborted());
+            }
+            match self.inner.read(buf) {
+                // A per-read poll expiry on a silent upstream, or an expired
+                // bounded-turn budget. Neither is a failure on its own: keep
+                // waiting unless the turn was cancelled or, when it has a
+                // deadline, that deadline has passed.
+                Err(error) if poll_timeout(&error) => {
+                    if self
+                        .deadline
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                    {
+                        return Err(error);
+                    }
+                }
+                read => {
+                    let read = read?;
+                    // Bytes that arrive after the cancel are not parsed:
+                    // nothing from the abandoned turn reaches the transcript.
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(aborted());
+                    }
+                    return Ok(read);
+                }
+            }
         }
-        let read = self.inner.read(buf)?;
-        // Bytes that arrive after the cancel are not parsed: nothing from the
-        // abandoned turn reaches the transcript.
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(aborted());
-        }
-        Ok(read)
     }
+}
+
+/// A transport read that timed out, either surfaced as a plain io timeout or
+/// as a ureq timeout wrapped in an io error; per-read polls and expired
+/// phase budgets both arrive this way.
+fn poll_timeout(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return true;
+    }
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .is_some_and(|error| matches!(error, ureq::Error::Timeout(_)))
 }
 
 fn cancelled(cancel: &AtomicBool) -> Result<()> {
@@ -348,7 +417,14 @@ fn complete(
             let body = protocol::request_body(connection.protocol, &context)?;
             cancelled(cancel)?;
             let response = send(agent, state, &connection, &body, sender, cancel, deadline)?;
-            let outcome = decode(connection.protocol, &context, response, sender, cancel)?;
+            let outcome = decode(
+                connection.protocol,
+                &context,
+                response,
+                sender,
+                cancel,
+                deadline,
+            )?;
             match outcome {
                 StreamOutcome::Stopped => return Ok(()),
                 StreamOutcome::ToolCalls {
@@ -480,6 +556,17 @@ fn send(
                         )?;
                         wait(backoff, cancel)?;
                     }
+                    // A silent gateway through connection setup or the wait
+                    // for response headers. The request may already have been
+                    // processed, so it is not retried.
+                    Err(ureq::Error::Timeout(timeout)) => {
+                        return Err(Error::transport(match timeout {
+                            ureq::Timeout::PerRead => {
+                                "the gateway did not start responding in time; the request may still have been processed"
+                            }
+                            _ => "model request network, TLS, or timeout error",
+                        }))
+                    }
                     // Transport errors can contain URLs, credentials, or upstream text.
                     Err(_) => {
                         return Err(Error::transport(
@@ -542,6 +629,7 @@ fn decode(
     response: ureq::http::Response<ureq::Body>,
     sender: &Sender<ResponseEvent>,
     cancel: &Arc<AtomicBool>,
+    deadline: Option<Instant>,
 ) -> Result<StreamOutcome> {
     let status = response.status().as_u16();
     let media_type = media_type_category(
@@ -561,6 +649,7 @@ fn decode(
     let reader = CancelReader {
         inner: response.into_body().into_reader(),
         cancel: Arc::clone(cancel),
+        deadline,
     };
     protocol::read_stream(protocol, reader, sender, context).map_err(|error| {
         // Content-Type is not an acceptance gate for framing-validated
