@@ -559,7 +559,9 @@ pub(super) fn prepare_scoped(
     }
     let raw: RawArguments =
         serde_json::from_value(Value::Object(call.arguments.clone())).map_err(|_| INVALID)?;
-    let path = match (tool, raw.path) {
+    // The empty-placeholder filter below rebuilds `raw`, so the path is
+    // matched on a copy; the clone is one short string per tool call.
+    let path = match (tool, raw.path.clone()) {
         (READ_FILE, None) => return Err(INVALID),
         (_, None) => String::new(),
         (_, Some(path))
@@ -570,6 +572,16 @@ pub(super) fn prepare_scoped(
         }
         (_, Some(path)) => normalize_relative_path(&path)
             .ok_or("path must be relative to the working directory, without `..`")?,
+    };
+    // Models sometimes fill every optional schema field with empty
+    // placeholders, as run_command already tolerates. An empty string
+    // selects nothing: no glob filter, no skill reference file. The
+    // fields are filtered before the per-tool key checks so a stray
+    // empty field cannot reject an unrelated call.
+    let raw = RawArguments {
+        file: raw.file.filter(|value| !value.is_empty()),
+        glob: raw.glob.filter(|value| !value.is_empty()),
+        ..raw
     };
     let small = |value: Option<u64>| -> Result<Option<usize>, &'static str> {
         match value {
@@ -626,14 +638,17 @@ pub(super) fn prepare_scoped(
             if !crate::skills::valid_id(&name) {
                 return Err("name must be repo/<skill-name> or operator/<skill-name>");
             }
-            if let Some(file) = &raw.file {
+            // Naming the instructions file is the whole skill, not a
+            // supporting reference; the record then shows what loaded.
+            let file = raw.file.filter(|file| file != "SKILL.md");
+            if let Some(file) = &file {
                 if !crate::skills::valid_reference(file) {
                     return Err("file must be a relative path inside the skill directory, without '.' or '..'");
                 }
             }
             Arguments::Skill {
                 name: vec![name],
-                file: raw.file,
+                file,
             }
         }
         DELEGATE => {
@@ -1110,6 +1125,41 @@ mod tests {
                 ignore_case: false,
                 glob: None,
                 limit: 100
+            }
+        );
+        // Empty placeholder strings select nothing, as run_command already
+        // tolerates; a stray empty optional field never rejects a call.
+        assert_eq!(
+            ok(SEARCH_FILES, json!({"pattern": "fn main", "glob": ""})).arguments,
+            Arguments::Search {
+                pattern: "fn main".into(),
+                literal: false,
+                ignore_case: false,
+                glob: None,
+                limit: 100
+            }
+        );
+        assert_eq!(
+            ok(LIST_DIR, json!({"glob": "", "file": ""})).arguments,
+            Arguments::List
+        );
+        assert_eq!(
+            ok(LOAD_SKILL, json!({"name": "repo/review", "file": ""})).arguments,
+            Arguments::Skill {
+                name: vec!["repo/review".into()],
+                file: None
+            }
+        );
+        // Naming the instructions file is the whole skill, not a reference.
+        assert_eq!(
+            ok(
+                LOAD_SKILL,
+                json!({"name": "repo/review", "file": "SKILL.md"})
+            )
+            .arguments,
+            Arguments::Skill {
+                name: vec!["repo/review".into()],
+                file: None
             }
         );
         for (name, args, expected) in [
