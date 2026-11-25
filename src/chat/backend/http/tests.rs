@@ -191,6 +191,47 @@ fn bounded_gateway_request_survives_two_minutes_without_a_first_byte() {
     check_slow_prefill(Duration::from_secs(126), None);
 }
 
+#[test]
+fn interactive_headers_may_arrive_after_multiple_health_ticks() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state = state_for(&format!("http://{}/v1", listener.local_addr().unwrap()));
+    let server = thread::spawn(move || {
+        serve_after(&listener, &text_stream("ready"), Duration::from_millis(150))
+    });
+    let events = collect(
+        &mut backend(&state).with_read_poll(Duration::from_millis(10)),
+        request(),
+    );
+    assert!(events.contains(&ResponseEvent::TextDelta("ready".into())));
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    server.join().unwrap();
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn cancelling_before_headers_closes_the_pending_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let state = state_for(&format!("http://{}/v1", listener.local_addr().unwrap()));
+    let mut backend = backend(&state).with_read_poll(Duration::from_millis(20));
+    let events = backend.submit(request());
+    let (mut socket, _) = listener.accept().unwrap();
+    read_request(&socket);
+    backend.cancel();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+    while let Ok(event) = events.recv_timeout(Duration::from_secs(2)) {
+        if let ResponseEvent::Failed { message, .. } = event {
+            assert_eq!(message, "response cancelled");
+            fs::remove_dir_all(state).unwrap();
+            return;
+        }
+    }
+    panic!("no cancellation event");
+}
+
 fn check_slow_prefill(delay: Duration, agent_timeout: Option<Duration>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -200,10 +241,7 @@ fn check_slow_prefill(delay: Duration, agent_timeout: Option<Duration>) {
     let mut backend = backend(&state).with_deadline(Instant::now() + budget);
     if let Some(short) = agent_timeout {
         // Exercise the same per-request override at CI speed.
-        backend.agent = ureq::Agent::config_builder()
-            .timeout_global(Some(short))
-            .build()
-            .new_agent();
+        backend.agent_timeout = Some(short);
     }
     let events = backend.submit(request());
     let mut answer = String::new();
@@ -280,7 +318,6 @@ fn browser_request_fixture(
         response,
         &sender,
         &cancel,
-        None,
     );
     let events = receiver.try_iter().collect();
     let received = server.join().unwrap();

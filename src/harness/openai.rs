@@ -57,8 +57,9 @@ pub(crate) fn inference_response(
     state: &Path,
     body: &[u8],
     client: &ureq::Agent,
+    reconnect: impl FnMut() -> Result<()>,
 ) -> Result<ureq::http::Response<ureq::Body>> {
-    inference_response_at(state, body, INFERENCE_URL, OPENAI_TOKEN, client)
+    inference_response_at(state, body, INFERENCE_URL, OPENAI_TOKEN, client, reconnect)
 }
 
 #[cfg(test)]
@@ -73,7 +74,9 @@ pub(crate) fn fixture_inference_response(
         .timeout_global(Some(Duration::from_secs(120)))
         .build()
         .new_agent();
-    inference_response_at(state, body, inference_url, token_url, &client)
+    inference_response_at(state, body, inference_url, token_url, &client, || {
+        Err(Error::transport("fixture endpoint unreachable"))
+    })
 }
 
 fn inference_response_at(
@@ -82,9 +85,10 @@ fn inference_response_at(
     inference_url: &str,
     token_url: &str,
     client: &ureq::Agent,
+    mut reconnect: impl FnMut() -> Result<()>,
 ) -> Result<ureq::http::Response<ureq::Body>> {
-    authenticated(state, token_url, |token| {
-        match client
+    authenticated(state, token_url, |token| loop {
+        return match client
             .post(inference_url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
@@ -92,19 +96,73 @@ fn inference_response_at(
             .send(body)
         {
             Ok(response) if response.status().as_u16() == 200 => Ok(response),
-            Ok(response) => Err(FetchError::Other(status_error(
-                "inference",
-                response.status().as_u16(),
-            ))),
-            Err(ureq::Error::StatusCode(401)) => Err(FetchError::Unauthorized),
-            Err(ureq::Error::StatusCode(status)) => {
-                Err(FetchError::Other(status_error("inference", status)))
+            Ok(response) => Err(inference_status_error(response.status().as_u16())),
+            Err(ureq::Error::StatusCode(status)) => Err(inference_status_error(status)),
+            Err(error) if crate::harness::connection_not_established(&error) => {
+                reconnect().map_err(FetchError::Other)?;
+                continue;
             }
-            Err(_) => Err(FetchError::Other(Error::transport(
-                "OpenAI inference network, TLS, or timeout error; generation was not retried",
-            ))),
-        }
+            Err(error) => Err(FetchError::Other(inference_transport_error(&error))),
+        };
     })
+}
+
+fn inference_status_error(status: u16) -> FetchError {
+    let detail = match status {
+        401 => return FetchError::Unauthorized,
+        403 => return FetchError::Other(status_error("inference", status)),
+        300..=399 => "redirects are not followed",
+        429 => "request limited (rate or quota); check OpenAI usage limits",
+        502..=504 => "service unavailable or upstream gateway error",
+        500..=599 => "server error",
+        _ => "unexpected response status",
+    };
+    FetchError::Other(Error::transport(format!(
+        "OpenAI inference HTTP {status}: {detail}; generation was not retried",
+    )))
+}
+
+fn inference_transport_error(error: &ureq::Error) -> Error {
+    use std::io::ErrorKind;
+    use ureq::{Error as HttpError, Timeout};
+
+    // Never format the underlying error: it can contain URLs, credentials,
+    // proxy details, or upstream text. PerRead is the read poll, not an
+    // explicit server timeout; it can fire before the headers arrive.
+    let detail = match error {
+        HttpError::HostNotFound => "could not resolve the host (DNS)",
+        HttpError::ConnectionFailed => "could not establish a connection",
+        HttpError::Timeout(Timeout::Resolve) => "timed out resolving the host (DNS)",
+        HttpError::Timeout(Timeout::Connect) => "timed out during connection setup (TCP, proxy, or TLS)",
+        HttpError::Timeout(Timeout::RecvResponse | Timeout::PerRead) => {
+            "timed out on a read before response headers were received; the request may still have been processed"
+        }
+        HttpError::Timeout(Timeout::SendRequest | Timeout::SendBody | Timeout::PerWrite) => {
+            "timed out while sending the request; delivery is uncertain"
+        }
+        HttpError::Timeout(_) => {
+            "request time limit expired before response headers were received; delivery is uncertain"
+        }
+        HttpError::Tls(_) | HttpError::Rustls(_) | HttpError::TlsRequired | HttpError::Pem(_) => {
+            "TLS error; check certificate trust and any TLS-inspecting proxy"
+        }
+        HttpError::ConnectProxyFailed(_) | HttpError::InvalidProxyUrl => "proxy connection or configuration failed",
+        HttpError::TooManyRedirects | HttpError::RedirectFailed => "redirects are not followed",
+        HttpError::Protocol(_) | HttpError::LargeResponseHeader(..) => "invalid HTTP response headers",
+        HttpError::Io(io) => match io.kind() {
+            ErrorKind::ConnectionRefused => "connection refused",
+            ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "network or host unreachable",
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe | ErrorKind::UnexpectedEof => {
+                "connection closed before response headers were received; delivery is uncertain"
+            }
+            ErrorKind::TimedOut => "network I/O timed out before response headers were received; delivery is uncertain",
+            _ => "network I/O failed before response headers were received; delivery is uncertain",
+        },
+        _ => "request failed before response headers were received; delivery is uncertain",
+    };
+    Error::transport(format!(
+        "OpenAI inference: {detail}; generation was not retried"
+    ))
 }
 
 fn authenticated<T>(
@@ -785,7 +843,14 @@ mod tests {
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let handle = std::thread::spawn(move || {
+        (url, serve_replies(listener, replies))
+    }
+
+    fn serve_replies(
+        listener: TcpListener,
+        replies: Vec<(&'static str, String)>,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        std::thread::spawn(move || {
             let mut requests = Vec::new();
             for (status, body) in replies {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -817,8 +882,7 @@ mod tests {
                 let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\nLocation: http://127.0.0.1:1/stolen\r\n\r\n{body}", body.len());
             }
             requests
-        });
-        (url, handle)
+        })
     }
 
     #[test]
@@ -1276,6 +1340,99 @@ mod tests {
             );
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn inference_reports_rate_limits_and_unavailability_without_exposing_response_bodies() {
+        let dir = credential_dir();
+        for (reply, expected) in [
+            ("429 Too Many Requests", "OpenAI inference HTTP 429: request limited (rate or quota); check OpenAI usage limits; generation was not retried"),
+            ("503 Service Unavailable", "OpenAI inference HTTP 503: service unavailable or upstream gateway error; generation was not retried"),
+            ("400 Bad Request", "OpenAI inference HTTP 400: unexpected response status; generation was not retried"),
+        ] {
+            let (url, requests) = server(vec![(reply, "private upstream text".into())]);
+            let error = fixture_inference_response(&dir, b"{}", &url, "http://127.0.0.1:1/token")
+                .err()
+                .unwrap();
+            assert_eq!(error.kind(), crate::error::ErrorKind::Transport);
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(requests.join().unwrap().len(), 1);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refused_responses_connection_recovers_with_the_same_tool_result() {
+        let dir = credential_dir();
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let url = format!("http://{addr}/v1/responses");
+        let client = ureq::Agent::config_builder()
+            .proxy(None)
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build()
+            .new_agent();
+        let body = r#"{"input":[{"type":"function_call_output","call_id":"once","output":"marker written"}]}"#;
+        let mut served = None;
+        inference_response_at(
+            &dir,
+            body.as_bytes(),
+            &url,
+            "http://127.0.0.1:1/token",
+            &client,
+            || {
+                assert!(served.is_none(), "unexpected second reconnect");
+                served = Some(serve_replies(
+                    TcpListener::bind(addr).unwrap(),
+                    vec![("200 OK", String::new())],
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let requests = served.unwrap().join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/responses HTTP/1.1"));
+        assert!(requests[0].ends_with(body));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn inference_read_poll_before_headers_reports_uncertain_delivery_without_replay() {
+        let dir = credential_dir();
+        // The listening socket accepts TCP connections into its backlog, but
+        // sends no response headers. No sleeps or external endpoints needed.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/responses", listener.local_addr().unwrap());
+        let client = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .proxy(None)
+            .timeout_per_read(Some(Duration::from_millis(50)))
+            .build()
+            .new_agent();
+        let error = inference_response_at(&dir, br#"{"input":[{"type":"function_call_output","call_id":"write-1","output":"marker written"}]}"#, &url, "http://127.0.0.1:1/token", &client, || panic!("must not reconnect after sending the tool result"))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Transport);
+        assert_eq!(error.to_string(), "OpenAI inference: timed out on a read before response headers were received; the request may still have been processed; generation was not retried");
+
+        listener.set_nonblocking(true).unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = String::new();
+        socket.read_to_string(&mut request).unwrap();
+        assert!(request.starts_with("POST /responses HTTP/1.1\r\n"));
+        assert!(request.ends_with(r#"{"input":[{"type":"function_call_output","call_id":"write-1","output":"marker written"}]}"#));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
