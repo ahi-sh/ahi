@@ -214,15 +214,15 @@ pub(crate) fn script_path(skill: &Skill, script: &str) -> Result<PathBuf, &'stat
         .map_err(|_| "the skill script is not a regular, non-symlink file")
 }
 
-/// Read a skill's body (`file` `None`) or a supporting relative file, with the
-/// same checks as at enumeration.
+/// Read a skill's body (`file` `None` or the instructions file itself) or a
+/// supporting relative file, with the same checks as at enumeration.
 pub(crate) fn read(skill: &Skill, file: Option<&str>) -> Result<String, String> {
-    let name = file.unwrap_or(SKILL_FILE);
-    if file == Some(SKILL_FILE) {
-        return Err("omit file to load the skill's instructions".into());
-    }
-    let text = files::read(&skill.dir, name)?;
-    match file {
+    // Models sometimes name the instructions file explicitly after seeing a
+    // `file` parameter in the schema. Naming `SKILL.md` is the whole skill,
+    // not a supporting reference, so it loads the instructions.
+    let reference = file.filter(|file| *file != SKILL_FILE);
+    let text = files::read(&skill.dir, reference.unwrap_or(SKILL_FILE))?;
+    match reference {
         None => Ok(frontmatter(&text)?.1.to_string()),
         Some(_) => Ok(text),
     }
@@ -543,9 +543,10 @@ mod tests {
         assert_eq!(review.references, ["checklist.md"]);
         assert_eq!(read(review, None).unwrap(), "# Review\nLook twice.\n");
         assert_eq!(read(review, Some("checklist.md")).unwrap(), "- clippy\n");
-        assert!(read(review, Some("SKILL.md"))
-            .unwrap_err()
-            .contains("omit file"));
+        assert_eq!(
+            read(review, Some("SKILL.md")).unwrap(),
+            "# Review\nLook twice.\n"
+        );
         assert!(read(review, Some("../x.md"))
             .unwrap_err()
             .contains("relative path"));
