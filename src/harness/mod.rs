@@ -88,6 +88,19 @@ impl CompletionConnection {
 pub(crate) use openai::fixture_inference_response;
 pub(crate) use openai::inference_response;
 
+/// Only failures known to precede delivery. In particular, a reset may
+/// arrive *after* a POST was accepted and is not safe to replay.
+pub(crate) fn connection_not_established(error: &ureq::Error) -> bool {
+    use std::io::ErrorKind;
+    match error {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::Timeout(ureq::Timeout::Connect | ureq::Timeout::Resolve) => true,
+        ureq::Error::Io(io) => io.kind() == ErrorKind::ConnectionRefused,
+        _ => false,
+    }
+}
+
 pub(crate) fn completion_connection(
     state: &Directories,
     provider: &str,

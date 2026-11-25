@@ -1876,9 +1876,13 @@ impl ChatScreen {
                     .map(|m| m.role);
                 self.resend_available = kind == crate::error::ErrorKind::Transport
                     && tail == Some(TranscriptRole::Operator);
-                let message = if kind == crate::error::ErrorKind::Transport
-                    && matches!(tail, Some(TranscriptRole::Tool { .. }))
-                {
+                let tools_returned = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .take_while(|m| m.role != TranscriptRole::Operator)
+                    .any(|m| matches!(m.tool, Some(ToolPayload::Result { .. })));
+                let message = if kind == crate::error::ErrorKind::Transport && tools_returned {
                     format!("{message}. Tools already returned; check their effects before sending a new prompt.")
                 } else {
                     message
@@ -2479,6 +2483,53 @@ mod tests {
         screen.poll_backend();
         assert!(!screen.resend_available);
         let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn interrupted_stream_after_tools_warns_about_effects_without_offering_resend() {
+        let state =
+            crate::fixture_directory::create_unique_fixture_directory("chat-post-tool-error");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("write the marker");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        let sender = backend.sender.as_ref().unwrap();
+        sender
+            .send(ResponseEvent::ToolResult {
+                call_id: "write-1".into(),
+                tool: "write_file".into(),
+                content: "marker written".into(),
+                output: "marker written".into(),
+                exit_code: 0,
+                detail: None,
+                elapsed: Default::default(),
+                record: None,
+            })
+            .unwrap();
+        sender
+            .send(ResponseEvent::TextDelta("The marker".into()))
+            .unwrap();
+        sender
+            .send(ResponseEvent::Failed {
+                message: "OpenAI response stream interrupted; generation was not retried".into(),
+                kind: crate::error::ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert_eq!(screen.messages().last().unwrap().text, "OpenAI response stream interrupted; generation was not retried. Tools already returned; check their effects before sending a new prompt.");
+        assert!(screen.messages().iter().any(|m| m.text == "The marker"));
+        assert!(!screen.resend_available);
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
