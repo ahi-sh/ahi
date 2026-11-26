@@ -1,4 +1,6 @@
-//! OSC 7577 reports from the owning TUI, never from the inference service.
+//! OSC 7577 (the Program Resume Protocol): reports from the owning TUI,
+//! never from the inference service, so a terminal can offer to reopen a
+//! saved local chat.
 use std::{
     env,
     io::{self, IsTerminal, Write},
