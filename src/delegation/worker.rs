@@ -73,7 +73,7 @@ pub(crate) fn run(dir: &Path, attempt: &str) -> u8 {
 
 fn reside(root: &Path, first: &str, cwd: &Path) -> Result<Exit, (Exit, String)> {
     use super::resident::{self, Transition};
-    use crate::program_status::{Reporter, State};
+    use crate::osc7501::{Reporter, State};
     let fail = |e: super::Error| (Exit::Refused, e.message);
     let r = super::load_dir(root).map_err(fail)?;
     let dirs = r.directories.to_directories();

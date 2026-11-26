@@ -30,6 +30,7 @@ pub(crate) fn operator_authority(
 }
 mod open;
 mod preferences;
+mod program_resume;
 mod scroll_navigation;
 mod selection;
 mod skill_menu;
@@ -156,7 +157,7 @@ struct ChatScreen {
     /// What the next successful clipboard write reports.
     copy_label: &'static str,
     /// OSC 7501 reports for the multiplexer that holds this terminal.
-    status: crate::program_status::Reporter,
+    status: crate::osc7501::Reporter,
     /// The session this chat is recorded into.
     recorder: session::recorder::Recorder,
     /// `--tools <file>`, when given, for showing skill policy; otherwise the
@@ -290,7 +291,7 @@ impl ChatScreen {
             workspace_root: std::env::current_dir().unwrap_or_default(),
             click_origin: None,
             copy_label: "Selection copied",
-            status: crate::program_status::Reporter::for_stdout(),
+            status: crate::osc7501::Reporter::for_stdout(),
             state_dir: state_dir.clone(),
             selection: parse_selection(selection),
             thinking,
@@ -1499,7 +1500,7 @@ impl ChatScreen {
         self.live_command = None;
         self.streaming_reply = None;
         self.turn_started = Some(Instant::now());
-        self.report_status(crate::program_status::State::Working, "");
+        self.report_status(crate::osc7501::State::Working, "");
     }
 
     /// The footer row that closes a turn: `done in 12s · 14:02`. A notice
@@ -1535,7 +1536,7 @@ impl ChatScreen {
         format!("{directory} · {}", self.selection.model)
     }
 
-    fn report_status(&self, state: crate::program_status::State, msg: &str) {
+    fn report_status(&self, state: crate::osc7501::State, msg: &str) {
         self.status.state(state, &self.status_title(), msg);
     }
 
@@ -1717,7 +1718,7 @@ impl ChatScreen {
                 self.recorder.calls(&calls, native.as_ref());
                 let index = self.streaming_message();
                 let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
-                self.report_status(crate::program_status::State::Working, &names.join(", "));
+                self.report_status(crate::osc7501::State::Working, &names.join(", "));
                 self.messages[index].tool = Some(ToolPayload::Calls { calls, native });
                 self.mark_dirty(index);
                 self.streaming_reply = None;
@@ -1730,7 +1731,7 @@ impl ChatScreen {
                     .map(|call| format!("{} {}", call.tool, call.target))
                     .unwrap_or_default();
                 self.status.blocked(
-                    crate::program_status::Kind::Permission,
+                    crate::osc7501::Kind::Permission,
                     &self.status_title(),
                     &waiting,
                 );
@@ -1766,7 +1767,7 @@ impl ChatScreen {
                 self.push_notice("Running command …".into());
                 self.live_command = Some((call_id.clone(), index, Vec::new()));
                 self.recorder.command_started(call_id);
-                self.report_status(crate::program_status::State::Working, "running command");
+                self.report_status(crate::osc7501::State::Working, "running command");
                 false
             }
             ResponseEvent::CommandStdout { call_id, bytes } => {
@@ -1844,7 +1845,7 @@ impl ChatScreen {
                 let answer = self
                     .streaming_reply
                     .map_or("", |i| self.messages[i].text.as_str());
-                self.report_status(crate::program_status::State::Done, answer);
+                self.report_status(crate::osc7501::State::Done, answer);
                 // Diagnose the current completed reply only. Quoted markup is
                 // never authority to dispatch a call, infer a denial or retry.
                 if answer.trim_start().starts_with("<tool_call>")
@@ -1888,7 +1889,7 @@ impl ChatScreen {
                     message
                 };
                 self.report_status(
-                    crate::program_status::State::Error,
+                    crate::osc7501::State::Error,
                     &format!("{kind:?}").to_ascii_lowercase(),
                 );
                 self.push_alert(message);
@@ -2041,7 +2042,7 @@ impl ChatScreen {
             if let Some(pending) = self.approval.take() {
                 pending.finish();
             }
-            self.report_status(crate::program_status::State::Working, "");
+            self.report_status(crate::osc7501::State::Working, "");
         }
         self.scroll_from_bottom = 0;
     }
@@ -2122,8 +2123,16 @@ pub(crate) fn interact(
         session::recorder::Recorder::new(record, "tui"),
     );
     screen.actions_file = actions.map(Path::to_path_buf);
+    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(state_dir, engine, &screen, None, actions);
-    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
+    interact_screen(
+        state_dir,
+        screen,
+        backend,
+        appearance,
+        resume,
+        reopen_picker,
+    )
 }
 
 /// `ahi tui --resume <id>`: the chat over a stored session, continuing it
@@ -2158,6 +2167,7 @@ pub(crate) fn interact_resumed(
         }
     };
     screen.actions_file = actions.map(Path::to_path_buf);
+    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(
         state_dir,
         engine,
@@ -2165,7 +2175,14 @@ pub(crate) fn interact_resumed(
         Some(session_id.to_string()),
         actions,
     );
-    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
+    interact_screen(
+        state_dir,
+        screen,
+        backend,
+        appearance,
+        resume,
+        reopen_picker,
+    )
 }
 
 fn backend_for(
@@ -2202,6 +2219,7 @@ fn interact_screen(
     mut screen: ChatScreen,
     mut backend: Box<dyn CompletionBackend>,
     appearance: appearance::Appearance,
+    mut resume: Option<program_resume::Reporter>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -2219,7 +2237,7 @@ fn interact_screen(
     )?;
     screen.appearance = appearance;
     screen.push_header();
-    screen.report_status(crate::program_status::State::Idle, "");
+    screen.report_status(crate::osc7501::State::Idle, "");
     let backend = backend.as_mut();
     loop {
         let mut terminal =
@@ -2227,7 +2245,7 @@ fn interact_screen(
         let outcome =
             crossterm::execute!(std::io::stdout(), EnableBracketedPaste, DisableMouseCapture)
                 .map_err(|err| Error::new(format!("enable paste: {err}")))
-                .and_then(|()| session_loop(&mut terminal, &mut screen, backend));
+                .and_then(|()| session_loop(&mut terminal, &mut screen, backend, resume.as_mut()));
         let cleanup = crossterm::execute!(
             std::io::stdout(),
             DisableMouseCapture,
@@ -2280,10 +2298,18 @@ fn session_loop(
     terminal: &mut crate::term::DefaultTerminal,
     screen: &mut ChatScreen,
     backend: &mut dyn CompletionBackend,
+    mut resume: Option<&mut program_resume::Reporter>,
 ) -> Result<SessionEnd> {
     // Each terminal entry starts with capture disabled, including picker return.
     let mut mouse_capture = false;
     loop {
+        if let Some(resume) = resume.as_deref_mut() {
+            resume.update(
+                backend
+                    .session_id()
+                    .or_else(|| screen.recorder.session_id()),
+            );
+        }
         if screen.mouse_capture != mouse_capture {
             if screen.mouse_capture {
                 crossterm::execute!(std::io::stdout(), EnableMouseCapture)
@@ -2883,7 +2909,7 @@ mod tests {
 
     #[test]
     fn the_chat_reports_its_state_to_the_multiplexer_with_osc_7501() {
-        use crate::program_status::Reporter;
+        use crate::osc7501::Reporter;
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-status");
         let mut screen = screen_in(&state);
         let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

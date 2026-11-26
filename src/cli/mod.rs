@@ -48,6 +48,18 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
     state_dir: Option<PathBuf>,
 
+    /// Config root only; overrides --state-dir, AHI_STATE_DIR, and XDG_CONFIG_HOME.
+    #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
+    config_dir: Option<PathBuf>,
+
+    /// Data root only; overrides --state-dir, AHI_STATE_DIR, and XDG_DATA_HOME.
+    #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
+    data_dir: Option<PathBuf>,
+
+    /// State root only; unlike --state-dir, does not change other roots.
+    #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
+    state_root: Option<PathBuf>,
+
     /// When to color output. `auto` colors a terminal unless NO_COLOR is set. Only `ahi tools init` uses color so far; other output is plain text.
     #[arg(
         long,
@@ -466,6 +478,16 @@ enum ExamplesCommand {
     },
 }
 
+pub(crate) static TERMINAL_RESUME_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[doc(hidden)]
+pub fn run_with_terminal_token(terminal_resume_token: Option<String>) -> ExitCode {
+    if let Some(token) = terminal_resume_token {
+        let _ = TERMINAL_RESUME_TOKEN.set(token);
+    }
+    run()
+}
+
 pub fn run() -> ExitCode {
     let mut cli = Cli::parse();
     if cli.session.is_some() && cli.command.is_some() {
@@ -510,11 +532,7 @@ pub fn run() -> ExitCode {
         Command::Run(args) => precommit::run_precommit(&cli, args),
         Command::ListChecks(args) => precommit::list_checks(&args.format),
         Command::Explain(args) => precommit::explain(&args.id),
-        Command::Doctor => doctor(
-            cli.config.as_deref(),
-            cli.cache_dir.as_deref(),
-            cli.state_dir.as_deref(),
-        ),
+        Command::Doctor => doctor(&cli),
         Command::Hooks { command } => match command {
             HooksCommand::Install | HooksCommand::Uninstall => {
                 unimplemented_until("the hook shim phase (after hook execution exists)")
@@ -669,11 +687,8 @@ fn unimplemented_until(phase: &str) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn doctor(
-    config: Option<&std::path::Path>,
-    cache: Option<&std::path::Path>,
-    state: Option<&std::path::Path>,
-) -> ExitCode {
+fn doctor(cli: &Cli) -> ExitCode {
+    let config = cli.config.as_deref();
     println!("ahi {VERSION}");
     match crate::precommit::git::git_version() {
         Ok(version) => println!("git: {version}"),
@@ -691,7 +706,7 @@ fn doctor(
         }
         Err(err) => println!("root: {err}"),
     }
-    match Directories::resolve(state, cache) {
+    match directories(cli) {
         Ok(dirs) => {
             println!("models.json: {}", dirs.config.display());
             println!("data: {}", dirs.data.display());
@@ -779,7 +794,13 @@ fn doctor(
 }
 
 fn directories(cli: &Cli) -> crate::Result<Directories> {
-    Directories::resolve(cli.state_dir.as_deref(), cli.cache_dir.as_deref())
+    Directories::resolve_roots(
+        cli.state_dir.as_deref(),
+        cli.cache_dir.as_deref(),
+        cli.config_dir.as_deref(),
+        cli.data_dir.as_deref(),
+        cli.state_root.as_deref(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

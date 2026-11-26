@@ -42,6 +42,40 @@ impl Directories {
         Self::from_env(root, cache, |key| std::env::var_os(key))
     }
 
+    /// Per-category flags override the legacy single-root layout and environment.
+    /// Resolve only unspecified categories so a complete restore command does
+    /// not depend on HOME or XDG settings in its new environment.
+    pub fn resolve_roots(
+        root: Option<&Path>,
+        cache: Option<&Path>,
+        config: Option<&Path>,
+        data: Option<&Path>,
+        state: Option<&Path>,
+    ) -> Result<Self> {
+        let env = |key: &str| std::env::var_os(key);
+        let root = root
+            .map(Path::to_path_buf)
+            .or_else(|| non_empty(env("AHI_STATE_DIR")));
+        let category = |explicit: Option<&Path>, key, fallback| {
+            explicit
+                .map(Path::to_path_buf)
+                .or_else(|| root.clone())
+                .map(Ok)
+                .unwrap_or_else(|| base_directory(key, fallback, env))
+        };
+        Ok(Self {
+            config: category(config, "XDG_CONFIG_HOME", ".config")?,
+            data: category(data, "XDG_DATA_HOME", ".local/share")?,
+            state: category(state, "XDG_STATE_HOME", ".local/state")?,
+            cache: cache
+                .map(Path::to_path_buf)
+                .or_else(|| non_empty(env("AHI_HOME")))
+                .or(root)
+                .map(Ok)
+                .unwrap_or_else(|| base_directory("XDG_CACHE_HOME", ".cache", env))?,
+        })
+    }
+
     fn from_env(
         root: Option<&Path>,
         cache: Option<&Path>,

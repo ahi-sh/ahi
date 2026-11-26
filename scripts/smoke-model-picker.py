@@ -8,6 +8,7 @@ No external requests, real credentials, clipboard, or editor configuration is us
 import argparse
 import base64
 import errno
+import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -76,6 +77,7 @@ def main() -> None:
                            DISPLAY=":ahi-test", WAYLAND_DISPLAY="", TERMUX_VERSION="",
                            WT_SESSION="", SSH_CONNECTION="", SSH_CLIENT="",
                            MOSH_CONNECTION="", AHI_CLIPBOARD_OSC52="")
+                env.pop("OSC7577_TOKEN", None)
                 env.update(environment or {})
                 if cwd:
                     os.chdir(cwd)
@@ -85,7 +87,8 @@ def main() -> None:
                 env.pop("ANTHROPIC_API_KEY", None)
                 if editor:
                     env["VISUAL"] = f"/bin/sh '{editor}'"
-                os.execve(binary, [str(binary), "--state-dir", str(state), *command], env)
+                root_args = [] if '--state-dir' in command or '--state-root' in command else ['--state-dir', str(state)]
+                os.execve(binary, [str(binary), *root_args, *command], env)
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             self.output = b""
             self.recent = b""
@@ -649,7 +652,8 @@ def main() -> None:
                 sock = str(root / 'service.sock')
                 options = ('--standalone',) if engine == 'standalone' else ('--socket', sock)
                 command = ('tui', '--tools', str(policy), *options)
-                chat = Session(state, cwd=work, command=command)
+                token = 'synthetic-fixture-token-7577'
+                chat = Session(state, cwd=work, command=command, environment={'OSC7577_TOKEN': token})
                 worker = threading.Thread(target=gateway.serve_forever, daemon=True)
                 worker.start()
                 try:
@@ -669,13 +673,41 @@ def main() -> None:
                     assert len(requests) == 2 and requests[1]['messages'][-1]['tool_call_id'] == 'once'
                     gateway.shutdown()
                     worker.join(5)
-                    reopened = Session(state, cwd=work, command=(*command, '--session', path.stem))
+                    frames = re.findall(rb'\x1b\]7577;([^\x1b]+)\x1b\\', chat.output)
+                    assert len(frames) == 2, frames  # register once, then clear on quit
+                    records = []
+                    for frame in frames:
+                        body, mac = frame.rsplit(b':mac=', 1)
+                        assert mac == hashlib.sha256(body + b':' + token.encode()).hexdigest().encode()
+                        fields = dict(pair.split(b'=', 1) for pair in body.split(b':'))
+                        assert int(fields[b'pid']) == chat.pid
+                        records.append(fields)
+                    assert records[0][b'need'] == b'cwd'
+                    assert all(abs(time.time() - int(rec[b'time'])) < 60 for rec in records)
+                    assert records[1][b'clear'] == b'1'
+                    assert token not in path.read_text() and token not in json.dumps(requests)
+                    assert token.encode() not in chat.output
+                    argv = [base64.b64decode(arg, validate=True).decode() for arg in records[0][b'argv'].split(b',')]
+                    assert argv == ['ahi', 'tui', '--config-dir', str(state), '--data-dir', str(state), '--state-root', str(state), '--cache-dir', str(state), *options, '--tools', str(policy.resolve()), '--session', path.stem], argv
+                    cwd = Path(base64.b64decode(records[0][b'cwd']).decode())
+                    assert cwd.samefile(work)
+                    # Exercise registration immediately on reopening with a valid
+                    # token, and silence with an invalid one on the other engine.
+                    valid = engine == 'standalone'
+                    reopened = Session(state, cwd=cwd, command=tuple(argv[1:]),
+                                       environment={'OSC7577_TOKEN': token if valid else 'invalid',
+                                                    'AHI_STATE_DIR': str(root / 'wrong-state'),
+                                                    'AHI_HOME': str(root / 'wrong-cache'),
+                                                    'XDG_CONFIG_HOME': str(root / 'wrong-config'),
+                                                    'XDG_DATA_HOME': str(root / 'wrong-data'),
+                                                    'XDG_STATE_HOME': str(root / 'wrong-xdg-state')})
                     worker = threading.Thread(target=gateway.serve_forever, daemon=True)
                     worker.start()
                     try:
                         reopened.expect('resumed session')
                         reopened.send('\r/quit\r')
                         reopened.finish()
+                        assert reopened.output.count(b'\x1b]7577;') == (2 if valid else 0)
                         assert len(requests) == 2
                     finally:
                         reopened.close()
