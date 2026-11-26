@@ -8,10 +8,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::Engine;
+use crate::chat::Engine;
 use crate::{directories::Directories, util::base64::encode_standard};
 
-pub(super) struct Reporter {
+pub(in crate::chat) struct Reporter {
     token: &'static str,
     cwd: String,
     argv_prefix: String,
