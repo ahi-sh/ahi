@@ -30,6 +30,7 @@ pub(crate) fn operator_authority(
 }
 mod open;
 mod preferences;
+mod program_resume;
 mod scroll_navigation;
 mod selection;
 mod skill_menu;
@@ -2122,8 +2123,16 @@ pub(crate) fn interact(
         session::recorder::Recorder::new(record, "tui"),
     );
     screen.actions_file = actions.map(Path::to_path_buf);
+    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(state_dir, engine, &screen, None, actions);
-    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
+    interact_screen(
+        state_dir,
+        screen,
+        backend,
+        appearance,
+        resume,
+        reopen_picker,
+    )
 }
 
 /// `ahi tui --resume <id>`: the chat over a stored session, continuing it
@@ -2158,6 +2167,7 @@ pub(crate) fn interact_resumed(
         }
     };
     screen.actions_file = actions.map(Path::to_path_buf);
+    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(
         state_dir,
         engine,
@@ -2165,7 +2175,14 @@ pub(crate) fn interact_resumed(
         Some(session_id.to_string()),
         actions,
     );
-    interact_screen(state_dir, screen, backend, appearance, reopen_picker)
+    interact_screen(
+        state_dir,
+        screen,
+        backend,
+        appearance,
+        resume,
+        reopen_picker,
+    )
 }
 
 fn backend_for(
@@ -2202,6 +2219,7 @@ fn interact_screen(
     mut screen: ChatScreen,
     mut backend: Box<dyn CompletionBackend>,
     appearance: appearance::Appearance,
+    mut resume: Option<program_resume::Reporter>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -2227,7 +2245,7 @@ fn interact_screen(
         let outcome =
             crossterm::execute!(std::io::stdout(), EnableBracketedPaste, DisableMouseCapture)
                 .map_err(|err| Error::new(format!("enable paste: {err}")))
-                .and_then(|()| session_loop(&mut terminal, &mut screen, backend));
+                .and_then(|()| session_loop(&mut terminal, &mut screen, backend, resume.as_mut()));
         let cleanup = crossterm::execute!(
             std::io::stdout(),
             DisableMouseCapture,
@@ -2280,10 +2298,18 @@ fn session_loop(
     terminal: &mut crate::term::DefaultTerminal,
     screen: &mut ChatScreen,
     backend: &mut dyn CompletionBackend,
+    mut resume: Option<&mut program_resume::Reporter>,
 ) -> Result<SessionEnd> {
     // Each terminal entry starts with capture disabled, including picker return.
     let mut mouse_capture = false;
     loop {
+        if let Some(resume) = resume.as_deref_mut() {
+            resume.update(
+                backend
+                    .session_id()
+                    .or_else(|| screen.recorder.session_id()),
+            );
+        }
         if screen.mouse_capture != mouse_capture {
             if screen.mouse_capture {
                 crossterm::execute!(std::io::stdout(), EnableMouseCapture)

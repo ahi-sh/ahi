@@ -466,6 +466,16 @@ enum ExamplesCommand {
     },
 }
 
+pub(crate) static TERMINAL_RESUME_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[doc(hidden)]
+pub fn run_with_terminal_token(terminal_resume_token: Option<String>) -> ExitCode {
+    if let Some(token) = terminal_resume_token {
+        let _ = TERMINAL_RESUME_TOKEN.set(token);
+    }
+    run()
+}
+
 pub fn run() -> ExitCode {
     let mut cli = Cli::parse();
     if cli.session.is_some() && cli.command.is_some() {
