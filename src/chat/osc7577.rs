@@ -37,17 +37,18 @@ impl Reporter {
         }
         let cwd = env::current_dir().ok()?;
         let mut args = vec!["ahi", "tui"];
-        if dirs.config == dirs.data && dirs.data == dirs.state {
-            args.extend(["--state-dir", dirs.state.to_str()?]);
-        } else if ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"]
-            .iter()
-            .any(|key| env::var_os(key).is_some_and(|v| Path::new(&v).is_absolute()))
-        {
-            // There are no separate argv flags for these roots. Do not rely
-            // on per-invocation overrides surviving a terminal restart.
-            return None;
-        }
-        args.extend(["--cache-dir", dirs.cache.to_str()?]);
+        // Pin every resolved root. The restored shell may have different
+        // XDG/AHI overrides; relative paths retain their meaning through cwd.
+        args.extend([
+            "--config-dir",
+            dirs.config.to_str()?,
+            "--data-dir",
+            dirs.data.to_str()?,
+            "--state-root",
+            dirs.state.to_str()?,
+            "--cache-dir",
+            dirs.cache.to_str()?,
+        ]);
         match engine {
             Engine::Standalone { record: true } => args.push("--standalone"),
             Engine::Standalone { record: false } => return None,

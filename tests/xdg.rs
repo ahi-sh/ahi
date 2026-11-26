@@ -55,6 +55,51 @@ fn write(path: &Path, bytes: &[u8]) {
 }
 
 #[test]
+fn explicit_storage_roots_survive_changed_restore_environment() {
+    let fixture = Fixture::new("restore-roots");
+    let dirs = fixture.directories();
+    for changed_environment in [false, true] {
+        let mut command = fixture.ahi();
+        if changed_environment {
+            command
+                .env("AHI_STATE_DIR", fixture.0.join("wrong-state"))
+                .env("AHI_HOME", fixture.0.join("wrong-cache"))
+                .env_remove("HOME")
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("XDG_DATA_HOME")
+                .env_remove("XDG_STATE_HOME");
+        }
+        let output = command
+            .arg("--state-dir")
+            .arg(fixture.0.join("legacy"))
+            .arg("--config-dir")
+            .arg(&dirs.config)
+            .arg("--data-dir")
+            .arg(&dirs.data)
+            .arg("--state-root")
+            .arg(&dirs.state)
+            .arg("--cache-dir")
+            .arg(&dirs.cache)
+            .arg("doctor")
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{text}");
+        for (label, path) in [
+            ("models.json", &dirs.config),
+            ("data", &dirs.data),
+            ("state", &dirs.state),
+            ("cache", &dirs.cache),
+        ] {
+            assert!(
+                text.contains(&format!("{label}: {}", path.display())),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_cli_reads_config_credentials_and_catalogs_from_their_own_roots() {
     let fixture = Fixture::new("xdg-cli");
     let root = &fixture.0;

@@ -87,7 +87,7 @@ def main() -> None:
                 env.pop("ANTHROPIC_API_KEY", None)
                 if editor:
                     env["VISUAL"] = f"/bin/sh '{editor}'"
-                root_args = [] if '--state-dir' in command else ['--state-dir', str(state)]
+                root_args = [] if '--state-dir' in command or '--state-root' in command else ['--state-dir', str(state)]
                 os.execve(binary, [str(binary), *root_args, *command], env)
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             self.output = b""
@@ -688,14 +688,19 @@ def main() -> None:
                     assert token not in path.read_text() and token not in json.dumps(requests)
                     assert token.encode() not in chat.output
                     argv = [base64.b64decode(arg, validate=True).decode() for arg in records[0][b'argv'].split(b',')]
-                    assert argv == ['ahi', 'tui', '--state-dir', str(state), '--cache-dir', str(state), *options, '--tools', str(policy.resolve()), '--session', path.stem], argv
+                    assert argv == ['ahi', 'tui', '--config-dir', str(state), '--data-dir', str(state), '--state-root', str(state), '--cache-dir', str(state), *options, '--tools', str(policy.resolve()), '--session', path.stem], argv
                     cwd = Path(base64.b64decode(records[0][b'cwd']).decode())
                     assert cwd.samefile(work)
                     # Exercise registration immediately on reopening with a valid
                     # token, and silence with an invalid one on the other engine.
                     valid = engine == 'standalone'
                     reopened = Session(state, cwd=cwd, command=tuple(argv[1:]),
-                                       environment={'OSC7577_TOKEN': token if valid else 'invalid'})
+                                       environment={'OSC7577_TOKEN': token if valid else 'invalid',
+                                                    'AHI_STATE_DIR': str(root / 'wrong-state'),
+                                                    'AHI_HOME': str(root / 'wrong-cache'),
+                                                    'XDG_CONFIG_HOME': str(root / 'wrong-config'),
+                                                    'XDG_DATA_HOME': str(root / 'wrong-data'),
+                                                    'XDG_STATE_HOME': str(root / 'wrong-xdg-state')})
                     worker = threading.Thread(target=gateway.serve_forever, daemon=True)
                     worker.start()
                     try:
