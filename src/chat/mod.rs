@@ -29,8 +29,8 @@ pub(crate) fn operator_authority(
     Ok((mode, policy))
 }
 mod open;
+mod osc7577;
 mod preferences;
-mod program_resume;
 mod scroll_navigation;
 mod selection;
 mod skill_menu;
@@ -2123,7 +2123,7 @@ pub(crate) fn interact(
         session::recorder::Recorder::new(record, "tui"),
     );
     screen.actions_file = actions.map(Path::to_path_buf);
-    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
+    let resume = osc7577::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(state_dir, engine, &screen, None, actions);
     interact_screen(
         state_dir,
@@ -2167,7 +2167,7 @@ pub(crate) fn interact_resumed(
         }
     };
     screen.actions_file = actions.map(Path::to_path_buf);
-    let resume = program_resume::Reporter::new(state_dir, &engine, actions);
+    let resume = osc7577::Reporter::new(state_dir, &engine, actions);
     let backend = backend_for(
         state_dir,
         engine,
@@ -2219,7 +2219,7 @@ fn interact_screen(
     mut screen: ChatScreen,
     mut backend: Box<dyn CompletionBackend>,
     appearance: appearance::Appearance,
-    mut resume: Option<program_resume::Reporter>,
+    mut resume: Option<osc7577::Reporter>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -2298,7 +2298,7 @@ fn session_loop(
     terminal: &mut crate::term::DefaultTerminal,
     screen: &mut ChatScreen,
     backend: &mut dyn CompletionBackend,
-    mut resume: Option<&mut program_resume::Reporter>,
+    mut resume: Option<&mut osc7577::Reporter>,
 ) -> Result<SessionEnd> {
     // Each terminal entry starts with capture disabled, including picker return.
     let mut mouse_capture = false;
