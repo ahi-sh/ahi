@@ -39,6 +39,7 @@ pub(crate) mod thinking;
 pub(crate) mod transcript;
 mod usage;
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -151,6 +152,11 @@ struct ChatScreen {
     appearance: appearance::Appearance,
     /// Set on send, cleared at the turn's end; drives the activity counter.
     turn_started: Option<Instant>,
+    /// Prompts submitted while a turn was streaming, oldest first. Each
+    /// becomes its own turn when the current one ends cleanly.
+    prompt_queue: VecDeque<QueuedPrompt>,
+    /// The last turn ended in failure, so the queue waits for a clean turn.
+    prompt_queue_held: bool,
     workspace_root: std::path::PathBuf,
     /// Where the left button went down, to tell a click from a drag.
     click_origin: Option<(u16, u16)>,
@@ -167,6 +173,13 @@ struct ChatScreen {
 
 const TOOL_MARKUP_NOTICE: &str =
     "Tool-call markup was returned as text. No tool ran. Resubmit the question to retry.";
+
+/// A prompt submitted while another turn was streaming. Skills are captured
+/// at enqueue, when the operator composed them.
+struct QueuedPrompt {
+    text: String,
+    skills: Vec<String>,
+}
 
 pub(crate) struct ChatExit {
     pub(crate) session: Option<String>,
@@ -329,6 +342,8 @@ impl ChatScreen {
             expanded_tools: false,
             resend_available: false,
             turn_skills: Vec::new(),
+            prompt_queue: VecDeque::new(),
+            prompt_queue_held: false,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -1162,6 +1177,30 @@ impl ChatScreen {
         self.poll_location();
     }
 
+    /// Start the next queued prompt after a turn ended cleanly. One prompt
+    /// per turn: the dequeued prompt goes through `send_transcript`, so it
+    /// records, admits under the current mode, and reports like a typed one.
+    /// A failed turn holds the queue until something runs cleanly again.
+    fn drain_prompt_queue(&mut self, backend: &mut dyn CompletionBackend) {
+        if self.response_in_progress || self.approval.is_some() {
+            return;
+        }
+        if self.prompt_queue.is_empty() {
+            self.prompt_queue_held = false;
+            return;
+        }
+        if self.prompt_queue_held || self.resend_available {
+            return;
+        }
+        let Some(queued) = self.prompt_queue.pop_front() else {
+            return;
+        };
+        self.turn_skills = queued.skills;
+        self.push_message(ChatMessage::new(TranscriptRole::Operator, queued.text));
+        self.scroll_from_bottom = 0;
+        self.send_transcript(backend);
+    }
+
     /// Land a finished Git status probe, then start the one a drained batch
     /// of tool returns asked for. One probe at a time, never on this thread.
     fn poll_location(&mut self) {
@@ -1417,12 +1456,35 @@ impl ChatScreen {
             self.push_alert("Workspace policy is missing; restore it or reopen chat to review workspace trust. Draft kept.".into());
             return Ok(ScreenAction::Continue);
         }
-        // Keep the draft intact until the active turn ends; never launch a second
-        // billed request while discarding the first turn's receiver.
+        // While a turn is active, a plain prompt joins the FIFO queue and runs
+        // when the current turn ends; no second billed request is launched.
+        // Slash commands keep their local behavior below.
+        let text = self.input.contents();
         if self.response_in_progress {
+            if text.trim_start().starts_with('/') {
+                return Ok(ScreenAction::Continue);
+            }
+            if text.trim().is_empty() {
+                return Ok(ScreenAction::Continue);
+            }
+            if self.recorder.over_budget() {
+                self.push_notice(
+                    "this session has reached its 64 MiB budget; /clear starts a new one and the draft was kept"
+                        .to_string(),
+                );
+                return Ok(ScreenAction::Continue);
+            }
+            let skills = self.input.selected_skills();
+            self.remember_input();
+            let queued_text = text;
+            self.push_notice(format!("Queued: {queued_text}"));
+            self.prompt_queue.push_back(QueuedPrompt {
+                text: queued_text,
+                skills,
+            });
+            self.scroll_from_bottom = 0;
             return Ok(ScreenAction::Continue);
         }
-        let text = self.input.contents();
         if text.trim().is_empty() {
             // A blank Enter after a connection failure sends the same
             // transcript again; otherwise it does nothing.
@@ -1495,6 +1557,7 @@ impl ChatScreen {
         };
         self.meters.context_tokens = None;
         self.meters.context_window = None;
+        self.prompt_queue_held = false;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.live_command = None;
@@ -1593,6 +1656,8 @@ impl ChatScreen {
                 self.response_in_progress = false;
                 self.streaming_reply = None;
                 self.resend_available = false;
+                self.prompt_queue.clear();
+                self.prompt_queue_held = false;
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::SetMouse(enabled) => {
@@ -1864,6 +1929,9 @@ impl ChatScreen {
             ResponseEvent::Failed { message, kind } => {
                 self.interrupt_command();
                 self.approval = None;
+                // A failed turn must not fire the next queued prompt: the
+                // failure may be ambiguous and the effects unverified.
+                self.prompt_queue_held = true;
                 self.recorder
                     .fail_turn(&format!("{kind:?}").to_ascii_lowercase(), &message);
                 // A service turn takes a new operator prompt, not an in-flight
@@ -2024,6 +2092,13 @@ impl ChatScreen {
         } else {
             "response cancelled".to_string()
         });
+        if !self.prompt_queue.is_empty() {
+            let count = self.prompt_queue.len();
+            self.push_notice(format!(
+                "{count} queued prompt{} waiting; Enter submits your draft, the queue follows",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
         self.scroll_from_bottom = 0;
     }
 
@@ -2344,6 +2419,7 @@ fn session_loop(
         screen.tick();
         screen.poll_clipboard();
         screen.poll_backend();
+        screen.drain_prompt_queue(backend);
     }
 }
 
@@ -5080,7 +5156,7 @@ mod tests {
     }
 
     #[test]
-    fn submitting_during_a_turn_preserves_the_draft_and_active_request() {
+    fn submitting_during_a_turn_queues_the_prompt_and_keeps_the_active_request() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-busy");
         let mut screen = screen_in(&state);
         let mut backend = RecordingBackend {
@@ -5096,8 +5172,255 @@ mod tests {
             .unwrap();
         assert_eq!(backend.requests.len(), 1);
         assert_eq!(backend.requests[0].messages[0].text, "first");
-        assert_eq!(screen.input.contents(), "next");
+        // The prompt was queued, not dropped: the composer is empty and the
+        // transcript shows the queued prompt as a notice.
+        assert_eq!(screen.input.contents(), "");
+        assert!(screen.messages().iter().any(|m| m.text == "Queued: next"));
         assert!(screen.response_in_progress());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_completed_turn_drains_one_queued_prompt_per_turn() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-drain");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("second");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("third");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(screen.input.contents(), "");
+
+        // Finish turn 1: one queued prompt becomes exactly one new request.
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 2);
+        let last = backend.requests[1].messages.last().unwrap();
+        assert_eq!(last.text, "second");
+        assert_eq!(last.role, TranscriptRole::Operator);
+        assert!(screen.response_in_progress());
+
+        // Finish turn 2: the next queued prompt follows, one per turn.
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 3);
+        let last = backend.requests[2].messages.last().unwrap();
+        assert_eq!(last.text, "third");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_failed_turn_holds_the_queue_until_a_turn_runs_cleanly() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-hold");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("second");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+
+        // A failed turn does not fire the queued prompt.
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Failed {
+                message: "gateway unreachable".into(),
+                kind: crate::error::ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 1);
+        assert!(!screen.response_in_progress());
+
+        // A new clean turn (the operator resends) restarts the drain.
+        screen.set_input_text("retry");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 3);
+        assert_eq!(backend.requests[2].messages.last().unwrap().text, "second");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_cancel_keeps_the_queue_and_it_follows_the_next_clean_turn() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-cancel");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("second");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+
+        // Esc cancels the stream; the queued prompt survives with a notice.
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert!(!screen.response_in_progress());
+        assert!(screen
+            .messages()
+            .iter()
+            .any(|m| m.text.contains("1 queued prompt")));
+
+        // The queue follows the next clean turn.
+        screen.set_input_text("fresh");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 3);
+        assert_eq!(backend.requests[2].messages.last().unwrap().text, "second");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn clear_drops_queued_prompts_and_a_blank_enter_does_not_queue() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-clear");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("second");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        // Blank Enter during a turn queues nothing.
+        screen.set_input_text("");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        // Slash commands stay blocked mid-turn, so cancel first; the queued
+        // prompt survives the cancel.
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert!(!screen.response_in_progress());
+        // /clear while idle drops the queued prompt with the transcript.
+        screen.set_input_text("/clear");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("third");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 2, "queue was cleared");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_queued_slash_command_is_not_queued_and_mode_applies_at_dequeue() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-mode");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        // A slash command mid-turn is left in the composer, not queued.
+        screen.set_input_text("/thinking high");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "/thinking high");
+        assert_eq!(screen.thinking(), ThinkingLevel::Medium);
+        // The queued prompt still drains after the turn.
+        screen.set_input_text("second");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 2);
         fs::remove_dir_all(state).unwrap();
     }
 }
