@@ -31,6 +31,7 @@ pub(crate) fn operator_authority(
 mod open;
 mod preferences;
 mod program_resume;
+mod queue;
 mod scroll_navigation;
 mod selection;
 mod skill_menu;
@@ -155,8 +156,10 @@ struct ChatScreen {
     /// Prompts submitted while a turn was streaming, oldest first. Each
     /// becomes its own turn when the current one ends cleanly.
     prompt_queue: VecDeque<QueuedPrompt>,
-    /// The last turn ended in failure, so the queue waits for a clean turn.
+    /// Explicit pause, or a failed/cancelled turn, requires operator resume.
     prompt_queue_held: bool,
+    queue_view: Option<QueueView>,
+    next_queue_id: u64,
     workspace_root: std::path::PathBuf,
     /// Where the left button went down, to tell a click from a drag.
     click_origin: Option<(u16, u16)>,
@@ -174,9 +177,16 @@ struct ChatScreen {
 const TOOL_MARKUP_NOTICE: &str =
     "Tool-call markup was returned as text. No tool ran. Resubmit the question to retry.";
 
-/// A prompt submitted while another turn was streaming. Skills are captured
-/// at enqueue, when the operator composed them.
+/// Queue management owns input while open, without replacing the composer.
+struct QueueView {
+    selected: usize,
+    editing: Option<(u64, InputEditor)>,
+    confirm_clear: bool,
+}
+
+/// Pending input; skills remain paired with the prompt during queue edits.
 struct QueuedPrompt {
+    id: u64,
     text: String,
     skills: Vec<String>,
 }
@@ -344,6 +354,8 @@ impl ChatScreen {
             turn_skills: Vec::new(),
             prompt_queue: VecDeque::new(),
             prompt_queue_held: false,
+            queue_view: None,
+            next_queue_id: 0,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -565,6 +577,19 @@ impl ChatScreen {
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
         use crossterm::event::{KeyCode, KeyEventKind};
+        if self.queue_view.is_some() {
+            self.queue_event(event);
+            return Ok(ScreenAction::Continue);
+        }
+        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') && key.modifiers == crossterm::event::KeyModifiers::ALT)
+        {
+            self.queue_view = Some(QueueView {
+                selected: 0,
+                editing: None,
+                confirm_clear: false,
+            });
+            return Ok(ScreenAction::Continue);
+        }
         if let Some(dialog) = self.modes.dialog {
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
@@ -1167,6 +1192,7 @@ impl ChatScreen {
                         break;
                     }
                     Err(TryRecvError::Disconnected) => {
+                        self.prompt_queue_held = true;
                         self.response_in_progress = false;
                         self.streaming_reply = None;
                         break;
@@ -1180,17 +1206,26 @@ impl ChatScreen {
     /// Start the next queued prompt after a turn ended cleanly. One prompt
     /// per turn: the dequeued prompt goes through `send_transcript`, so it
     /// records, admits under the current mode, and reports like a typed one.
-    /// A failed turn holds the queue until something runs cleanly again.
+    /// Failure or cancellation holds pending work until explicit resume.
     fn drain_prompt_queue(&mut self, backend: &mut dyn CompletionBackend) {
-        if self.response_in_progress || self.approval.is_some() {
+        if self.response_in_progress || self.approval.is_some() || self.queue_view.is_some() {
             return;
         }
         if self.prompt_queue.is_empty() {
-            self.prompt_queue_held = false;
             return;
         }
         if self.prompt_queue_held || self.resend_available {
             return;
+        }
+        match self.admit_prompt() {
+            Ok(true) => {}
+            result => {
+                self.prompt_queue_held = true;
+                if let Err(error) = result {
+                    self.push_alert(error.to_string());
+                }
+                return;
+            }
         }
         let Some(queued) = self.prompt_queue.pop_front() else {
             return;
@@ -1239,6 +1274,16 @@ impl ChatScreen {
                 Constraint::Length(1),
             ])
             .split(frame.area());
+        let pending_height = if self.prompt_queue.is_empty() {
+            0
+        } else {
+            (self.prompt_queue.len().min(3) + 1 + usize::from(self.prompt_queue.len() > 3)) as u16
+        };
+        let pending = Layout::vertical([Constraint::Min(0), Constraint::Length(pending_height)])
+            .split(chunks[0]);
+        let mut chunks = chunks.to_vec();
+        chunks[0] = pending[0];
+        self.draw_pending_queue(frame, pending[1]);
         self.transcript_area = chunks[0];
         if self.transcript_width != chunks[0].width as usize {
             self.text_selection.clear();
@@ -1420,6 +1465,7 @@ impl ChatScreen {
             self.skill_menu.draw(frame, chunks[0], &query);
         }
         self.modes.draw(frame, &self.workspace_root);
+        self.draw_queue_manager(frame, chunks[1].y);
     }
 
     fn dismiss_input_menus(&mut self) {
@@ -1433,12 +1479,7 @@ impl ChatScreen {
         self.dismiss_input_menus();
     }
 
-    fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
-        if matches!(self.input.contents().trim(), "/mode" | "/mode revoke") {
-            let text = self.input.contents();
-            self.remember_input();
-            return self.dispatch_command(text.trim(), backend);
-        }
+    fn admit_prompt(&mut self) -> Result<bool> {
         if !self.modes.has_policy
             && self.modes.selected != crate::tool_policy::ExecutionMode::Policy
             && crate::tool_policy::workspace_file(&self.workspace_root)
@@ -1454,31 +1495,49 @@ impl ChatScreen {
             && !crate::tool_policy::workspace_file(&self.workspace_root).is_file()
         {
             self.push_alert("Workspace policy is missing; restore it or reopen chat to review workspace trust. Draft kept.".into());
+            return Ok(false);
+        }
+        if self.recorder.over_budget() {
+            self.push_alert(
+                "Session budget reached; queue paused. /clear starts a new session.".into(),
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
+        if matches!(self.input.contents().trim(), "/mode" | "/mode revoke") {
+            let text = self.input.contents();
+            self.remember_input();
+            return self.dispatch_command(text.trim(), backend);
+        }
+        if !self.input.contents().trim_start().starts_with('/') && !self.admit_prompt()? {
             return Ok(ScreenAction::Continue);
         }
         // While a turn is active, a plain prompt joins the FIFO queue and runs
         // when the current turn ends; no second billed request is launched.
         // Slash commands keep their local behavior below.
         let text = self.input.contents();
-        if self.response_in_progress {
+        if self.response_in_progress
+            || (!self.prompt_queue.is_empty() && !text.trim_start().starts_with('/'))
+        {
             if text.trim_start().starts_with('/') {
                 return Ok(ScreenAction::Continue);
             }
             if text.trim().is_empty() {
                 return Ok(ScreenAction::Continue);
             }
-            if self.recorder.over_budget() {
-                self.push_notice(
-                    "this session has reached its 64 MiB budget; /clear starts a new one and the draft was kept"
-                        .to_string(),
-                );
+            if self.prompt_queue.len() >= 64 || text.len() > 64 * 1024 {
+                self.push_alert("Queue limit: 64 prompts, 64 KiB per prompt. Draft kept.".into());
                 return Ok(ScreenAction::Continue);
             }
             let skills = self.input.selected_skills();
             self.remember_input();
             let queued_text = text;
-            self.push_notice(format!("Queued: {queued_text}"));
+            self.next_queue_id += 1;
             self.prompt_queue.push_back(QueuedPrompt {
+                id: self.next_queue_id,
                 text: queued_text,
                 skills,
             });
@@ -1491,13 +1550,6 @@ impl ChatScreen {
             if self.resend_available {
                 self.send_transcript(backend);
             }
-            return Ok(ScreenAction::Continue);
-        }
-        if !text.trim_start().starts_with('/') && self.recorder.over_budget() {
-            self.push_notice(
-                "this session has reached its 64 MiB budget; /clear starts a new one and the draft was kept"
-                    .to_string(),
-            );
             return Ok(ScreenAction::Continue);
         }
         let skills = self.input.selected_skills();
@@ -1557,7 +1609,6 @@ impl ChatScreen {
         };
         self.meters.context_tokens = None;
         self.meters.context_window = None;
-        self.prompt_queue_held = false;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.live_command = None;
@@ -2069,6 +2120,7 @@ impl ChatScreen {
     }
 
     fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
+        self.prompt_queue_held = true;
         self.interrupt_command();
         backend.cancel();
         self.recorder.cancel_turn();
@@ -2095,7 +2147,7 @@ impl ChatScreen {
         if !self.prompt_queue.is_empty() {
             let count = self.prompt_queue.len();
             self.push_notice(format!(
-                "{count} queued prompt{} waiting; Enter submits your draft, the queue follows",
+                "{count} queued prompt{} paused; Alt+Q to manage or resume",
                 if count == 1 { "" } else { "s" }
             ));
         }
@@ -5172,10 +5224,9 @@ mod tests {
             .unwrap();
         assert_eq!(backend.requests.len(), 1);
         assert_eq!(backend.requests[0].messages[0].text, "first");
-        // The prompt was queued, not dropped: the composer is empty and the
-        // transcript shows the queued prompt as a notice.
+        // Pending input is separate from both the composer and model history.
         assert_eq!(screen.input.contents(), "");
-        assert!(screen.messages().iter().any(|m| m.text == "Queued: next"));
+        assert_eq!(screen.prompt_queue.front().unwrap().text, "next");
         assert!(screen.response_in_progress());
         fs::remove_dir_all(state).unwrap();
     }
@@ -5235,7 +5286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_turn_holds_the_queue_until_a_turn_runs_cleanly() {
+    fn a_failed_turn_holds_the_queue_until_explicit_resume() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-hold");
         let mut screen = screen_in(&state);
         let mut backend = HangingBackend {
@@ -5268,11 +5319,14 @@ mod tests {
         assert_eq!(backend.requests.len(), 1);
         assert!(!screen.response_in_progress());
 
-        // A new clean turn (the operator resends) restarts the drain.
-        screen.set_input_text("retry");
-        screen
-            .apply_action(KeyAction::Submit, &mut backend)
-            .unwrap();
+        // Explicitly resume after inspecting the failure.
+        open_queue(&mut screen, &mut backend);
+        queue_key(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('r'),
+        );
+        screen.drain_prompt_queue(&mut backend);
         assert_eq!(backend.requests.len(), 2);
         backend
             .sender
@@ -5282,13 +5336,13 @@ mod tests {
             .unwrap();
         screen.poll_backend();
         screen.drain_prompt_queue(&mut backend);
-        assert_eq!(backend.requests.len(), 3);
-        assert_eq!(backend.requests[2].messages.last().unwrap().text, "second");
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages.last().unwrap().text, "second");
         fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
-    fn a_cancel_keeps_the_queue_and_it_follows_the_next_clean_turn() {
+    fn a_cancel_keeps_the_queue_until_explicit_resume() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-cancel");
         let mut screen = screen_in(&state);
         let mut backend = HangingBackend {
@@ -5317,11 +5371,9 @@ mod tests {
             .iter()
             .any(|m| m.text.contains("1 queued prompt")));
 
-        // The queue follows the next clean turn.
-        screen.set_input_text("fresh");
-        screen
-            .apply_action(KeyAction::Submit, &mut backend)
-            .unwrap();
+        // Explicitly resume the paused queue before running the next turn.
+        screen.prompt_queue_held = false;
+        screen.drain_prompt_queue(&mut backend);
         assert_eq!(backend.requests.len(), 2);
         backend
             .sender
@@ -5331,8 +5383,8 @@ mod tests {
             .unwrap();
         screen.poll_backend();
         screen.drain_prompt_queue(&mut backend);
-        assert_eq!(backend.requests.len(), 3);
-        assert_eq!(backend.requests[2].messages.last().unwrap().text, "second");
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages.last().unwrap().text, "second");
         fs::remove_dir_all(state).unwrap();
     }
 
@@ -5388,7 +5440,7 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_slash_command_is_not_queued_and_mode_applies_at_dequeue() {
+    fn slash_commands_are_not_queued() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-queue-mode");
         let mut screen = screen_in(&state);
         let mut backend = HangingBackend {
@@ -5423,4 +5475,308 @@ mod tests {
         assert_eq!(backend.requests.len(), 2);
         fs::remove_dir_all(state).unwrap();
     }
+    fn queue_key(
+        screen: &mut ChatScreen,
+        backend: &mut HangingBackend,
+        code: crossterm::event::KeyCode,
+    ) {
+        screen
+            .apply_terminal_event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    code,
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                backend,
+            )
+            .unwrap();
+    }
+
+    fn open_queue(screen: &mut ChatScreen, backend: &mut HangingBackend) {
+        screen
+            .apply_terminal_event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('q'),
+                    crossterm::event::KeyModifiers::ALT,
+                )),
+                backend,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn queue_manager_edits_deletes_and_suspends_dispatch_without_touching_draft() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-manager");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
+        for text in ["first", "second", "third"] {
+            screen.set_input_text(text);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        screen.prompt_queue[0].skills = vec!["repo/review".into()];
+        let id = screen.prompt_queue[0].id;
+        screen.set_input_text("unsent draft");
+        let visible = draw_lines(&mut screen, 100, 20).join("\n");
+        assert!(visible.contains("2 pending"));
+        assert!(visible.contains("second"));
+        assert!(visible.contains("third"));
+        open_queue(&mut screen, &mut backend);
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 1);
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        screen
+            .apply_terminal_event(Event::Paste(" edited".into()), &mut backend)
+            .unwrap();
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(screen.prompt_queue[0].text, "second edited");
+        assert_eq!(screen.prompt_queue[0].id, id);
+        assert_eq!(screen.prompt_queue[0].skills, ["repo/review"]);
+        assert_eq!(screen.prompt_queue[1].text, "third");
+        queue_key(&mut screen, &mut backend, KeyCode::Delete);
+        assert_eq!(screen.input_text(), "unsent draft");
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        screen.drain_prompt_queue(&mut backend);
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages.last().unwrap().text, "third");
+        assert_eq!(screen.input_text(), "unsent draft");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn cancel_pauses_across_ticks_and_resume_dispatches_exactly_one() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-resume");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
+        for text in ["first", "second", "third"] {
+            screen.set_input_text(text);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        for _ in 0..3 {
+            screen.poll_backend();
+            screen.drain_prompt_queue(&mut backend);
+        }
+        assert_eq!(backend.requests.len(), 1);
+        assert!(draw_lines(&mut screen, 100, 20)
+            .join("\n")
+            .contains("Queue paused"));
+        open_queue(&mut screen, &mut backend);
+        queue_key(&mut screen, &mut backend, KeyCode::Char('r'));
+        for _ in 0..3 {
+            screen.poll_backend();
+            screen.drain_prompt_queue(&mut backend);
+        }
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages.last().unwrap().text, "second");
+        assert_eq!(screen.prompt_queue.front().unwrap().text, "third");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn queued_admission_failure_retains_item_and_clear_requires_confirmation() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-admission");
+        let mut screen = screen_in(&state);
+        screen.workspace_root = state.clone();
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
+        for text in ["first", "second"] {
+            screen.set_input_text(text);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        screen.modes.has_policy = true; // Simulate deletion after admission.
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(screen.prompt_queue.front().unwrap().text, "second");
+        assert!(screen.prompt_queue_held);
+        assert!(screen
+            .messages
+            .iter()
+            .any(|m| m.text.contains("Workspace policy is missing")));
+        open_queue(&mut screen, &mut backend);
+        queue_key(&mut screen, &mut backend, KeyCode::Char('c'));
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        assert_eq!(screen.prompt_queue.len(), 1);
+        queue_key(&mut screen, &mut backend, KeyCode::Char('c'));
+        queue_key(&mut screen, &mut backend, KeyCode::Char('y'));
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        screen.drain_prompt_queue(&mut backend);
+        assert!(screen.prompt_queue.is_empty());
+        assert_eq!(backend.requests.len(), 1);
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn edited_queue_item_dispatches_with_skills_and_current_mode() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-edit-send");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
+        for text in ["first", "second", "third"] {
+            screen.set_input_text(text);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        screen.prompt_queue[0].skills = vec!["repo/review".into()];
+        open_queue(&mut screen, &mut backend);
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        screen
+            .apply_terminal_event(Event::Paste(" edited".into()), &mut backend)
+            .unwrap();
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        screen.modes.selected = crate::tool_policy::ExecutionMode::ReadOnly;
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::Completed)
+            .unwrap();
+        screen.poll_backend();
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        screen.drain_prompt_queue(&mut backend);
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(
+            backend.requests[1].messages.last().unwrap().text,
+            "second edited"
+        );
+        assert_eq!(backend.requests[1].skills, ["repo/review"]);
+        assert_eq!(
+            backend.requests[1].mode,
+            crate::tool_policy::ExecutionMode::ReadOnly
+        );
+        assert_eq!(screen.prompt_queue.front().unwrap().text, "third");
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn queue_overlay_keeps_transcript_and_composer_visible_and_scrolls_selection() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-overlay");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
+        for text in ["first", "queued-one", "queued-two"] {
+            screen.set_input_text(text);
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        screen.push_message(ChatMessage::new(
+            TranscriptRole::Assistant,
+            (0..20)
+                .map(|i| format!("visible response line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        screen.set_input_text("composer draft remains visible");
+        open_queue(&mut screen, &mut backend);
+        let rows = draw_lines(&mut screen, 100, 30);
+        let top = rows.iter().position(|row| row.contains('┌')).unwrap();
+        let bottom = rows.iter().position(|row| row.contains('└')).unwrap();
+        assert!(top >= 15, "overlay occupies only the lower half");
+        assert!(bottom - top < 15);
+        assert!(rows[..top]
+            .iter()
+            .any(|row| row.contains("visible response line")));
+        assert!(rows[bottom + 1..]
+            .iter()
+            .any(|row| row.contains("composer draft remains visible")));
+        assert!(rows.join("\n").contains("queued-one"));
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        let editing = draw_lines(&mut screen, 100, 30).join("\n");
+        assert!(editing.contains("Edit queued prompt"));
+        assert!(editing.contains("composer draft remains visible"));
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        for i in 0..20 {
+            screen.set_input_text(&format!("pending-{i}"));
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
+        }
+        open_queue(&mut screen, &mut backend);
+        for _ in 0..21 {
+            queue_key(&mut screen, &mut backend, KeyCode::Down);
+        }
+        let rows = draw_lines(&mut screen, 80, 24);
+        assert!(rows.join("\n").contains("› 22  pending-19"));
+        // Narrow and tiny terminals must still render safely.
+        for (w, h) in [(30, 12), (8, 5), (1, 1)] {
+            draw_lines(&mut screen, w, h);
+        }
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn queue_edit_renders_saved_text_and_alt_enter_starts_blank_without_erasing_saved_item() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let state = crate::fixture_directory::create_unique_fixture_directory("queue-edit-prefill");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend { requests: vec![], sender: None, cancels: 0 };
+        for text in ["first", "saved queued text"] {
+            screen.set_input_text(text);
+            screen.apply_action(KeyAction::Submit, &mut backend).unwrap();
+        }
+        open_queue(&mut screen, &mut backend);
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        let rows = draw_lines(&mut screen, 100, 30);
+        let header = rows.iter().position(|row| row.contains("Edit queued prompt")).unwrap();
+        assert!(rows[header + 2].contains("saved queued text"), "{rows:?}");
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(screen.prompt_queue[0].text, "saved queued text");
+        screen.apply_terminal_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), &mut backend).unwrap();
+        assert_eq!(screen.queue_view.as_ref().unwrap().editing.as_ref().unwrap().1.contents(), "");
+        assert_eq!(screen.prompt_queue[0].text, "saved queued text");
+        screen.apply_terminal_event(Event::Paste("discard this".into()), &mut backend).unwrap();
+        queue_key(&mut screen, &mut backend, KeyCode::Esc);
+        assert_eq!(screen.prompt_queue[0].text, "saved queued text");
+        screen.apply_terminal_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), &mut backend).unwrap();
+        screen.apply_terminal_event(Event::Paste("replacement text".into()), &mut backend).unwrap();
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(screen.prompt_queue[0].text, "replacement text");
+        queue_key(&mut screen, &mut backend, KeyCode::Enter);
+        let rows = draw_lines(&mut screen, 100, 30);
+        let header = rows.iter().position(|row| row.contains("Edit queued prompt")).unwrap();
+        assert!(rows[header + 2].contains("replacement text"));
+        fs::remove_dir_all(state).unwrap();
+    }
+
 }
