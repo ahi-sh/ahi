@@ -100,9 +100,14 @@ impl Modes {
         })
     }
     pub fn cycle_hint(&self) -> String {
+        let shortcut = if cfg!(target_os = "macos") {
+            "⌥ Option+M"
+        } else {
+            "Alt+M"
+        };
         self.cycle_target().map_or_else(
-            || "Alt+M to review trust".into(),
-            |mode| format!("Alt+M for {}", mode.label()),
+            || format!("{shortcut} to review trust"),
+            |mode| format!("{shortcut} for {}", mode.label()),
         )
     }
     pub fn cycle(&mut self) {
@@ -351,14 +356,21 @@ mod tests {
             selected: ReadOnly,
             ..Default::default()
         };
-        assert_eq!(modes.cycle_hint(), "Alt+M to review trust");
+        let expected = |hint: &str| {
+            if cfg!(target_os = "macos") {
+                hint.replace("Alt+M", "⌥ Option+M")
+            } else {
+                hint.to_owned()
+            }
+        };
+        assert_eq!(modes.cycle_hint(), expected("Alt+M to review trust"));
         modes.cycle();
         assert!(matches!(modes.dialog, Some(Dialog::Trust)));
         modes.trusted = true;
         modes.dialog = None;
-        assert_eq!(modes.cycle_hint(), "Alt+M for Trusted");
+        assert_eq!(modes.cycle_hint(), expected("Alt+M for Trusted"));
         modes.cycle();
-        assert_eq!(modes.cycle_hint(), "Alt+M for Plan");
+        assert_eq!(modes.cycle_hint(), expected("Alt+M for Plan"));
         modes.has_policy = true;
         modes.named = vec![Named("dev".into()), Named("review".into())];
         for (hint, target) in [
@@ -366,12 +378,12 @@ mod tests {
             ("Alt+M for review", Named("review".into())),
             ("Alt+M for Plan", ReadOnly),
         ] {
-            assert_eq!(modes.cycle_hint(), hint);
+            assert_eq!(modes.cycle_hint(), expected(hint));
             modes.cycle();
             assert_eq!(modes.selected, target);
         }
         modes.selected = FullAccess;
-        assert_eq!(modes.cycle_hint(), "Alt+M for Plan");
+        assert_eq!(modes.cycle_hint(), expected("Alt+M for Plan"));
     }
 
     #[test]

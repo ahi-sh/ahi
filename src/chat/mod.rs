@@ -3461,7 +3461,12 @@ mod tests {
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2].starts_with("─ / commands "));
-        assert!(idle[idle.len() - 2].contains("Policy · Alt+M for Plan · /mode"));
+        let mode_hint = if cfg!(target_os = "macos") {
+            "Policy · ⌥ Option+M for Plan · /mode"
+        } else {
+            "Policy · Alt+M for Plan · /mode"
+        };
+        assert!(idle[idle.len() - 2].contains(mode_hint));
         assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()
