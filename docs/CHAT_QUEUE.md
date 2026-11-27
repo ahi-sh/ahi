@@ -2,7 +2,18 @@
 
 The queue holds prompts submitted while a chat turn is active. Each pending prompt starts a separate turn after the previous turn completes. For example, submit `Inspect the parser`, then `Explain the error handling`, then `Suggest a smaller interface`. The second and third prompts wait in that order. Each receives the conversation produced by the preceding turns.
 
-The panel above the composer shows the next three prompts and the number of remaining prompts. Press **Alt+Q** to open the manager. The manager suspends automatic dispatch. The active turn can continue while the panel is open. The transcript and composer draft remain visible.
+The panel above the composer shows the next three prompts and the number of remaining prompts. Its status line names the next send event. During an active turn, the next prompt waits for that turn to complete, including its tool calls. A failed or cancelled turn pauses the queue.
+
+Press **Alt+Q** to open the manager. The manager suspends automatic dispatch. The active turn can continue while the panel is open. When that turn has finished, closing the manager sends the next prompt if the queue is ready. If the queue is paused, press **r** to resume it. The transcript and composer draft remain visible.
+
+The manager always shows the current **Ready** or **Paused** state in its title. The lower border shows **p Pause**, **r Resume + close**, and **Esc Close**, including on small terminals. The status line names the condition that blocks the next send. These controls do not require the help menu. Pause and resume also work while help is open.
+
+| Current state | Action | Result |
+| --- | --- | --- |
+| Ready | p | Paused. The active turn continues; pending prompts wait. |
+| Paused | r | Ready. The manager closes. The next prompt sends when the active turn finishes, or immediately if chat is idle. |
+| Ready or Paused | Esc | The manager closes. The queue keeps its state. |
+| Ready | Turn fails or is cancelled | Paused. Pending prompts require explicit resume. |
 
 ## Controls
 
@@ -13,7 +24,7 @@ The panel above the composer shows the next three prompts and the number of rema
 | Page Up / Page Down | Move selection by one visible page. |
 | Alt+Up / Alt+Down | Move the selected prompt earlier or later. Selection follows that prompt. |
 | Enter | Edit the saved prompt. Enter saves; Esc discards the edit. |
-| Alt/Option+Enter | Start a blank replacement for the selected prompt. The saved prompt stays intact until Enter saves the replacement. |
+| Option/Alt+Enter | Edit the selected prompt in a fresh, empty text box. The saved prompt stays intact until Enter saves the replacement. |
 | Shift+Enter | Insert a newline in the editor. Alt+Enter also inserts a newline once editing has started. |
 | Delete | Remove the selected prompt. |
 | c, then y | Remove all pending prompts. Any other confirmation key cancels. |

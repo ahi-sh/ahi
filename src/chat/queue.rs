@@ -4,19 +4,55 @@ use ahi_widgets::{Block, Borders, Clear};
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 const QUEUE_HELP: &[&str] = &[
+    "p: Ready → Paused; turn continues.",
+    "r: Paused → Ready; closes panel.",
+    "Esc: close; keep Ready/Paused.",
+    "Next sends after turn completes.",
+    "Close panel to allow next send.",
+    "Failure/cancel → Paused.",
     "↑/↓ select · Home/End first/last",
     "PgUp/PgDn move one visible page",
     "Alt+↑/↓ move prompt earlier/later",
-    "Enter edit · Alt+Enter replace",
+    "Enter: edit the saved text.",
+    "Option/Alt+Enter: empty editor.",
+    "Enter saves; Esc keeps saved text.",
     "Delete remove · c then y clear all",
-    "p pause · r resume and close",
     "Esc close · ? show/hide help",
     "Edits keep the prompt's skills.",
-    "Dispatch waits while panel is open.",
+    "Tool calls finish before next send.",
+    "If idle, closing sends the next.",
     "Pending prompts are lost on exit.",
 ];
 
 impl ChatScreen {
+    fn queue_dispatch_hint(&self) -> &'static str {
+        if self.prompt_queue.is_empty() {
+            "No pending prompts to send."
+        } else if self.prompt_queue_held || self.resend_available {
+            if self.queue_view.is_some() {
+                if self.response_in_progress {
+                    "Paused: active turn continues."
+                } else {
+                    "Paused: pending prompts will wait."
+                }
+            } else {
+                "Paused: Alt+Q, then r to resume."
+            }
+        } else if self.response_in_progress {
+            if self.queue_view.is_some() {
+                "Next: turn ends and panel closes."
+            } else {
+                "Next: after current turn completes."
+            }
+        } else if self.modes.dialog.is_some() {
+            "Next: after mode selection closes."
+        } else if self.queue_view.is_some() {
+            "Next: when this panel closes."
+        } else {
+            "Next: when chat is idle."
+        }
+    }
+
     pub(super) fn queue_event(&mut self, event: Event) {
         let Some(view) = self.queue_view.as_mut() else {
             return;
@@ -77,6 +113,16 @@ impl ChatScreen {
                 view.selected = 0;
             }
             view.confirm_clear = false;
+            return;
+        }
+        if plain && key.code == KeyCode::Char('p') {
+            self.prompt_queue_held = true;
+            return;
+        }
+        if plain && key.code == KeyCode::Char('r') {
+            self.prompt_queue_held = false;
+            self.resend_available = false;
+            self.queue_view = None;
             return;
         }
         if view.help {
@@ -144,12 +190,6 @@ impl ChatScreen {
             KeyCode::Char('c') if plain && !self.prompt_queue.is_empty() => {
                 view.confirm_clear = true
             }
-            KeyCode::Char('p') if plain => self.prompt_queue_held = true,
-            KeyCode::Char('r') if plain => {
-                self.prompt_queue_held = false;
-                self.resend_available = false;
-                self.queue_view = None;
-            }
             _ => {}
         }
     }
@@ -158,15 +198,18 @@ impl ChatScreen {
         if self.prompt_queue.is_empty() {
             return;
         }
-        let mut rows = vec![format!(
-            "Queue {} · {} pending · Alt+Q manage · session-local",
-            if self.prompt_queue_held {
-                "paused"
-            } else {
-                "ready"
-            },
-            self.prompt_queue.len()
-        )];
+        let mut rows = vec![
+            format!(
+                "Queue {} · {} pending · Alt+Q manage",
+                if self.prompt_queue_held {
+                    "paused"
+                } else {
+                    "ready"
+                },
+                self.prompt_queue.len()
+            ),
+            self.queue_dispatch_hint().into(),
+        ];
         rows.extend(
             self.prompt_queue
                 .iter()
@@ -185,6 +228,7 @@ impl ChatScreen {
         frame: &mut ratatui_core::terminal::Frame,
         bottom: u16,
     ) {
+        let dispatch_hint = self.queue_dispatch_hint();
         let Some(view) = &mut self.queue_view else {
             return;
         };
@@ -201,7 +245,7 @@ impl ChatScreen {
         } else if view.help {
             QUEUE_HELP.len() + 3
         } else {
-            self.prompt_queue.len().max(1) + 3 + usize::from(width >= 60)
+            self.prompt_queue.len().max(1) + 4
         };
         let height = (desired.min(u16::MAX as usize) as u16)
             .min((screen.height / 2).max(1))
@@ -216,7 +260,14 @@ impl ChatScreen {
             return;
         }
         let title = if view.help {
-            " Queue controls ".to_owned()
+            format!(
+                " Queue controls · {} ",
+                if self.prompt_queue_held {
+                    "paused"
+                } else {
+                    "ready"
+                }
+            )
         } else if view.editing.is_some() {
             " Queue editor ".to_owned()
         } else {
@@ -236,7 +287,18 @@ impl ChatScreen {
                 self.prompt_queue.len()
             )
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let mut block = Block::default().borders(Borders::ALL).title(title);
+        if view.editing.is_none() && !view.confirm_clear {
+            let controls = if popup.width >= 42 {
+                " p Pause · r Resume + close · Esc Close "
+            } else {
+                "p Pause · r Resume + close · Esc"
+            };
+            block = block.title_bottom(Line::styled(
+                controls,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
         let area = block.inner(popup);
         frame.render_widget(
             Clear,
@@ -278,12 +340,11 @@ impl ChatScreen {
             return;
         }
         let footer_rows = usize::from(area.height > 1);
-        let status_rows =
-            usize::from(!view.help && area.width >= 60 && area.height > 2 && !view.confirm_clear);
+        let status_rows = usize::from(!view.help && area.height > 2 && !view.confirm_clear);
         view.visible_rows = (area.height as usize - footer_rows - status_rows).max(1);
         let mut rows = Vec::new();
         if status_rows > 0 {
-            rows.push(Line::from("Dispatch suspended while open · session-local"));
+            rows.push(Line::from(dispatch_hint));
         }
         if view.help {
             view.help_offset = view
@@ -328,8 +389,10 @@ impl ChatScreen {
                 "Clear all? y confirm · any key cancel"
             } else if view.help {
                 "↑/↓ scroll · ?/Esc back"
+            } else if area.width >= 64 {
+                "Enter edit · Option/Alt+Enter empty editor · ? help · Esc close"
             } else {
-                "Enter edit · ? help · Esc close"
+                "Option/Alt+Enter empty · ? help"
             };
             frame.render_widget(
                 Paragraph::new(footer),

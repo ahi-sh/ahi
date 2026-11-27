@@ -1292,7 +1292,7 @@ impl ChatScreen {
         let pending_height = if self.prompt_queue.is_empty() {
             0
         } else {
-            (self.prompt_queue.len().min(3) + 1 + usize::from(self.prompt_queue.len() > 3)) as u16
+            (self.prompt_queue.len().min(3) + 2 + usize::from(self.prompt_queue.len() > 3)) as u16
         };
         let pending = Layout::vertical([Constraint::Min(0), Constraint::Length(pending_height)])
             .split(chunks[0]);
