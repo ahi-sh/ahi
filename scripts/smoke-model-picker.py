@@ -49,6 +49,8 @@ def main() -> None:
                          help="verify live checkpoints and Ctrl+C recovery in both engines")
     focused.add_argument("--session-details-only", action="store_true",
                          help="verify rich tool details in resumed standalone and service-backed chats")
+    focused.add_argument("--queue-manager-only", action="store_true",
+                         help="verify queued prompt editing, ordering, navigation and compact layouts")
     args = parser.parse_args()
     if args.capture_directory:
         args.capture_directory.mkdir(parents=True, exist_ok=True)
@@ -720,6 +722,242 @@ def main() -> None:
         print('PASS: one write, one correlated result, no blank-Enter replay before or after resume (both engines)')
         if args.post_tool_failure_only:
             return
+
+    if args.queue_manager_only:
+        for engine in ("standalone", "service"):
+            requests = []
+            releases = [threading.Event() for _ in range(6)]
+
+            class QueueGateway(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    number = len(requests)
+                    requests.append(request)
+                    if number >= len(releases) or not releases[number].wait(30):
+                        self.send_error(500)
+                        return
+                    if number == 2:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Content-Length", "500")
+                        self.end_headers()
+                        self.wfile.write(b": interrupted\n\n")
+                        return
+                    event = {"choices": [{"index": 0,
+                              "delta": {"content": f"queue-response-{number + 1}"},
+                              "finish_reason": "stop"}]}
+                    payload = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, *_arguments):
+                    pass
+
+            with tempfile.TemporaryDirectory(prefix="ahi-queue-", dir="/tmp") as temporary:
+                state = Path(temporary)
+                session_id = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+                store = state / "sessions"
+                store.mkdir()
+                transcript = store / f"{session_id}.jsonl"
+                transcript.write_text(json.dumps(dict(
+                    type="session", schema=1, id=session_id, host="fixture", cwd=temporary,
+                    ahi_version="0.32.0", gateway="local", model="fixture", thinking="off",
+                    started="2026-01-01T00:00:00Z")) + "\n")
+                gateway = ThreadingHTTPServer(("127.0.0.1", 0), QueueGateway)
+                server_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                server_thread.start()
+                (state / "models.json").write_text(json.dumps({"providers": {"local": {
+                    "baseUrl": f"http://127.0.0.1:{gateway.server_port}/v1",
+                    "api": "openai-completions", "models": [{"id": "fixture"}],
+                }}}))
+                service_socket = str(state / "service.sock")
+                options = ("--standalone",) if engine == "standalone" else ("--socket", service_socket)
+                chat = Session(state, cwd=state, columns=80, rows=24,
+                               command=("tui", "--session", session_id, *options))
+
+                def wait_requests(count: int) -> None:
+                    deadline = time.monotonic() + 10
+                    while len(requests) < count and time.monotonic() < deadline:
+                        chat.read()
+                    assert len(requests) == count, [r["messages"][-1] for r in requests]
+
+                def expect_selected(text: str) -> None:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if any("›" in row and text in row for row in chat.screen().splitlines()):
+                            return
+                        chat.read()
+                    raise AssertionError((text, chat.screen()))
+
+                try:
+                    chat.expect("resumed session")
+                    chat.send("first-prompt\r")
+                    wait_requests(1)
+                    queued = ["second-prompt", "third-prompt", "fourth-prompt"]
+                    queued.extend(f"pending-{number:02}" for number in range(1, 10))
+                    for prompt in queued:
+                        chat.send(prompt + "\r")
+                    chat.expect("12 pending")
+                    chat.send("preserved-draft\x1bq")
+                    expect_selected("second-prompt")
+                    chat.expect("p Pause")
+                    chat.expect("r Resume + close")
+                    chat.send("\x1b[B\x1b[1;3A")
+                    expect_selected("third-prompt")
+                    chat.send("\r-edited\r")
+                    expect_selected("third-prompt-edited")
+                    chat.send("\x1b[F")
+                    expect_selected("pending-09")
+                    chat.send("\x1b[5~")
+                    chat.absent("› 12")
+                    chat.send("\x1b[6~\x1b[H")
+                    expect_selected("third-prompt-edited")
+                    chat.capture(f"queue-manager-{engine}-80x24")
+                    chat.resize(40, 12)
+                    expect_selected("third-prompt-edited")
+                    chat.expect("p Pause")
+                    chat.expect("r Resume + close")
+                    chat.expect("preserved-draft")
+                    chat.send("\r")
+                    chat.expect("Edit queued prompt")
+                    chat.send("\x1b[200~" + " wrapped-content" * 5 + "\ncompact-end\x1b[201~")
+                    chat.expect("compact-end")
+                    compact_rows = chat.screen().splitlines()
+                    header_row = next(index for index, row in enumerate(compact_rows)
+                                      if "Edit queued prompt" in row)
+                    content_row = next(index for index, row in enumerate(compact_rows)
+                                       if "compact-end" in row)
+                    assert content_row >= header_row + 2, chat.screen()
+                    chat.capture(f"queue-manager-{engine}-editor-40x12")
+                    chat.send("\x1b")
+                    expect_selected("third-prompt-edited")
+                    chat.send("\x1b[F")
+                    expect_selected("pending-09")
+                    chat.capture(f"queue-manager-{engine}-40x12")
+                    chat.resize(80, 24)
+                    expect_selected("pending-09")
+                    chat.send("\x1b[H?")
+                    chat.expect("Queue controls")
+                    chat.expect("p: Ready → Paused")
+                    chat.expect("r: Paused → Ready")
+                    chat.capture(f"queue-manager-{engine}-help")
+                    chat.send("p?")
+                    chat.expect("Queue paused")
+                    expect_selected("third-prompt-edited")
+                    chat.send("?r")
+                    chat.absent("Queue controls")
+                    chat.expect("Queue ready")
+                    chat.send("\x1bq")
+                    expect_selected("third-prompt-edited")
+                    releases[0].set()
+                    deadline = time.monotonic() + .5
+                    while time.monotonic() < deadline:
+                        chat.read()
+                    assert len(requests) == 1, "opening the queue must suspend dispatch"
+                    chat.send("r")
+                    wait_requests(2)
+                    assert requests[1]["messages"][-1]["content"] == "third-prompt-edited"
+                    chat.expect("preserved-draft")
+                    chat.send("\x1bqp")
+                    chat.expect("Queue paused")
+                    releases[1].set()
+                    deadline = time.monotonic() + .5
+                    while time.monotonic() < deadline:
+                        chat.read()
+                    assert len(requests) == 2
+                    expect_selected("second-prompt")
+                    chat.send("\r-discarded")
+                    chat.expect("second-prompt-discarded")
+                    chat.send("\x1b")
+                    expect_selected("second-prompt")
+                    chat.send("\x1b[13;3u/quit\r")
+                    chat.expect("Slash commands cannot be queued.")
+                    chat.capture(f"queue-manager-{engine}-invalid-edit")
+                    chat.send("\x1b")
+                    expect_selected("second-prompt")
+                    chat.send("\r")
+                    chat.expect("Edit queued prompt")
+                    chat.expect("second-prompt")
+                    chat.absent("second-prompt-discarded")
+                    chat.send("\x1b")
+                    expect_selected("second-prompt")
+                    chat.send("\x1b[3~")
+                    expect_selected("fourth-prompt")
+                    chat.resize(80, 7)
+                    expect_selected("fourth-prompt")
+                    chat.expect("p Pause")
+                    chat.expect("r Resume + close")
+                    chat.send("c")
+                    chat.expect("y clear all")
+                    chat.capture(f"queue-manager-{engine}-clear-80x7")
+                    chat.send("\x1b")
+                    chat.absent("y clear all")
+                    chat.resize(80, 24)
+                    expect_selected("fourth-prompt")
+                    chat.send("c\x1b")
+                    expect_selected("fourth-prompt")
+                    chat.send("cy")
+                    chat.expect("0 pending")
+                    chat.capture(f"queue-manager-{engine}-empty")
+                    chat.send("\x1b")
+                    chat.absent("No pending prompts")
+                    chat.expect("preserved-draft")
+                    chat.send("\x03")
+                    chat.absent("preserved-draft")
+                    assert len(requests) == 2
+                    chat.send("retry-current\r")
+                    wait_requests(3)
+                    chat.send("after-retry\r")
+                    chat.expect("1 pending")
+                    releases[2].set()
+                    chat.expect("Enter resends the last message")
+                    chat.send("\r")
+                    wait_requests(4)
+                    assert requests[3]["messages"][-1]["content"] == "retry-current"
+                    assert sum(message.get("content") == "retry-current"
+                               for message in requests[3]["messages"]) == 1
+                    releases[3].set()
+                    chat.expect("queue-response-4")
+                    assert len(requests) == 4
+                    chat.expect("Queue paused")
+                    chat.send("\x1bqr")
+                    wait_requests(5)
+                    assert requests[4]["messages"][-1]["content"] == "after-retry"
+                    chat.send("after-mode-dialog\r/mode\r")
+                    chat.expect("Modes · filter:")
+                    releases[4].set()
+                    deadline = time.monotonic() + .5
+                    while time.monotonic() < deadline:
+                        chat.read()
+                    assert len(requests) == 5, "the mode dialog must suspend dispatch"
+                    chat.capture(f"queue-manager-{engine}-mode-dialog")
+                    chat.send("\x1b")
+                    wait_requests(6)
+                    assert requests[5]["messages"][-1]["content"] == "after-mode-dialog"
+                    releases[5].set()
+                    chat.expect("queue-response-6")
+                    chat.send("/quit\r")
+                    chat.finish()
+                    entries = [json.loads(line) for line in transcript.read_text().splitlines()]
+                    operator_prompts = [entry["text"] for entry in entries if entry.get("role") == "operator"]
+                    assert operator_prompts == [
+                        "first-prompt", "third-prompt-edited", "retry-current",
+                        "retry-current", "after-retry", "after-mode-dialog"], operator_prompts
+                finally:
+                    for release in releases:
+                        release.set()
+                    chat.close()
+                    if engine == "service":
+                        subprocess.run([binary, "--state-dir", state, "serve", "--socket", service_socket, "stop"],
+                                       capture_output=True, timeout=10, check=True)
+                    gateway.shutdown()
+                    gateway.server_close()
+                    server_thread.join(5)
+        print("PASS: standalone and service queue editing, request order, draft preservation and 80×24/40×12 layouts")
+        return
 
     if args.stream_recovery_only:
         marker = "visible-stream-marker"
