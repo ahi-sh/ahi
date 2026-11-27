@@ -182,6 +182,11 @@ struct QueueView {
     selected: usize,
     editing: Option<(u64, InputEditor)>,
     confirm_clear: bool,
+    help: bool,
+    help_offset: usize,
+    visible_rows: usize,
+    editor_width: usize,
+    edit_error: Option<&'static str>,
 }
 
 /// Pending input; skills remain paired with the prompt during queue edits.
@@ -581,12 +586,18 @@ impl ChatScreen {
             self.queue_event(event);
             return Ok(ScreenAction::Continue);
         }
-        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') && key.modifiers == crossterm::event::KeyModifiers::ALT)
+        if self.modes.dialog.is_none()
+            && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') && key.modifiers == crossterm::event::KeyModifiers::ALT)
         {
             self.queue_view = Some(QueueView {
                 selected: 0,
                 editing: None,
                 confirm_clear: false,
+                help: false,
+                help_offset: 0,
+                visible_rows: 1,
+                editor_width: self.transcript_width.max(1),
+                edit_error: None,
             });
             return Ok(ScreenAction::Continue);
         }
@@ -1208,7 +1219,11 @@ impl ChatScreen {
     /// records, admits under the current mode, and reports like a typed one.
     /// Failure or cancellation holds pending work until explicit resume.
     fn drain_prompt_queue(&mut self, backend: &mut dyn CompletionBackend) {
-        if self.response_in_progress || self.approval.is_some() || self.queue_view.is_some() {
+        if self.response_in_progress
+            || self.approval.is_some()
+            || self.queue_view.is_some()
+            || self.modes.dialog.is_some()
+        {
             return;
         }
         if self.prompt_queue.is_empty() {
@@ -1519,13 +1534,16 @@ impl ChatScreen {
         // when the current turn ends; no second billed request is launched.
         // Slash commands keep their local behavior below.
         let text = self.input.contents();
+        if text.trim().is_empty() {
+            if !self.response_in_progress && self.resend_available {
+                self.send_transcript(backend);
+            }
+            return Ok(ScreenAction::Continue);
+        }
         if self.response_in_progress
             || (!self.prompt_queue.is_empty() && !text.trim_start().starts_with('/'))
         {
             if text.trim_start().starts_with('/') {
-                return Ok(ScreenAction::Continue);
-            }
-            if text.trim().is_empty() {
                 return Ok(ScreenAction::Continue);
             }
             if self.prompt_queue.len() >= 64 || text.len() > 64 * 1024 {
@@ -1542,14 +1560,6 @@ impl ChatScreen {
                 skills,
             });
             self.scroll_from_bottom = 0;
-            return Ok(ScreenAction::Continue);
-        }
-        if text.trim().is_empty() {
-            // A blank Enter after a connection failure sends the same
-            // transcript again; otherwise it does nothing.
-            if self.resend_available {
-                self.send_transcript(backend);
-            }
             return Ok(ScreenAction::Continue);
         }
         let skills = self.input.selected_skills();
@@ -5750,33 +5760,69 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let state = crate::fixture_directory::create_unique_fixture_directory("queue-edit-prefill");
         let mut screen = screen_in(&state);
-        let mut backend = HangingBackend { requests: vec![], sender: None, cancels: 0 };
+        let mut backend = HangingBackend {
+            requests: vec![],
+            sender: None,
+            cancels: 0,
+        };
         for text in ["first", "saved queued text"] {
             screen.set_input_text(text);
-            screen.apply_action(KeyAction::Submit, &mut backend).unwrap();
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap();
         }
         open_queue(&mut screen, &mut backend);
         queue_key(&mut screen, &mut backend, KeyCode::Enter);
         let rows = draw_lines(&mut screen, 100, 30);
-        let header = rows.iter().position(|row| row.contains("Edit queued prompt")).unwrap();
+        let header = rows
+            .iter()
+            .position(|row| row.contains("Edit queued prompt"))
+            .unwrap();
         assert!(rows[header + 2].contains("saved queued text"), "{rows:?}");
         queue_key(&mut screen, &mut backend, KeyCode::Enter);
         assert_eq!(screen.prompt_queue[0].text, "saved queued text");
-        screen.apply_terminal_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), &mut backend).unwrap();
-        assert_eq!(screen.queue_view.as_ref().unwrap().editing.as_ref().unwrap().1.contents(), "");
+        screen
+            .apply_terminal_event(
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(
+            screen
+                .queue_view
+                .as_ref()
+                .unwrap()
+                .editing
+                .as_ref()
+                .unwrap()
+                .1
+                .contents(),
+            ""
+        );
         assert_eq!(screen.prompt_queue[0].text, "saved queued text");
-        screen.apply_terminal_event(Event::Paste("discard this".into()), &mut backend).unwrap();
+        screen
+            .apply_terminal_event(Event::Paste("discard this".into()), &mut backend)
+            .unwrap();
         queue_key(&mut screen, &mut backend, KeyCode::Esc);
         assert_eq!(screen.prompt_queue[0].text, "saved queued text");
-        screen.apply_terminal_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)), &mut backend).unwrap();
-        screen.apply_terminal_event(Event::Paste("replacement text".into()), &mut backend).unwrap();
+        screen
+            .apply_terminal_event(
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                &mut backend,
+            )
+            .unwrap();
+        screen
+            .apply_terminal_event(Event::Paste("replacement text".into()), &mut backend)
+            .unwrap();
         queue_key(&mut screen, &mut backend, KeyCode::Enter);
         assert_eq!(screen.prompt_queue[0].text, "replacement text");
         queue_key(&mut screen, &mut backend, KeyCode::Enter);
         let rows = draw_lines(&mut screen, 100, 30);
-        let header = rows.iter().position(|row| row.contains("Edit queued prompt")).unwrap();
+        let header = rows
+            .iter()
+            .position(|row| row.contains("Edit queued prompt"))
+            .unwrap();
         assert!(rows[header + 2].contains("replacement text"));
         fs::remove_dir_all(state).unwrap();
     }
-
 }

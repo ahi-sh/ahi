@@ -1,6 +1,6 @@
 ---
 name: verify-live-harness
-description: Exercise ahi interactively after changes to tool schemas, permissions, skill loading, mode selection, streaming, or session exit. Verify model-chosen arguments, actual effects, and what the operator saw. Live inference requires separate authorization.
+description: Exercise ahi interactively after changes to tool schemas, permissions, skill loading, mode selection, streaming, chat queue controls, or session exit. Verify model-chosen arguments, actual effects, and what the operator saw. Live inference requires separate authorization.
 references:
   - command-cwd.md
 ---
@@ -8,6 +8,19 @@ references:
 # Verify a harness change with a real model
 
 Pick the smallest probe that would distinguish the new behavior from the old. Do not run the whole matrix by default. Use a disposable workspace, the checkout's freshly built binary, and an explicitly authorized model, turn count, and surface. Never send real project files, credentials, or user conversations as test data. For a picker-only change, exercise the picker without submitting a model turn.
+
+## Queue controls without live inference
+
+For queue interaction, layout, or dispatch changes, build the checkout binary and run the maintained terminal workflow from the repository root:
+
+```sh
+cargo build --locked --bin ahi
+uv run scripts/smoke-model-picker.py --binary target/debug/ahi --queue-manager-only --capture-directory target/chat-queue-captures
+```
+
+This probe uses disposable state and a loopback HTTP fixture in standalone and service-backed chat. It needs POSIX pseudo-terminals, local listeners, and Unix sockets. It does not need personal credentials or an external model service. Inspect the request-order assertions and the 80×24 and 40×12 captures. The controls and dispatch contract are documented in `docs/CHAT_QUEUE.md`.
+
+If local listener creation fails with `Operation not permitted`, rerun with the required local execution permission. Preserve failure output and captures when an assertion fails. Correct the implementation or fixture, then repeat only this focused probe. The probe removes its disposable state and stops its own service. Do not restart an existing user service or broaden this check into paid inference.
 
 ## Choose a probe
 
