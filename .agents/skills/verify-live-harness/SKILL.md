@@ -33,6 +33,10 @@ uv run --no-project --offline scripts/smoke-model-picker.py --binary target/debu
 
 The POSIX fixture supplies disposable home, repository, policy, and state directories. Its loopback HTTP service captures all three provider encodings. It verifies standalone and service chat, next-turn refresh, fixed continuation snapshots, actual permitted effects, runtime denials, protected instruction files, invalid instruction files, and exclusion of instructions from durable history. Do not substitute a real home or credentials for this probe. No external model authorization is needed for the local fixture. See `docs/MODEL_CONTEXT.md` for the source and precedence contract.
 
+Check the reported Git layout results. The fixture exercises nested linked worktrees and separate metadata. SHA-256 and reftable cases require local Git support for initializing those formats.
+
+For request-size or skill-visibility changes, also run `cargo test --all-features --lib chat::backend::http::tests`. The loopback tests inspect the system text and tool schemas, exercise explicit and automatic loads, and submit a byte-limited request with actual tool results. Run the terminal script without a focus flag to check exact UTF-8 byte limits through the UI.
+
 Local listeners, Unix sockets, and pseudo-terminals must be permitted. Keep failure captures for diagnosis. The probe stops its own service and removes its disposable state; it does not restart a user service. After a failure, correct the implementation or fixture and rerun this focused workflow before considering live inference.
 
 ## Choose a probe

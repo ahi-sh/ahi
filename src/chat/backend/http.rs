@@ -346,7 +346,12 @@ fn complete(
         .ok_or_else(|| Error::policy("cannot resolve the instruction working directory"))?
         .canonicalize()
         .map_err(|_| Error::policy("cannot resolve the instruction working directory"))?;
-    let instruction_files = crate::system_prompt::Instructions::load(&directory)?;
+    #[cfg(not(test))]
+    let operator_home = std::env::home_dir();
+    #[cfg(test)]
+    let operator_home = Some(state.state.join("operator-home"));
+    let instruction_files =
+        crate::system_prompt::Instructions::load(&directory, operator_home.as_deref())?;
     let child = caller.origin == "delegate";
     let mut rounds = 0usize;
     let mode = request.mode.clone();
@@ -386,20 +391,18 @@ fn complete(
         ))?;
         runtime.load_explicit(explicit, &mut messages, sender)?;
     }
-    let schemas = tools.as_ref().map(ToolRuntime::schemas);
-    let capabilities = match &tools {
-        Some(runtime) => runtime.capability_summary(schemas.as_deref().unwrap_or_default()),
-        None => {
-            crate::tool_policy::ActionPolicy::default().capability_summary(&mode, &directory, &[])
-        }
-    };
-    let instructions = instruction_files.with_capabilities(&capabilities);
+    let (schemas, policy_details) = tools.as_ref().map(ToolRuntime::model_capabilities).unzip();
+    let has_tools = schemas.as_ref().is_some_and(|schemas| !schemas.is_empty());
+    let mut instructions = instruction_files.for_turn(mode.label(), &directory, has_tools);
+    let required_length = instructions.len();
+    instructions.push_str(policy_details.as_deref().unwrap_or_default());
+    let mut active_instructions = instructions.as_str();
     let mut turn = || -> Result<()> {
         loop {
             if child && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Err(Error::new("assignment deadline reached"));
             }
-            let context = RequestContext::new(
+            let mut context = RequestContext::new(
                 &selection.model,
                 thinking,
                 metadata,
@@ -407,8 +410,18 @@ fn complete(
                 schemas.as_deref(),
                 connection.browser_token(),
             )
-            .with_instructions(&instructions);
-            let body = protocol::request_body(connection.protocol, &context)?;
+            .with_instructions(active_instructions);
+            let body = match protocol::request_body(connection.protocol, &context) {
+                Err(error)
+                    if error.kind() == ErrorKind::Limit
+                        && active_instructions.len() > required_length =>
+                {
+                    active_instructions = &instructions[..required_length];
+                    context.instructions = active_instructions;
+                    protocol::request_body(connection.protocol, &context)?
+                }
+                result => result?,
+            };
             cancelled(cancel)?;
             let response = send(agent, state, &connection, &body, sender, cancel, deadline)?;
             let outcome = decode(connection.protocol, &context, response, sender, cancel)?;

@@ -62,6 +62,7 @@ def main() -> None:
     import pty
     import termios
 
+    mode_shortcut = "⌥ Option+M" if sys.platform == "darwin" else "Alt+M"
     binary = args.binary.resolve(strict=True)
 
     class Session:
@@ -78,6 +79,7 @@ def main() -> None:
                 instruction_home = state / "home"
                 instruction_home.mkdir(parents=True, exist_ok=True)
                 env["HOME"] = str(instruction_home)
+                env.pop("NO_COLOR", None)
                 # Hide real clipboard programs and make copy routing deterministic.
                 # A dummy display prevents headless OSC 52 from masking adapter failures.
                 env.update(TERM="xterm-256color", PATH=str(executable_dir) if executable_dir else "/nonexistent",
@@ -354,11 +356,11 @@ def main() -> None:
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")  # Shift+Tab: effort, never authority
                         chat.expect("(local) fixture • minimal")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         redraw_release.clear()
                         chat.send("redraw-probe\r")
                         chat.expect("Thinking...")
@@ -382,12 +384,12 @@ def main() -> None:
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.expect("draft-preserved")
                         assert len(list((state / "workspace-trust").iterdir())) == 1
                         assert not (work / "ahi.tools.yaml").exists()
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
                         chat.send("\r")
                         chat.expect("<tool_call>not another call")
                         chat.expect("write_file marker · Plan blocks workspace writes, commands and delegation")
@@ -395,7 +397,7 @@ def main() -> None:
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
                         chat.send("\x1bm")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
                         deadline = time.monotonic() + 5
@@ -433,13 +435,13 @@ def main() -> None:
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("\x1b")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("f")
-                        chat.expect("Full Access · Alt+M for Plan")
+                        chat.expect(f"Full Access · {mode_shortcut} for Plan")
                         chat.send("write outside\r")
                         external = work.parent / "external-marker"
                         deadline = time.monotonic() + 8
@@ -448,9 +450,9 @@ def main() -> None:
                             time.sleep(0.025)
                         assert external.read_text() == "confirmed outside write"
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
                         chat.send("\x1bm")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
@@ -468,7 +470,7 @@ def main() -> None:
                         while not (work / "marker").exists():
                             chat.read()
                             assert time.monotonic() < deadline
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
@@ -484,21 +486,21 @@ def main() -> None:
                     (work / "ahi.modes.yaml").write_text(policy)
                     chat = Session(state, cwd=work, columns=120, rows=35, command=command)
                     try:
-                        chat.expect("review · Alt+M for Plan")
+                        chat.expect(f"review · {mode_shortcut} for Plan")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("\x1b")
                         chat.absent("Trust this workspace?")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Alt+M for editing")
+                        chat.expect(f"Trusted · {mode_shortcut} for editing")
                         chat.absent("Bypass tool policy")
                         chat.send("permissive policy bypass\r")
                         deadline = time.monotonic() + 5
@@ -508,15 +510,15 @@ def main() -> None:
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("\x1bm")
-                        chat.expect("editing · Alt+M for review")
+                        chat.expect(f"editing · {mode_shortcut} for review")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("review\r")
-                        chat.expect("review · Alt+M for Plan")
+                        chat.expect(f"review · {mode_shortcut} for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("edit\r")
-                        chat.expect("editing · Alt+M for review")
+                        chat.expect(f"editing · {mode_shortcut} for review")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("named permission check\r")
@@ -740,7 +742,8 @@ def main() -> None:
                 (home / ".agents").mkdir(parents=True)
                 git = shutil.which("git")
                 assert git, "git is required for repository instruction discovery"
-                repository_environment = {**os.environ, "HOME": str(home),
+                repository_environment = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                                          "HOME": str(home), "LC_ALL": "C",
                                           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
                 subprocess.run([git, "init", "--quiet", str(work)], env=repository_environment, check=True)
                 operator_file = home / ".agents/AGENTS.md"
@@ -989,6 +992,48 @@ def main() -> None:
                     assert len(requests) == before + 1
                     context = instructions(requests[-1])
                     assert "operator-linked" not in context and "repository-updated" not in context
+
+                    separate = root / "separate"
+                    linked = separate / "linked"
+                    layouts = [separate, linked]
+                    subprocess.run([git, "init", "--quiet", f"--separate-git-dir={root / 'metadata'}", separate],
+                                   env=repository_environment, check=True)
+                    subprocess.run([git, "-C", work, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                    "commit", "--quiet", "--allow-empty", "-m", "Create fixture commit"],
+                                   env=repository_environment, check=True)
+                    subprocess.run([git, "-C", work, "worktree", "add", "--quiet", "--detach", linked],
+                                   env=repository_environment, check=True)
+                    for name, option, unsupported in (
+                        ("sha256", "--object-format=sha256", "unknown hash algorithm 'sha256'"),
+                        ("reftable", "--ref-format=reftable", "unknown ref storage format 'reftable'"),
+                    ):
+                        repository = root / name
+                        initialized = subprocess.run([git, "init", "--quiet", option, repository],
+                                                     env=repository_environment, capture_output=True, text=True)
+                        if initialized.returncode:
+                            diagnostic = initialized.stderr.partition("\n")[0]
+                            unknown_option = "unknown option" in diagnostic and option[2:].split("=")[0] in diagnostic
+                            if unknown_option or unsupported in diagnostic:
+                                print(f"SKIP: git init {option}: {diagnostic}")
+                                continue
+                            initialized.check_returncode()
+                        layouts.append(repository)
+
+                    (root / "AGENTS.md").write_text("Unrelated parent guidance.")
+                    guidance = {path: f"Use the {path.name} worktree instructions." for path in layouts}
+                    for repository, expected in guidance.items():
+                        (repository / "AGENTS.md").write_text(expected)
+                        nested = repository / "src"
+                        nested.mkdir()
+                        (nested / "AGENTS.md").write_text("Ignore this nested guidance.")
+                        before = len(requests)
+                        completed, result = execute_case(repository.name, directory=nested)
+                        assert completed.returncode == 0, (repository, completed.stderr, result)
+                        assert result["status"] == "ok" and len(requests) == before + 1
+                        context = instructions(requests[-1])
+                        for candidate, marker in guidance.items():
+                            assert context.count(marker) == int(candidate == repository), (repository, context)
+                        assert "Unrelated parent guidance." not in context and "Ignore this nested guidance." not in context
                 finally:
                     chat.close()
                     if engine == "service":
@@ -997,7 +1042,7 @@ def main() -> None:
                     gateway.shutdown()
                     gateway.server_close()
                     server_thread.join(5)
-        print("PASS: instruction loading, capability restrictions, turn snapshots, provider encodings and durable-history separation")
+        print("PASS: instruction loading across Git worktree layouts, capability restrictions, turn snapshots, provider encodings and durable-history separation")
         return
 
     if args.queue_manager_only:
@@ -1705,7 +1750,7 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("─ / commands ")
-            assert "Plan · Alt+M to review trust · /mode" in rows[-2]
+            assert f"Plan · {mode_shortcut} to review trust · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # The configured inset is two cells; default vertical padding is one row.
@@ -2683,9 +2728,11 @@ def main() -> None:
             assert "reasoning_effort" not in gateway_requests[-1][2]
             assert "stream_options" not in gateway_requests[-1][2]
             session.capture("metadata-restart-off")
+            metadata_instructions = gateway_requests[-1][2]["messages"][0]
+            assert metadata_instructions["role"] == "system" and metadata_instructions["content"]
             expected_request = {
                 "model": "GLM-5.3-Flash-EXL3", "stream": True,
-                "messages": [core, {"role": "user", "content": "容量"}],
+                "messages": [metadata_instructions, {"role": "user", "content": "容量"}],
                 "max_completion_tokens": 128, "store": False,
             }
             exact_bytes = len(json.dumps(expected_request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

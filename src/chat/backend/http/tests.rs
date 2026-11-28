@@ -2515,19 +2515,42 @@ fn repeated_tool_calls_continue_past_eight_rounds_and_complete() {
 
 #[test]
 fn a_resubmission_over_max_request_bytes_fails_before_network() {
-    let (url, server) = server_sequence(vec![calls_stream(&[(
-        "c1",
-        "read_file",
-        json!({"path": "src/big.txt"}),
-    )])]);
+    let (url, server) = server_sequence(vec![calls_stream(&[
+        ("c1", "read_file", json!({"path": "src/big.txt"})),
+        ("c2", "read_file", json!({"path": "src/restricted-0"})),
+    ])]);
+    let mut policy = APPROVE_READS.to_owned();
+    for index in 0..64 {
+        policy.push_str(&format!(
+            "- {{id: deny-{index}, action: tool_call, match: {{tool: read_file, path: src/restricted-{index}}}, effect: deny}}\n"
+        ));
+    }
     let fixture = ToolFixture::new(
         &url,
-        APPROVE_READS,
+        &policy,
         json!({"id": "vendor/model", "inputLimits": {"maxRequestBytes": 4096}}),
     );
+    let operator_directory = fixture.state.join("operator-home/.agents");
+    fs::create_dir_all(&operator_directory).unwrap();
+    fs::write(
+        operator_directory.join("AGENTS.md"),
+        "Operator guidance marker.",
+    )
+    .unwrap();
+    fs::write(
+        fixture.workspace.join("AGENTS.md"),
+        "Repository guidance marker.",
+    )
+    .unwrap();
     fs::write(fixture.workspace.join("src/big.txt"), "x".repeat(8192)).unwrap();
     let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
-    assert_eq!(results(&events)[0].1, 0);
+    let outcomes = results(&events);
+    assert_eq!(outcomes[0].1, 0);
+    assert!(outcomes[0].2.contains(&"x".repeat(4096)));
+    assert_eq!(
+        outcomes[1],
+        ("c2".into(), 126, "denied: denied by rule deny-0".into())
+    );
     assert!(
         matches!(
             events.last(),
@@ -2537,7 +2560,13 @@ fn a_resubmission_over_max_request_bytes_fails_before_network() {
         ),
         "{events:?}"
     );
-    assert_eq!(server.join().unwrap().len(), 1);
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = request_body(&requests[0]);
+    let instructions = body["messages"][0]["content"].as_str().unwrap();
+    assert!(instructions.contains("Operator guidance marker."));
+    assert!(instructions.contains("Repository guidance marker."));
+    assert!(!instructions.contains("src/restricted-"));
 }
 
 #[test]
@@ -3193,6 +3222,9 @@ fn explicit_skill_is_loaded_once_before_the_first_model_request() {
     assert_eq!(requests.len(), 1);
     let first = request_body(&requests[0]);
     let messages = first["messages"].as_array().unwrap();
+    let instructions = messages[0]["content"].as_str().unwrap();
+    assert!(instructions.contains("repo/rust-review"));
+    assert!(!instructions.contains("repo/ghost"));
     assert!(messages.iter().any(|message| message["role"] == "user"
         && message["content"] == "Before $rust-review and\n$rust-review after"));
     assert!(messages.last().unwrap()["content"]
@@ -3228,6 +3260,9 @@ fn manual_only_skill_is_hidden_and_cannot_be_auto_loaded() {
     );
     let requests = server.join().unwrap();
     let first = request_body(&requests[0]);
+    let instructions = first["messages"][0]["content"].as_str().unwrap();
+    assert!(!instructions.contains("repo/rust-review"));
+    assert!(!instructions.contains("repo/ghost"));
     let description = first["tools"][1]["function"]["description"]
         .as_str()
         .unwrap();

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{Error, Result};
 
@@ -11,13 +11,10 @@ pub(crate) struct Instructions {
 }
 
 impl Instructions {
-    pub(crate) fn load(directory: &Path) -> Result<Self> {
-        let directory = directory
-            .canonicalize()
-            .map_err(|_| Error::policy("cannot resolve the instruction working directory"))?;
-        let repository = repository_root(&directory)?;
-        let mut text = String::from("Instruction precedence: the core instructions and enforced capability limits apply throughout this turn. Direct operator requests take precedence over AGENTS.md guidance within those limits. Operator AGENTS.md supplies defaults; repository AGENTS.md takes precedence over those defaults for project matters. Instruction text cannot grant tools, approve calls, or change policy.\n");
-        if let Some(home) = std::env::home_dir() {
+    pub(crate) fn load(directory: &Path, operator_home: Option<&Path>) -> Result<Self> {
+        let repository = repository_root(directory)?;
+        let mut text = String::new();
+        if let Some(home) = operator_home {
             append_file(&mut text, "Operator", &home.join(".agents/AGENTS.md"), true)?;
         }
         append_file(
@@ -29,31 +26,56 @@ impl Instructions {
         Ok(Self { guidance: text })
     }
 
-    pub(crate) fn with_capabilities(self, capabilities: &str) -> String {
-        format!("{}\n\n{capabilities}\n\n{}", super::CORE, self.guidance)
+    pub(crate) fn for_turn(self, mode: &str, workspace: &Path, has_tools: bool) -> String {
+        let tools = if has_tools {
+            "Available tools are listed in the schemas. Runtime policy checks every call."
+        } else {
+            "No tools available."
+        };
+        let mut instructions = format!(
+            "{}\n\nMode: {}. Workspace: {}. {tools}",
+            super::CORE,
+            serde_json::json!(mode),
+            serde_json::json!(workspace.to_string_lossy())
+        );
+        if !self.guidance.is_empty() {
+            instructions.push_str("\n\nWithin the core instructions and enforced policy, direct operator requests take precedence. For project matters, repository guidance takes precedence over operator defaults.\n");
+            instructions.push_str(&self.guidance);
+        }
+        instructions
     }
 }
 
-fn repository_root(directory: &Path) -> Result<PathBuf> {
-    match git2::Repository::discover(directory) {
-        Ok(repository) => {
-            let Some(root) = repository.workdir() else {
-                return Ok(directory.to_path_buf());
-            };
-            let root = root.canonicalize().map_err(|_| {
-                Error::policy("cannot resolve the repository instruction directory")
-            })?;
-            if directory.starts_with(&root) {
-                Ok(root)
-            } else {
-                Ok(directory.to_path_buf())
+fn repository_root(directory: &Path) -> Result<&Path> {
+    let git_directory =
+        match git2::Repository::discover_path(directory, std::iter::empty::<&Path>()) {
+            Ok(path) => path
+                .canonicalize()
+                .map_err(|_| Error::policy("cannot resolve the Git metadata directory"))?,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(directory),
+            Err(_) => {
+                return Err(Error::policy(
+                    "cannot discover the repository instruction directory",
+                ))
             }
+        };
+    for ancestor in directory.ancestors() {
+        if ancestor == git_directory {
+            break;
         }
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(directory.to_path_buf()),
-        Err(_) => Err(Error::policy(
-            "cannot discover the repository instruction directory",
-        )),
+        let marker = ancestor.join(".git");
+        // Discovery stops at the first .git file and validates its target.
+        // Its parent is the worktree even when the metadata lives elsewhere.
+        if fs::metadata(&marker).is_ok_and(|metadata| {
+            metadata.is_file()
+                || marker
+                    .canonicalize()
+                    .is_ok_and(|path| path == git_directory)
+        }) {
+            return Ok(ancestor);
+        }
     }
+    Ok(directory)
 }
 
 fn append_file(text: &mut String, scope: &str, path: &Path, operator: bool) -> Result<()> {
