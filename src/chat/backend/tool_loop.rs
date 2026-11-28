@@ -175,8 +175,7 @@ impl ToolRuntime {
         }))
     }
 
-    /// Protocol-neutral schemas of the advertised builtins.
-    pub(super) fn schemas(&self) -> Vec<tools::ToolSchema> {
+    pub(super) fn model_capabilities(&self) -> (Vec<tools::ToolSchema>, String) {
         let skills: Vec<_> = self
             .skills
             .iter()
@@ -203,7 +202,12 @@ impl ToolRuntime {
                 s.description="Delegate a task. For local.profile=rex-scratch the child inherits this model and mode; request plan to narrow it.".into();
             }
         }
-        schemas
+        let advertised: Vec<_> = schemas.iter().map(|schema| schema.name).collect();
+        let visible_skills: Vec<_> = skills.iter().map(crate::skills::Skill::id).collect();
+        let details = self
+            .policy
+            .capability_details(&self.mode, &advertised, &visible_skills);
+        (schemas, details)
     }
 
     /// Explicit user requests are real, audited local loads before inference,

@@ -214,17 +214,14 @@ impl CompletionBackend for HttpBackend {
         let frozen = self.frozen.clone();
         let local = self.local.clone();
         let handle = std::thread::spawn(move || {
-            let workspace = if tools_enabled {
-                workspace.or_else(|| std::env::current_dir().ok())
-            } else {
-                None
-            };
+            let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
                 &state,
                 ToolSource {
                     local,
                     frozen,
                     workspace: workspace.as_deref(),
+                    tools_enabled,
                     actions: actions.as_deref(),
                     caller,
                     scratch,
@@ -311,6 +308,7 @@ struct ToolSource<'a> {
     scratch: crate::tools::Scratch,
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
+    tools_enabled: bool,
     actions: Option<&'a Path>,
     caller: Caller,
     deadline: Option<Instant>,
@@ -339,13 +337,25 @@ fn complete(
         frozen,
         scratch,
         workspace,
+        tools_enabled,
         actions,
         caller,
         deadline,
     } = source;
+    let directory = workspace
+        .ok_or_else(|| Error::policy("cannot resolve the instruction working directory"))?
+        .canonicalize()
+        .map_err(|_| Error::policy("cannot resolve the instruction working directory"))?;
+    #[cfg(not(test))]
+    let operator_home = std::env::home_dir();
+    #[cfg(test)]
+    let operator_home = Some(state.state.join("operator-home"));
+    let instruction_files =
+        crate::system_prompt::Instructions::load(&directory, operator_home.as_deref())?;
     let child = caller.origin == "delegate";
-    let mut rounds = 0usize;
-    let mut tools = match workspace {
+    let mut tool_rounds = 0usize;
+    let mode = request.mode.clone();
+    let mut tools = match workspace.filter(|_| tools_enabled) {
         Some(directory) => ToolRuntime::load(
             directory,
             state,
@@ -381,21 +391,38 @@ fn complete(
         ))?;
         runtime.load_explicit(explicit, &mut messages, sender)?;
     }
-    let schemas = tools.as_ref().map(ToolRuntime::schemas);
+    let (schemas, policy_details) = tools.as_ref().map(ToolRuntime::model_capabilities).unzip();
+    let has_tools = schemas.as_ref().is_some_and(|schemas| !schemas.is_empty());
+    let mut instructions = instruction_files.for_turn(mode.label(), &directory, has_tools);
+    let required_length = instructions.len();
+    instructions.push_str(policy_details.as_deref().unwrap_or_default());
+    let mut active_instructions = instructions.as_str();
     let mut turn = || -> Result<()> {
         loop {
             if child && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Err(Error::new("assignment deadline reached"));
             }
-            let context = RequestContext::new(
+            let mut context = RequestContext::new(
                 &selection.model,
                 thinking,
                 metadata,
                 &messages,
                 schemas.as_deref(),
                 connection.browser_token(),
-            );
-            let body = protocol::request_body(connection.protocol, &context)?;
+            )
+            .with_instructions(active_instructions);
+            let body = match protocol::request_body(connection.protocol, &context) {
+                Err(error)
+                    if tool_rounds == 0
+                        && error.kind() == ErrorKind::Limit
+                        && active_instructions.len() > required_length =>
+                {
+                    active_instructions = &instructions[..required_length];
+                    context.instructions = active_instructions;
+                    protocol::request_body(connection.protocol, &context)?
+                }
+                result => result?,
+            };
             cancelled(cancel)?;
             let response = send(agent, state, &connection, &body, sender, cancel, deadline)?;
             let outcome = decode(connection.protocol, &context, response, sender, cancel)?;
@@ -426,8 +453,8 @@ fn complete(
                         }));
                     };
                     cancelled(cancel)?;
-                    rounds += 1;
-                    if child && rounds > 64 {
+                    tool_rounds += 1;
+                    if child && tool_rounds > 64 {
                         return Err(Error::policy(
                             "scratch child exceeded 64 tool rounds in one turn",
                         ));

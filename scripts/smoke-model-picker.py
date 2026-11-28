@@ -51,6 +51,8 @@ def main() -> None:
                          help="verify rich tool details in resumed standalone and service-backed chats")
     focused.add_argument("--queue-manager-only", action="store_true",
                          help="verify queued prompt editing, ordering, navigation and compact layouts")
+    focused.add_argument("--model-instructions-only", action="store_true",
+                         help="verify operator/repository instructions and effective capability context")
     args = parser.parse_args()
     if args.capture_directory:
         args.capture_directory.mkdir(parents=True, exist_ok=True)
@@ -60,6 +62,7 @@ def main() -> None:
     import pty
     import termios
 
+    mode_shortcut = "⌥ Option+M" if sys.platform == "darwin" else "Alt+M"
     binary = args.binary.resolve(strict=True)
 
     class Session:
@@ -73,6 +76,10 @@ def main() -> None:
             self.pid, self.fd = pty.fork()
             if self.pid == 0:
                 env = os.environ.copy()
+                instruction_home = state / "home"
+                instruction_home.mkdir(parents=True, exist_ok=True)
+                env["HOME"] = str(instruction_home)
+                env.pop("NO_COLOR", None)
                 # Hide real clipboard programs and make copy routing deterministic.
                 # A dummy display prevents headless OSC 52 from masking adapter failures.
                 env.update(TERM="xterm-256color", PATH=str(executable_dir) if executable_dir else "/nonexistent",
@@ -259,7 +266,7 @@ def main() -> None:
     if args.workspace_modes_only:
         queue_release = threading.Event()
         redraw_release = threading.Event()
-        advertised_skills = {}
+        turn_capabilities = {}
 
         class ModeGateway(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -268,8 +275,9 @@ def main() -> None:
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 prompt = body["messages"][-1].get("content")
-                if prompt in ("redraw-probe", "now write"):
-                    advertised_skills[prompt] = next((t["function"]["description"] for t in body.get("tools", []) if t["function"]["name"] == "load_skill"), "")
+                last_prompt = next(m["content"] for m in reversed(body["messages"]) if m["role"] == "user")
+                turn_capabilities.setdefault(last_prompt, []).append(
+                    (body["messages"][0]["content"], body.get("tools", [])))
                 if prompt == "redraw-probe":
                     for fragment in ["Cleaned up", " the README’s introduction", " and organization:\n\n- Summarized the changes."]:
                         item = {"choices": [{"index": 0, "delta": {"content": fragment}}]}
@@ -280,7 +288,7 @@ def main() -> None:
                     self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
                     self.wfile.flush()
                     return
-                if body["messages"][-1].get("content") == "queue-turn":
+                if prompt in ("draft-preserved", "queue-turn"):
                     prefix = {"choices": [{"index": 0, "delta": {"content": "mode-stream-waiting"}}]}
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
                     self.wfile.flush()
@@ -295,7 +303,6 @@ def main() -> None:
                     delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
                     finish = "tool_calls"
                 elif body["messages"][-1]["role"] == "tool":
-                    last_prompt = next(m['content'] for m in reversed(body['messages']) if m['role'] == 'user')
                     delta = {"content": "<tool_call>not another call" if last_prompt == "draft-preserved" else "mode-fixture-complete"}
                     finish = "stop"
                 else:
@@ -345,15 +352,15 @@ def main() -> None:
                     repo = work / ".agents/skills/repo-probe"
                     repo.mkdir(parents=True)
                     (repo / "SKILL.md").write_text("---\nname: repo-probe\ndescription: Repository fixture\n---\nHidden body\n")
-                    advertised_skills.clear()
+                    turn_capabilities.clear()
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1b[Z")  # Shift+Tab: effort, never authority
                         chat.expect("(local) fixture • minimal")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         redraw_release.clear()
                         chat.send("redraw-probe\r")
                         chat.expect("Thinking...")
@@ -377,20 +384,24 @@ def main() -> None:
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.expect("draft-preserved")
                         assert len(list((state / "workspace-trust").iterdir())) == 1
                         assert not (work / "ahi.tools.yaml").exists()
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
+                        queue_release.clear()
                         chat.send("\r")
+                        chat.expect("Thinking...")
+                        chat.send("\x1bm")
+                        chat.expect("Plan → Trusted next turn")
+                        queue_release.set()
                         chat.expect("<tool_call>not another call")
                         chat.expect("write_file marker · Plan blocks workspace writes, commands and delegation")
                         chat.absent("Tool-call markup was returned as text")  # This turn did receive structured calls.
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
-                        chat.send("\x1bm")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
                         deadline = time.monotonic() + 5
@@ -399,10 +410,6 @@ def main() -> None:
                             assert time.monotonic() < deadline
                         assert (work / "marker").read_text() == "written"
                         chat.expect("exit 0")
-                        for prompt in ("redraw-probe", "now write"):
-                            catalog = advertised_skills[prompt]
-                            assert "operator/local-probe" in catalog and "repo/repo-probe" in catalog, catalog
-                            assert "Hidden body" not in catalog
                         chat.absent("captured-stdout")
                         chat.send("draft-toggle")
                         chat.send("\x0f")
@@ -428,13 +435,13 @@ def main() -> None:
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("\x1b")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("full\r")
                         chat.expect("Full Access to this host?")
                         chat.send("f")
-                        chat.expect("Full Access · Alt+M for Plan")
+                        chat.expect(f"Full Access · {mode_shortcut} for Plan")
                         chat.send("write outside\r")
                         external = work.parent / "external-marker"
                         deadline = time.monotonic() + 8
@@ -443,9 +450,9 @@ def main() -> None:
                             time.sleep(0.025)
                         assert external.read_text() == "confirmed outside write"
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
                         chat.send("\x1bm")
-                        chat.expect("Trusted · Alt+M for Plan")
+                        chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         # Start another Trusted turn, queue Plan while
                         # streaming, and prove the already-admitted turn still writes.
                         chat.send("/mode\r")
@@ -463,7 +470,7 @@ def main() -> None:
                         while not (work / "marker").exists():
                             chat.read()
                             assert time.monotonic() < deadline
-                        chat.expect("Plan · Alt+M for Trusted")
+                        chat.expect(f"Plan · {mode_shortcut} for Trusted")
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("/mode revoke\r")
@@ -473,27 +480,42 @@ def main() -> None:
                         restored = chat.finish().rsplit("\x1b[?1049l", 1)[-1]
                         assert "You: now write" in restored and "Assistant: mode-fixture-complete" in restored
                         assert f"Resume: ahi --session {sid}" in restored
+                        for prompt, mode in (("draft-preserved", "Plan"), ("now write", "Trusted"),
+                                             ("write outside", "Full Access"), ("queue-turn", "Trusted")):
+                            initial, continuation = turn_capabilities[prompt]
+                            assert initial == continuation, (engine, prompt)
+                            instructions, tools = initial
+                            assert f'Mode: "{mode}"' in instructions, (engine, prompt, instructions)
+                            definitions = {tool["function"]["name"]: tool["function"] for tool in tools}
+                            assert ("write_file" in definitions) == (mode != "Plan")
+                            assert ("run_command" in definitions) == (mode != "Plan")
+                            if mode != "Plan":
+                                file_path = definitions["write_file"]["parameters"]["properties"]["path"]
+                                assert ("absolute host path" in file_path["description"]) == (mode == "Full Access")
+                            catalog = definitions["load_skill"]["description"]
+                            assert "operator/local-probe" in catalog and "repo/repo-probe" in catalog, catalog
+                            assert "Hidden body" not in catalog
                     finally:
                         chat.close()
                     policy = "version: 2\ndefault_mode: review\nmodes:\n  review: {allow: {tools: [read_file]}}\n  editing: {allow: {write_files: true}}\n"
                     (work / "ahi.modes.yaml").write_text(policy)
                     chat = Session(state, cwd=work, columns=120, rows=35, command=command)
                     try:
-                        chat.expect("review · Alt+M for Plan")
+                        chat.expect(f"review · {mode_shortcut} for Plan")
                         chat.absent("Trust this workspace?")
                         chat.send("\x1bm")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("\x1b")
                         chat.absent("Trust this workspace?")
-                        chat.expect("Plan · Alt+M to review trust")
+                        chat.expect(f"Plan · {mode_shortcut} to review trust")
                         chat.send("\x1bm")
                         chat.expect("Trust this workspace?")
                         chat.send("t")
-                        chat.expect("Trusted · Alt+M for editing")
+                        chat.expect(f"Trusted · {mode_shortcut} for editing")
                         chat.absent("Bypass tool policy")
                         chat.send("permissive policy bypass\r")
                         deadline = time.monotonic() + 5
@@ -503,15 +525,15 @@ def main() -> None:
                         assert (work / "marker").read_text() == "written"
                         assert (work / "command-marker").read_text() == "command-ok"
                         chat.send("\x1bm")
-                        chat.expect("editing · Alt+M for review")
+                        chat.expect(f"editing · {mode_shortcut} for review")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("review\r")
-                        chat.expect("review · Alt+M for Plan")
+                        chat.expect(f"review · {mode_shortcut} for Plan")
                         chat.send("/mode\r")
                         chat.expect("Enter select · Esc dismiss")
                         chat.send("edit\r")
-                        chat.expect("editing · Alt+M for review")
+                        chat.expect(f"editing · {mode_shortcut} for review")
                         (work / "marker").unlink()
                         (work / "command-marker").unlink()
                         chat.send("named permission check\r")
@@ -722,6 +744,358 @@ def main() -> None:
         print('PASS: one write, one correlated result, no blank-Enter replay before or after resume (both engines)')
         if args.post_tool_failure_only:
             return
+
+    if args.model_instructions_only:
+        for engine in ("standalone", "service"):
+            with tempfile.TemporaryDirectory(prefix="ahi-instructions-", dir="/tmp") as temporary:
+                root = Path(temporary)
+                state = root / "state"
+                work = root / "work"
+                home = root / "home"
+                state.mkdir()
+                (work / "src").mkdir(parents=True)
+                (home / ".agents").mkdir(parents=True)
+                git = shutil.which("git")
+                assert git, "git is required for repository instruction discovery"
+                repository_environment = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                                          "HOME": str(home), "LC_ALL": "C",
+                                          "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+                subprocess.run([git, "init", "--quiet", str(work)], env=repository_environment, check=True)
+                operator_file = home / ".agents/AGENTS.md"
+                repository_file = work / "AGENTS.md"
+                operator_file.write_text("Operator instruction marker: operator-initial.\n")
+                repository_file.write_text("Repository instruction marker: repository-initial.\n")
+                (work / "src/evidence").write_text("instruction-evidence-marker\n")
+                policy = (
+                    "version: 2\ndefault_mode: review\nmodes:\n  review:\n"
+                    "    allow:\n      files:\n"
+                    "        - {tools: [read_file], paths: [src]}\n"
+                    "      commands:\n"
+                    "        - {argv_prefixes: [[/bin/echo, allowed]], working_dirs: [src]}\n"
+                    "    ask:\n      commands:\n"
+                    "        - {argv_prefixes: [[/bin/echo, approval]], working_dirs: [src]}\n"
+                    "    deny:\n      files:\n"
+                    "        - {tools: [read_file], paths: [src/private]}\n"
+                    "      commands:\n"
+                    "        - {argv_prefixes: [[/bin/sh]], working_dirs: ['.']}\n"
+                    "  editing:\n    allow: {write_files: true}\n"
+                )
+                (work / "ahi.modes.yaml").write_text(policy)
+                requests = []
+                request_sizes = []
+
+                class InstructionGateway(BaseHTTPRequestHandler):
+                    def do_POST(self):
+                        body = self.rfile.read(int(self.headers["Content-Length"]))
+                        request = json.loads(body)
+                        request_sizes.append(len(body))
+                        requests.append(request)
+                        if "instructions" in request:
+                            item = {"type": "message", "id": "message_fixture", "role": "assistant",
+                                    "status": "completed", "content": [{"type": "output_text",
+                                                                         "text": "instruction-exec-complete"}]}
+                            pending = {**item, "status": "in_progress", "content": []}
+                            events = [
+                                {"type": "response.created", "response": {"id": "response_fixture"}},
+                                {"type": "response.output_item.added", "output_index": 0, "item": pending},
+                                {"type": "response.output_item.done", "output_index": 0, "item": item},
+                                {"type": "response.completed", "response": {
+                                    "id": "response_fixture", "status": "completed", "output": [item]}},
+                            ]
+                        elif "system" in request:
+                            events = [
+                                {"type": "message_start", "message": {"id": "message_fixture",
+                                 "role": "assistant", "usage": {"input_tokens": 1}}},
+                                {"type": "content_block_start", "index": 0,
+                                 "content_block": {"type": "text", "text": ""}},
+                                {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": "instruction-exec-complete"}},
+                                {"type": "content_block_stop", "index": 0},
+                                {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                                 "usage": {"output_tokens": 1}},
+                                {"type": "message_stop"},
+                            ]
+                        else:
+                            last = request["messages"][-1]
+                            if last["role"] == "user" and last["content"] == "instruction-first":
+                                operator_file.write_text("Operator instruction marker: operator-updated.\n")
+                                repository_file.write_text("Repository instruction marker: repository-updated.\n")
+                                calls = [
+                                    {"index": 0, "id": "read_evidence", "type": "function", "function": {
+                                        "name": "read_file", "arguments": json.dumps({"path": "src/evidence"})}},
+                                    {"index": 1, "id": "allowed_command", "type": "function", "function": {
+                                        "name": "run_command", "arguments": json.dumps({
+                                            "argv": ["/bin/echo", "allowed", "capability-command-evidence"],
+                                            "path": "src"})}},
+                                    {"index": 2, "id": "forbidden_command", "type": "function", "function": {
+                                        "name": "run_command", "arguments": json.dumps({
+                                            "argv": ["/bin/sh", "-c", "printf unexpected > forbidden-command"],
+                                            "path": "src"})}},
+                                ]
+                                delta = {"tool_calls": calls}
+                                finish = "tool_calls"
+                            elif last["role"] == "user" and last["content"] == "instruction-prefix-limit":
+                                call = {"index": 0, "id": "read_evidence", "type": "function", "function": {
+                                    "name": "read_file", "arguments": json.dumps({"path": "src/evidence"})}}
+                                delta = {"tool_calls": [call]}
+                                finish = "tool_calls"
+                            elif last["role"] == "user" and last["content"] == "instruction-protected-write":
+                                call = {"index": 0, "id": "protect_instructions", "type": "function", "function": {
+                                    "name": "write_file", "arguments": json.dumps({
+                                        "path": "AGENTS.md", "content": "unexpected-replacement", "overwrite": True})}}
+                                delta = {"tool_calls": [call]}
+                                finish = "tool_calls"
+                            else:
+                                last_prompt = next(message["content"] for message in reversed(request["messages"])
+                                                   if message["role"] == "user")
+                                if last_prompt == "instruction-protected-write":
+                                    answer = "instruction-protected-write-complete"
+                                elif last["role"] == "tool":
+                                    answer = "instruction-first-complete"
+                                else:
+                                    answer = ("instruction-second-complete" if last_prompt == "instruction-second"
+                                              else "instruction-exec-complete")
+                                delta = {"content": answer}
+                                finish = "stop"
+                            events = [{"choices": [{"index": 0, "delta": delta,
+                                                    "finish_reason": finish}]}]
+                        payload = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+                        if "choices" in events[0]:
+                            payload += b"data: [DONE]\n\n"
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.end_headers()
+                        self.wfile.write(payload)
+
+                    def log_message(self, *_arguments):
+                        pass
+
+                gateway = ThreadingHTTPServer(("127.0.0.1", 0), InstructionGateway)
+                server_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                server_thread.start()
+                providers = {}
+                for provider, api in (("local", "openai-completions"),
+                                      ("responses", "openai-responses"),
+                                      ("anthropic", "anthropic-messages")):
+                    providers[provider] = {"baseUrl": f"http://127.0.0.1:{gateway.server_port}/v1",
+                                           "api": api, "models": [{"id": "fixture", "maxTokens": 4096}]}
+                (state / "models.json").write_text(json.dumps({"providers": providers}))
+                session_id = "0f1e2d3c-4b5a-4978-8765-43210fedcba9"
+                store = state / "sessions"
+                store.mkdir()
+                transcript = store / f"{session_id}.jsonl"
+                transcript.write_text(json.dumps(dict(
+                    type="session", schema=1, id=session_id, host="fixture", cwd=str(work),
+                    ahi_version="0.33.0", gateway="local", model="fixture", thinking="off",
+                    started="2026-01-01T00:00:00Z")) + "\n")
+                service_socket = str(state / "service.sock")
+                options = ("--standalone",) if engine == "standalone" else ("--socket", service_socket)
+                environment = os.environ.copy()
+                environment["HOME"] = str(home)
+                environment.pop("ANTHROPIC_API_KEY", None)
+                chat = Session(state, cwd=work, columns=120, rows=35,
+                               command=("tui", "--session", session_id, *options),
+                               environment={"HOME": str(home)})
+
+                def instructions(request: dict) -> str:
+                    return request.get("instructions", request.get("system", "")) or next(
+                        message["content"] for message in request["messages"] if message["role"] == "system")
+
+                def assert_capabilities(context: str) -> None:
+                    for value in ("/bin/echo", "allowed", "approval", "/bin/sh", "src/private"):
+                        assert value in context, (value, context)
+                    assert "deny" in context.lower() or "denied" in context.lower(), context
+
+                def execute_case(name: str, provider: str = "local", directory: Path = work,
+                                 timeout: int = 20, prompt: str | None = None):
+                    result = root / f"result-{name}.json"
+                    completed = subprocess.run(
+                        [binary, "--state-dir", state, "exec", "--standalone", "--model",
+                         f"{provider}/fixture", "--workdir", directory, "--prompt", prompt or f"instruction-{name}",
+                         "--result-file", result, "--format", "json"],
+                        cwd=directory, env=environment, capture_output=True, text=True, timeout=timeout)
+                    return completed, json.loads(result.read_text()) if result.exists() else None
+
+                try:
+                    chat.expect("resumed session")
+                    chat.send("instruction-first\r")
+                    chat.expect("instruction-first-complete")
+                    assert len(requests) == 2, requests
+                    initial, continuation = map(instructions, requests)
+                    assert initial == continuation
+                    assert initial.count("operator-initial") == 1
+                    assert initial.count("repository-initial") == 1
+                    assert initial.index("operator-initial") < initial.index("repository-initial")
+                    assert "operator-updated" not in initial and "repository-updated" not in initial
+                    assert "review" in initial
+                    assert_capabilities(initial)
+                    results = [message for message in requests[1]["messages"] if message["role"] == "tool"]
+                    assert any("instruction-evidence-marker" in message["content"] for message in results), results
+                    assert any("capability-command-evidence" in message["content"] for message in results), results
+                    assert any("denied" in message["content"].lower() for message in results), results
+                    assert not (work / "src/forbidden-command").exists()
+                    chat.send("instruction-second\r")
+                    chat.expect("instruction-second-complete")
+                    assert len(requests) == 3
+                    updated = instructions(requests[-1])
+                    assert "operator-updated" in updated and "repository-updated" in updated
+                    assert "operator-initial" not in updated and "repository-initial" not in updated
+                    saved_instructions = repository_file.read_text()
+                    chat.send("/mode\r")
+                    chat.expect("Modes · filter:")
+                    chat.send("editing\r")
+                    chat.absent("Modes · filter:")
+                    chat.send("instruction-protected-write\r")
+                    chat.expect("instruction-protected-write-complete")
+                    assert len(requests) == 5, requests
+                    assert "write_file" in [tool["function"]["name"] for tool in requests[3]["tools"]]
+                    rejected = next(message for message in requests[4]["messages"]
+                                    if message.get("tool_call_id") == "protect_instructions")
+                    assert "protected" in rejected["content"].lower(), rejected
+                    assert repository_file.read_text() == saved_instructions
+                    chat.capture(f"model-instructions-{engine}")
+                    chat.send("/quit\r")
+                    chat.finish()
+                    recorded = transcript.read_text()
+                    for marker in ("operator-initial", "repository-initial", "operator-updated", "repository-updated"):
+                        assert marker not in recorded, recorded
+                    if engine == "service":
+                        continue
+                    def prefix_case(name: str, limit: int | None = None):
+                        if limit is not None:
+                            providers["local"]["models"][0]["inputLimits"] = {"maxRequestBytes": limit}
+                            (state / "models.json").write_text(json.dumps({"providers": providers}))
+                        before = len(requests)
+                        completed, result = execute_case(f"prefix-{name}", prompt="instruction-prefix-limit")
+                        return completed, result, request_sizes[before:], requests[before:]
+
+                    completed, result, sizes, baseline = prefix_case("baseline")
+                    assert completed.returncode == 0 and result["status"] == "ok", (completed.stderr, result)
+                    first_size, continuation_size = sizes
+                    prefix, continuation_prefix = map(instructions, baseline)
+                    assert prefix == continuation_prefix and first_size < continuation_size
+                    assert "instruction-evidence-marker" in baseline[1]["messages"][-1]["content"]
+
+                    completed, result, sizes, limited = prefix_case("boundary", continuation_size - 1)
+                    assert completed.returncode != 0, result
+                    assert result["error"]["kind"] == "limit", result
+                    assert f"{continuation_size} bytes, over inputLimits.maxRequestBytes ({continuation_size - 1})" in result["error"]["message"], result
+                    assert sizes == [first_size] and limited == baseline[:1]
+
+                    completed, result, sizes, compact = prefix_case("compact", first_size - 1)
+                    assert completed.returncode == 0 and result["status"] == "ok", (completed.stderr, result)
+                    compact_prefix, compact_continuation = map(instructions, compact)
+                    assert compact_prefix != prefix and compact_prefix == compact_continuation
+                    assert max(sizes) < first_size
+                    providers["local"]["models"][0].pop("inputLimits")
+                    (state / "models.json").write_text(json.dumps({"providers": providers}))
+
+                    operator_file.unlink()
+                    operator_target = root / "operator-instructions.md"
+                    operator_target.write_text("Operator instruction marker: operator-linked.\n")
+                    operator_file.symlink_to(operator_target)
+                    (work / "src/ahi.modes.yaml").write_text(policy)
+                    for provider in ("responses", "anthropic"):
+                        before = len(requests)
+                        completed, result = execute_case(provider, provider, work / "src")
+                        assert completed.returncode == 0, (completed.stdout, completed.stderr, result)
+                        assert len(requests) == before + 1
+                        context = instructions(requests[-1])
+                        assert "operator-linked" in context and "repository-updated" in context
+                        assert_capabilities(context)
+                        assert result["status"] == "ok", result
+                    invalid_files = (
+                        ("symbolic-link", lambda: repository_file.symlink_to(operator_target)),
+                        ("invalid-utf8", lambda: repository_file.write_bytes(b"\xff")),
+                        ("oversized", lambda: repository_file.write_bytes(b"x" * (64 * 1024 + 1))),
+                        ("directory", repository_file.mkdir),
+                        ("named-pipe", lambda: os.mkfifo(repository_file)),
+                    )
+                    for name, create in invalid_files:
+                        if repository_file.is_dir() and not repository_file.is_symlink():
+                            repository_file.rmdir()
+                        else:
+                            repository_file.unlink(missing_ok=True)
+                        create()
+                        before = len(requests)
+                        started = time.monotonic()
+                        completed, result = execute_case(name, timeout=5)
+                        assert time.monotonic() - started < 5, name
+                        assert completed.returncode != 0, (name, completed.stdout, completed.stderr, result)
+                        assert len(requests) == before, (name, requests[before:])
+                    repository_file.unlink()
+                    repository_file.write_text(saved_instructions)
+                    operator_file.unlink()
+                    operator_pipe = root / "operator-instructions.pipe"
+                    os.mkfifo(operator_pipe)
+                    operator_file.symlink_to(operator_pipe)
+                    before = len(requests)
+                    started = time.monotonic()
+                    completed, result = execute_case("operator-named-pipe", timeout=5)
+                    assert time.monotonic() - started < 5
+                    assert completed.returncode != 0, (completed.stdout, completed.stderr, result)
+                    assert len(requests) == before, requests[before:]
+                    repository_file.unlink()
+                    operator_file.unlink()
+                    before = len(requests)
+                    completed, result = execute_case("missing-files")
+                    assert completed.returncode == 0, (completed.stdout, completed.stderr, result)
+                    assert len(requests) == before + 1
+                    context = instructions(requests[-1])
+                    assert "operator-linked" not in context and "repository-updated" not in context
+
+                    separate = root / "separate"
+                    linked = separate / "linked"
+                    layouts = [separate, linked]
+                    subprocess.run([git, "init", "--quiet", f"--separate-git-dir={root / 'metadata'}", separate],
+                                   env=repository_environment, check=True)
+                    subprocess.run([git, "-C", work, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                    "commit", "--quiet", "--allow-empty", "-m", "Create fixture commit"],
+                                   env=repository_environment, check=True)
+                    subprocess.run([git, "-C", work, "worktree", "add", "--quiet", "--detach", linked],
+                                   env=repository_environment, check=True)
+                    for name, option, unsupported in (
+                        ("sha256", "--object-format=sha256", "unknown hash algorithm 'sha256'"),
+                        ("reftable", "--ref-format=reftable", "unknown ref storage format 'reftable'"),
+                    ):
+                        repository = root / name
+                        initialized = subprocess.run([git, "init", "--quiet", option, repository],
+                                                     env=repository_environment, capture_output=True, text=True)
+                        if initialized.returncode:
+                            diagnostic = initialized.stderr.partition("\n")[0]
+                            unknown_option = "unknown option" in diagnostic and option[2:].split("=")[0] in diagnostic
+                            if unknown_option or unsupported in diagnostic:
+                                print(f"SKIP: git init {option}: {diagnostic}")
+                                continue
+                            initialized.check_returncode()
+                        layouts.append(repository)
+
+                    (root / "AGENTS.md").write_text("Unrelated parent guidance.")
+                    guidance = {path: f"Use the {path.name} worktree instructions." for path in layouts}
+                    for repository, expected in guidance.items():
+                        (repository / "AGENTS.md").write_text(expected)
+                        nested = repository / "src"
+                        nested.mkdir()
+                        (nested / "AGENTS.md").write_text("Ignore this nested guidance.")
+                        before = len(requests)
+                        completed, result = execute_case(repository.name, directory=nested)
+                        assert completed.returncode == 0, (repository, completed.stderr, result)
+                        assert result["status"] == "ok" and len(requests) == before + 1
+                        context = instructions(requests[-1])
+                        for candidate, marker in guidance.items():
+                            assert context.count(marker) == int(candidate == repository), (repository, context)
+                        assert "Unrelated parent guidance." not in context and "Ignore this nested guidance." not in context
+                finally:
+                    chat.close()
+                    if engine == "service":
+                        subprocess.run([binary, "--state-dir", state, "serve", "--socket", service_socket, "stop"],
+                                       env=environment, capture_output=True, timeout=10)
+                    gateway.shutdown()
+                    gateway.server_close()
+                    server_thread.join(5)
+        print("PASS: instruction loading across Git worktree layouts, capability restrictions, turn snapshots, provider encodings and durable-history separation")
+        return
 
     if args.queue_manager_only:
         for engine in ("standalone", "service"):
@@ -1428,7 +1802,7 @@ def main() -> None:
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert rows[-2].startswith("─ / commands ")
-            assert "Plan · Alt+M to review trust · /mode" in rows[-2]
+            assert f"Plan · {mode_shortcut} to review trust · /mode" in rows[-2]
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # The configured inset is two cells; default vertical padding is one row.
@@ -2406,9 +2780,11 @@ def main() -> None:
             assert "reasoning_effort" not in gateway_requests[-1][2]
             assert "stream_options" not in gateway_requests[-1][2]
             session.capture("metadata-restart-off")
+            metadata_instructions = gateway_requests[-1][2]["messages"][0]
+            assert metadata_instructions["role"] == "system" and metadata_instructions["content"]
             expected_request = {
                 "model": "GLM-5.3-Flash-EXL3", "stream": True,
-                "messages": [core, {"role": "user", "content": "容量"}],
+                "messages": [metadata_instructions, {"role": "user", "content": "容量"}],
                 "max_completion_tokens": 128, "store": False,
             }
             exact_bytes = len(json.dumps(expected_request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
