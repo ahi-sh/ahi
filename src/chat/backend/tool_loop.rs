@@ -267,9 +267,6 @@ impl ToolRuntime {
                 "an explicitly requested skill could not be loaded; no model request was sent",
             ));
         }
-        if self.output_bytes > MAX_TURN_OUTPUT_BYTES {
-            return Err(Error::policy("explicit skill instructions exceed the turn output budget; no model request was sent"));
-        }
         Ok(())
     }
 
@@ -344,6 +341,11 @@ impl ToolRuntime {
         if cancelled {
             return Err(Error::new(
                 "tool approval was cancelled; no further calls ran",
+            ));
+        }
+        if self.output_bytes >= MAX_TURN_OUTPUT_BYTES {
+            return Err(Error::limit(
+                "tool output reached the 256 KiB limit for this turn",
             ));
         }
         Ok(messages)

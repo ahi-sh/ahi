@@ -394,15 +394,15 @@ fn complete(
     let (schemas, policy_details) = tools.as_ref().map(ToolRuntime::model_capabilities).unzip();
     let has_tools = schemas.as_ref().is_some_and(|schemas| !schemas.is_empty());
     let mut instructions = instruction_files.for_turn(mode.label(), &directory, has_tools);
-    let required_length = instructions.len();
+    let policy_start = instructions.len();
     instructions.push_str(policy_details.as_deref().unwrap_or_default());
-    let mut active_instructions = instructions.as_str();
+    let mut can_omit_policy = instructions.len() > policy_start;
     let mut turn = || -> Result<()> {
         loop {
             if child && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Err(Error::new("assignment deadline reached"));
             }
-            let mut context = RequestContext::new(
+            let context = RequestContext::new(
                 &selection.model,
                 thinking,
                 metadata,
@@ -410,16 +410,14 @@ fn complete(
                 schemas.as_deref(),
                 connection.browser_token(),
             )
-            .with_instructions(active_instructions);
+            .with_instructions(&instructions);
             let body = match protocol::request_body(connection.protocol, &context) {
                 Err(error)
-                    if tool_rounds == 0
-                        && error.kind() == ErrorKind::Limit
-                        && active_instructions.len() > required_length =>
+                    if tool_rounds == 0 && can_omit_policy && error.kind() == ErrorKind::Limit =>
                 {
-                    active_instructions = &instructions[..required_length];
-                    context.instructions = active_instructions;
-                    protocol::request_body(connection.protocol, &context)?
+                    instructions.replace_range(policy_start.., "\n\nPolicy rules omitted to fit the request limit. Every tool call still requires authorization.");
+                    can_omit_policy = false;
+                    continue;
                 }
                 result => result?,
             };

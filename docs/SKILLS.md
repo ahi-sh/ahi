@@ -97,8 +97,9 @@ turn. Explicitly selected manual-only skills become available for subsequent
 supporting-file calls during that turn. They are not automatically re-enabled
 by their presence in history on later turns.
 
-A failed, denied, or cancelled explicit load prevents inference. Instructions
-that exceed the turn output budget are not sent partially. Headless execution
+A failed, denied, or cancelled explicit load prevents inference. Explicit
+loads that fill the turn’s 256 KiB tool-output budget end the turn before
+the first provider request. Headless execution
 denies an `ask: true` load when no operator is attending; explicit syntax does
 not bypass approvals. Automatic loads retain normal tool-loop error behavior.
 

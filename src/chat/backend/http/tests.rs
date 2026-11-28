@@ -2852,53 +2852,54 @@ fn a_cancelled_approval_runs_no_call_in_a_mixed_batch() {
 }
 
 #[test]
-fn the_turn_output_bound_is_a_cap_including_diagnostics() {
-    let (url, server) = server_sequence(vec![
-        calls_stream(&[("c1", "read_file", json!({"path": "src/big.txt"}))]),
-        calls_stream(&[("c2", "read_file", json!({"path": "src/big.txt"}))]),
-        calls_stream(&[("c3", "read_file", json!({"path": "src/big.txt"}))]),
-        calls_stream(&[("c4", "read_file", json!({"path": "src/big.txt"}))]),
-        calls_stream(&[("c5", "read_file", json!({"path": "src/markers.txt"}))]),
-        calls_stream(&[("c6", "read_file", json!({"path": "src/a.rs"}))]),
-        text_stream("done"),
-    ]);
-    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
-    fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(60 * 1024)).unwrap();
-    let markers = format!(
+fn a_full_tool_output_budget_ends_the_turn_after_recording_the_batch() {
+    let truncated_file = format!(
         "BEGIN\n{}\nMIDDLE\n{}\nLOCAL_END",
         "x".repeat(8192),
         "界".repeat(6000)
     );
-    fs::write(fixture.workspace.join("src/markers.txt"), markers).unwrap();
-    let events = collect(&mut fixture.backend(), request());
-    let results = results(&events);
-    assert_eq!(results.len(), 6);
-    assert_eq!(results[5].1, super::super::tool_loop::EXIT_ERROR);
-    assert!(results[5].2.contains("budget") && results[5].2.len() <= 64);
-    let total: usize = results.iter().map(|(_, _, content)| content.len()).sum();
-    // Content is capped; each call may add one fixed truncation notice.
-    assert!(
-        total <= super::super::tool_loop::MAX_TURN_OUTPUT_BYTES + results.len() * 64,
-        "{total}"
-    );
-    assert!(results[3].2.len() <= 64 * 1024 + 64);
-    let requests = server.join().unwrap();
-    let final_request = request_body(requests.last().unwrap());
-    let markers = final_request["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["tool_call_id"] == "c5")
-        .unwrap();
-    let model = markers["content"].as_str().unwrap();
-    assert_eq!(model, results[4].2);
-    assert!(model.starts_with("BEGIN\n") && model.contains("\nMIDDLE\n"));
-    assert!(
-        model.ends_with("[truncated: tool output budget for this turn is exhausted]")
-            && !model.contains("LOCAL_END")
-    );
-    assert!(events.iter().any(|e| matches!(e, ResponseEvent::ToolResult { call_id, output, .. } if call_id == "c5" && output.starts_with(crate::chat::transcript::MODEL_CUT_PREFIX) && output.ends_with("LOCAL_END"))));
-    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    for final_file in ["z".repeat(16 * 1024), truncated_file] {
+        let truncated = final_file.len() > 16 * 1024;
+        let initial_calls =
+            ["c1", "c2", "c3", "c4"].map(|id| (id, "read_file", json!({"path": "src/big.txt"})));
+        let mut final_calls = vec![("c5", "read_file", json!({"path": "src/markers.txt"}))];
+        if truncated {
+            final_calls.push(("c6", "read_file", json!({"path": "src/a.rs"})));
+        }
+        let (url, server) = server_sequence(vec![
+            calls_stream(&initial_calls),
+            calls_stream(&final_calls),
+        ]);
+        let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+        fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(60 * 1024)).unwrap();
+        fs::write(fixture.workspace.join("src/markers.txt"), &final_file).unwrap();
+        let events = collect(&mut fixture.backend(), request());
+        let results = results(&events);
+        assert_eq!(returns(&events), initial_calls.len() + final_calls.len());
+        assert_eq!(results.len(), returns(&events));
+        assert!(
+            matches!(events.last(), Some(ResponseEvent::Failed { kind: ErrorKind::Limit, message }) if message.contains("tool output"))
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+
+        let total: usize = results.iter().map(|(_, _, content)| content.len()).sum();
+        let budget = super::super::tool_loop::MAX_TURN_OUTPUT_BYTES;
+        let recorded = &results[4].2;
+        if truncated {
+            assert!(total <= budget + 2 * 64);
+            assert_eq!(results[5].1, super::super::tool_loop::EXIT_ERROR);
+            assert!(results[5].2.contains("budget") && results[5].2.len() <= 64);
+            assert!(recorded.starts_with("BEGIN\n") && recorded.contains("\nMIDDLE\n"));
+            assert!(
+                recorded.ends_with("[truncated: tool output budget for this turn is exhausted]")
+            );
+            assert!(!recorded.contains("LOCAL_END"));
+            assert!(events.iter().any(|e| matches!(e, ResponseEvent::ToolResult { call_id, output, .. } if call_id == "c5" && output.starts_with(crate::chat::transcript::MODEL_CUT_PREFIX) && output.ends_with("LOCAL_END"))));
+        } else {
+            assert_eq!(total, budget);
+            assert_eq!(recorded, &final_file);
+        }
+    }
 }
 
 /// Live `gpt-6.1-sol` streams (observed 2026-11-05) finish with
@@ -3301,7 +3302,7 @@ fn explicit_skills_over_the_output_budget_are_not_sent_partially() {
     assert!(matches!(
         events.last(),
         Some(ResponseEvent::Failed {
-            kind: ErrorKind::Policy,
+            kind: ErrorKind::Limit,
             ..
         })
     ));
