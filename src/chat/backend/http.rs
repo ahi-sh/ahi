@@ -353,7 +353,7 @@ fn complete(
     let instruction_files =
         crate::system_prompt::Instructions::load(&directory, operator_home.as_deref())?;
     let child = caller.origin == "delegate";
-    let mut rounds = 0usize;
+    let mut tool_rounds = 0usize;
     let mode = request.mode.clone();
     let mut tools = match workspace.filter(|_| tools_enabled) {
         Some(directory) => ToolRuntime::load(
@@ -413,7 +413,8 @@ fn complete(
             .with_instructions(active_instructions);
             let body = match protocol::request_body(connection.protocol, &context) {
                 Err(error)
-                    if error.kind() == ErrorKind::Limit
+                    if tool_rounds == 0
+                        && error.kind() == ErrorKind::Limit
                         && active_instructions.len() > required_length =>
                 {
                     active_instructions = &instructions[..required_length];
@@ -452,8 +453,8 @@ fn complete(
                         }));
                     };
                     cancelled(cancel)?;
-                    rounds += 1;
-                    if child && rounds > 64 {
+                    tool_rounds += 1;
+                    if child && tool_rounds > 64 {
                         return Err(Error::policy(
                             "scratch child exceeded 64 tool rounds in one turn",
                         ));

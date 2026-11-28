@@ -266,7 +266,7 @@ def main() -> None:
     if args.workspace_modes_only:
         queue_release = threading.Event()
         redraw_release = threading.Event()
-        advertised_skills = {}
+        turn_capabilities = {}
 
         class ModeGateway(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -275,8 +275,9 @@ def main() -> None:
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 prompt = body["messages"][-1].get("content")
-                if prompt in ("redraw-probe", "now write"):
-                    advertised_skills[prompt] = next((t["function"]["description"] for t in body.get("tools", []) if t["function"]["name"] == "load_skill"), "")
+                last_prompt = next(m["content"] for m in reversed(body["messages"]) if m["role"] == "user")
+                turn_capabilities.setdefault(last_prompt, []).append(
+                    (body["messages"][0]["content"], body.get("tools", [])))
                 if prompt == "redraw-probe":
                     for fragment in ["Cleaned up", " the README’s introduction", " and organization:\n\n- Summarized the changes."]:
                         item = {"choices": [{"index": 0, "delta": {"content": fragment}}]}
@@ -287,7 +288,7 @@ def main() -> None:
                     self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
                     self.wfile.flush()
                     return
-                if body["messages"][-1].get("content") == "queue-turn":
+                if prompt in ("draft-preserved", "queue-turn"):
                     prefix = {"choices": [{"index": 0, "delta": {"content": "mode-stream-waiting"}}]}
                     self.wfile.write(f"data: {json.dumps(prefix)}\n\n".encode())
                     self.wfile.flush()
@@ -302,7 +303,6 @@ def main() -> None:
                     delta = {"tool_calls": [{"index": 0, "id": "live", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"argv": argv, "timeout": 12})}}]}
                     finish = "tool_calls"
                 elif body["messages"][-1]["role"] == "tool":
-                    last_prompt = next(m['content'] for m in reversed(body['messages']) if m['role'] == 'user')
                     delta = {"content": "<tool_call>not another call" if last_prompt == "draft-preserved" else "mode-fixture-complete"}
                     finish = "stop"
                 else:
@@ -352,7 +352,7 @@ def main() -> None:
                     repo = work / ".agents/skills/repo-probe"
                     repo.mkdir(parents=True)
                     (repo / "SKILL.md").write_text("---\nname: repo-probe\ndescription: Repository fixture\n---\nHidden body\n")
-                    advertised_skills.clear()
+                    turn_capabilities.clear()
                     command = ("tui", "--session", sid, *options)
                     chat = Session(state, cwd=work, columns=120, rows=70, command=command, environment={"HOME": str(home)})
                     try:
@@ -390,13 +390,17 @@ def main() -> None:
                         assert not (work / "ahi.tools.yaml").exists()
                         chat.send("\x1bm")
                         chat.expect(f"Plan · {mode_shortcut} for Trusted")
+                        queue_release.clear()
                         chat.send("\r")
+                        chat.expect("Thinking...")
+                        chat.send("\x1bm")
+                        chat.expect("Plan → Trusted next turn")
+                        queue_release.set()
                         chat.expect("<tool_call>not another call")
                         chat.expect("write_file marker · Plan blocks workspace writes, commands and delegation")
                         chat.absent("Tool-call markup was returned as text")  # This turn did receive structured calls.
                         assert not (work / "marker").exists()
                         assert not (work / "command-marker").exists()
-                        chat.send("\x1bm")
                         chat.expect(f"Trusted · {mode_shortcut} for Plan")
                         chat.send("now write\r")
                         chat.expect("write_file marker")
@@ -406,10 +410,6 @@ def main() -> None:
                             assert time.monotonic() < deadline
                         assert (work / "marker").read_text() == "written"
                         chat.expect("exit 0")
-                        for prompt in ("redraw-probe", "now write"):
-                            catalog = advertised_skills[prompt]
-                            assert "operator/local-probe" in catalog and "repo/repo-probe" in catalog, catalog
-                            assert "Hidden body" not in catalog
                         chat.absent("captured-stdout")
                         chat.send("draft-toggle")
                         chat.send("\x0f")
@@ -480,6 +480,21 @@ def main() -> None:
                         restored = chat.finish().rsplit("\x1b[?1049l", 1)[-1]
                         assert "You: now write" in restored and "Assistant: mode-fixture-complete" in restored
                         assert f"Resume: ahi --session {sid}" in restored
+                        for prompt, mode in (("draft-preserved", "Plan"), ("now write", "Trusted"),
+                                             ("write outside", "Full Access"), ("queue-turn", "Trusted")):
+                            initial, continuation = turn_capabilities[prompt]
+                            assert initial == continuation, (engine, prompt)
+                            instructions, tools = initial
+                            assert f'Mode: "{mode}"' in instructions, (engine, prompt, instructions)
+                            definitions = {tool["function"]["name"]: tool["function"] for tool in tools}
+                            assert ("write_file" in definitions) == (mode != "Plan")
+                            assert ("run_command" in definitions) == (mode != "Plan")
+                            if mode != "Plan":
+                                file_path = definitions["write_file"]["parameters"]["properties"]["path"]
+                                assert ("absolute host path" in file_path["description"]) == (mode == "Full Access")
+                            catalog = definitions["load_skill"]["description"]
+                            assert "operator/local-probe" in catalog and "repo/repo-probe" in catalog, catalog
+                            assert "Hidden body" not in catalog
                     finally:
                         chat.close()
                     policy = "version: 2\ndefault_mode: review\nmodes:\n  review: {allow: {tools: [read_file]}}\n  editing: {allow: {write_files: true}}\n"
@@ -767,10 +782,13 @@ def main() -> None:
                 )
                 (work / "ahi.modes.yaml").write_text(policy)
                 requests = []
+                request_sizes = []
 
                 class InstructionGateway(BaseHTTPRequestHandler):
                     def do_POST(self):
-                        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                        body = self.rfile.read(int(self.headers["Content-Length"]))
+                        request = json.loads(body)
+                        request_sizes.append(len(body))
                         requests.append(request)
                         if "instructions" in request:
                             item = {"type": "message", "id": "message_fixture", "role": "assistant",
@@ -815,6 +833,11 @@ def main() -> None:
                                             "path": "src"})}},
                                 ]
                                 delta = {"tool_calls": calls}
+                                finish = "tool_calls"
+                            elif last["role"] == "user" and last["content"] == "instruction-prefix-limit":
+                                call = {"index": 0, "id": "read_evidence", "type": "function", "function": {
+                                    "name": "read_file", "arguments": json.dumps({"path": "src/evidence"})}}
+                                delta = {"tool_calls": [call]}
                                 finish = "tool_calls"
                             elif last["role"] == "user" and last["content"] == "instruction-protected-write":
                                 call = {"index": 0, "id": "protect_instructions", "type": "function", "function": {
@@ -885,11 +908,11 @@ def main() -> None:
                     assert "deny" in context.lower() or "denied" in context.lower(), context
 
                 def execute_case(name: str, provider: str = "local", directory: Path = work,
-                                 timeout: int = 20):
+                                 timeout: int = 20, prompt: str | None = None):
                     result = root / f"result-{name}.json"
                     completed = subprocess.run(
                         [binary, "--state-dir", state, "exec", "--standalone", "--model",
-                         f"{provider}/fixture", "--workdir", directory, "--prompt", f"instruction-{name}",
+                         f"{provider}/fixture", "--workdir", directory, "--prompt", prompt or f"instruction-{name}",
                          "--result-file", result, "--format", "json"],
                         cwd=directory, env=environment, capture_output=True, text=True, timeout=timeout)
                     return completed, json.loads(result.read_text()) if result.exists() else None
@@ -939,6 +962,35 @@ def main() -> None:
                         assert marker not in recorded, recorded
                     if engine == "service":
                         continue
+                    def prefix_case(name: str, limit: int | None = None):
+                        if limit is not None:
+                            providers["local"]["models"][0]["inputLimits"] = {"maxRequestBytes": limit}
+                            (state / "models.json").write_text(json.dumps({"providers": providers}))
+                        before = len(requests)
+                        completed, result = execute_case(f"prefix-{name}", prompt="instruction-prefix-limit")
+                        return completed, result, request_sizes[before:], requests[before:]
+
+                    completed, result, sizes, baseline = prefix_case("baseline")
+                    assert completed.returncode == 0 and result["status"] == "ok", (completed.stderr, result)
+                    first_size, continuation_size = sizes
+                    prefix, continuation_prefix = map(instructions, baseline)
+                    assert prefix == continuation_prefix and first_size < continuation_size
+                    assert "instruction-evidence-marker" in baseline[1]["messages"][-1]["content"]
+
+                    completed, result, sizes, limited = prefix_case("boundary", continuation_size - 1)
+                    assert completed.returncode != 0, result
+                    assert result["error"]["kind"] == "limit", result
+                    assert f"{continuation_size} bytes, over inputLimits.maxRequestBytes ({continuation_size - 1})" in result["error"]["message"], result
+                    assert sizes == [first_size] and limited == baseline[:1]
+
+                    completed, result, sizes, compact = prefix_case("compact", first_size - 1)
+                    assert completed.returncode == 0 and result["status"] == "ok", (completed.stderr, result)
+                    compact_prefix, compact_continuation = map(instructions, compact)
+                    assert compact_prefix != prefix and compact_prefix == compact_continuation
+                    assert max(sizes) < first_size
+                    providers["local"]["models"][0].pop("inputLimits")
+                    (state / "models.json").write_text(json.dumps({"providers": providers}))
+
                     operator_file.unlink()
                     operator_target = root / "operator-instructions.md"
                     operator_target.write_text("Operator instruction marker: operator-linked.\n")

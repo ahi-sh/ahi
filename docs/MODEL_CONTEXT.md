@@ -62,11 +62,13 @@ Every call still passes argument validation and runtime policy evaluation. Adver
 
 The policy summary has a 32 KiB budget. If the rule list exceeds that budget, ahi omits the whole list and retains the general policy description. Runtime checks apply every rule.
 
-ahi also checks the size of the serialized provider request, including history, tool schemas, and JSON encoding. If the request exceeds a byte limit, ahi drops the optional policy details and checks the size again before contacting the provider. The shorter form retains the core instructions, mode, workspace, both instruction files, tool definitions, and tool results. If that form still exceeds the limit, the turn reports the size error.
+Before the first send, ahi checks the serialized request size, including history, tool schemas, and JSON encoding. If the first request exceeds a byte limit, ahi removes the optional policy details and checks again. The shorter form retains the core instructions, mode, workspace, both instruction files, tool definitions, and tool results. If that form still exceeds the limit, the turn reports the size error.
 
 ## Turn snapshots and provider requests
 
-ahi reads the instruction files and resolves the policy once per turn. Changes to either `AGENTS.md` file take effect on the next turn. A growing tool result can cause a continuation to use the shorter request form. Later rounds keep that form. Mode and policy changes follow their existing turn-admission rules.
+Every mode starts with the same compiled core. The rest of the system prefix reflects the active mode, workspace, and instructions. Every tool continuation reuses the first request’s system prefix byte-for-byte. If a tool result makes the continuation too large, ahi reports the size error before sending that request. Changes to either `AGENTS.md` file take effect on the next turn.
+
+For example, select Trusted while a Plan turn is running. The running turn keeps its Plan prefix and tools. Submit the next prompt in the same chat to use the Trusted prefix and tools. Selecting and confirming Full Access follows the same rule. See [workspace trust and execution modes](WORKSPACE_TRUST.md).
 
 Chat Completions receives the combined text as its first system message. Responses receives it in `instructions`. Anthropic receives it in `system`. The core instructions occur once in each request. The provider request is rebuilt for each tool continuation with the same snapshot and the accumulated tool results.
 
