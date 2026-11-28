@@ -23,7 +23,7 @@ Direct operator requests take precedence over file-based guidance within the enf
 
 For example, operator instructions can request concise reports. A repository can require a detailed verification section for changes in that project. Both apply until a direct request changes the reporting requirement. A repository instruction to execute a command still requires an approving mode policy.
 
-Starting in a Git subdirectory loads the `AGENTS.md` beside that worktree’s `.git` entry. This applies to linked worktrees and separate Git metadata directories. Discovery does not need to open the object database or read Git references. Bare repositories use the requested working directory. The instruction scope stays fixed when tools access files in subdirectories.
+Starting in a Git subdirectory loads the `AGENTS.md` beside that worktree’s `.git` entry. If the entry is a file, ahi resolves its `gitdir:` path relative to the file’s directory and compares the target with the Git metadata directory found during discovery. Only a matching entry selects project guidance. This supports linked worktrees and separate Git metadata directories. Bare repositories use the requested working directory. The instruction scope stays fixed when tools access files in subdirectories.
 
 Both instruction files are optional. Each present file must be a regular UTF-8 file of at most 64 KiB. Invalid, unreadable, or oversized files fail the turn before the first model request. ahi does not silently truncate them.
 
@@ -62,7 +62,7 @@ Every call still passes argument validation and runtime policy evaluation. Adver
 
 The policy summary has a 32 KiB budget. If the rule list exceeds that budget, ahi omits the whole list and retains the general policy description. Runtime checks apply every rule.
 
-Before the first send, ahi checks the serialized request size, including history, tool schemas, and JSON encoding. If the first request exceeds a byte limit, ahi removes the optional policy details and checks again. The shorter form retains the core instructions, mode, workspace, both instruction files, tool definitions, and tool results. If that form still exceeds the limit, the turn reports the size error.
+Before the first send, ahi checks the serialized request size, including history, tool schemas, and JSON encoding. If the first request exceeds a byte limit, ahi replaces the optional policy details with a one-line notice that the rules were omitted and tool calls still require authorization. The shorter form retains the core instructions, mode, workspace, both instruction files, tool definitions, and tool results. If that form, including the notice, still exceeds the limit, the turn reports the size error.
 
 ## Turn snapshots and provider requests
 

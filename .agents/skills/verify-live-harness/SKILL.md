@@ -35,7 +35,7 @@ The POSIX fixture supplies disposable home, repository, policy, and state direct
 
 Check the reported Git layout results. The fixture exercises nested linked worktrees and separate metadata. SHA-256 and reftable cases require local Git support for initializing those formats.
 
-For request-size or skill-visibility changes, also run `cargo test --all-features --lib chat::backend::http::tests`. The loopback tests inspect the system text and tool schemas, exercise explicit and automatic loads, and submit a byte-limited request with actual tool results. Run the terminal script without a focus flag to check exact UTF-8 byte limits through the UI.
+For request-size, tool-output budget, or skill-visibility changes, also run `cargo test --all-features --lib chat::backend::http::tests`. The loopback tests inspect the system text and tool schemas and exercise explicit and automatic skill loads. Check the provider request count when a batch fills the tool-output budget. In the terminal fixture, the compact prefix must disclose omitted policy rules and remain identical on continuation. Run the terminal script without a focus flag to check exact UTF-8 byte limits through the UI.
 
 Local listeners, Unix sockets, and pseudo-terminals must be permitted. Keep failure captures for diagnosis. The probe stops its own service and removes its disposable state; it does not restart a user service. After a failure, correct the implementation or fixture and rerun this focused workflow before considering live inference.
 

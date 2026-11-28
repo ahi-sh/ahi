@@ -1,10 +1,13 @@
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
 const MAX_INSTRUCTION_BYTES: u64 = 64 * 1024;
+const MAX_GITFILE_BYTES: u64 = 1024 * 1024;
 
 pub(crate) struct Instructions {
     guidance: String,
@@ -59,23 +62,55 @@ fn repository_root(directory: &Path) -> Result<&Path> {
                 ))
             }
         };
+    worktree_root(directory, &git_directory)
+}
+
+fn worktree_root<'a>(directory: &'a Path, git_directory: &Path) -> Result<&'a Path> {
     for ancestor in directory.ancestors() {
         if ancestor == git_directory {
-            break;
+            return Ok(directory);
         }
         let marker = ancestor.join(".git");
-        // Discovery stops at the first .git file and validates its target.
-        // Its parent is the worktree even when the metadata lives elsewhere.
-        if fs::metadata(&marker).is_ok_and(|metadata| {
-            metadata.is_file()
-                || marker
-                    .canonicalize()
-                    .is_ok_and(|path| path == git_directory)
-        }) {
+        let Ok(metadata) = fs::metadata(&marker) else {
+            continue;
+        };
+        let target = if metadata.is_dir() {
+            marker.canonicalize().ok()
+        } else if metadata.is_file() && metadata.len() <= MAX_GITFILE_BYTES {
+            gitfile_target(&marker)
+        } else {
+            None
+        };
+        if target.as_deref() == Some(git_directory) {
             return Ok(ancestor);
         }
     }
-    Ok(directory)
+    Err(Error::policy(
+        "cannot locate the worktree for the discovered Git metadata directory",
+    ))
+}
+
+fn gitfile_target(marker: &Path) -> Option<PathBuf> {
+    let file = open_file(&marker.canonicalize().ok()?, marker).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut contents = Vec::new();
+    file.take(MAX_GITFILE_BYTES + 1)
+        .read_to_end(&mut contents)
+        .ok()?;
+    if contents.len() as u64 > MAX_GITFILE_BYTES {
+        return None;
+    }
+    let target = contents.strip_prefix(b"gitdir:")?.trim_ascii();
+    if target.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    let target = std::ffi::OsStr::from_bytes(target);
+    #[cfg(not(unix))]
+    let target = std::str::from_utf8(target).ok()?;
+    marker.parent()?.join(target).canonicalize().ok()
 }
 
 fn append_file(text: &mut String, scope: &str, path: &Path, operator: bool) -> Result<()> {

@@ -987,6 +987,7 @@ def main() -> None:
                     assert completed.returncode == 0 and result["status"] == "ok", (completed.stderr, result)
                     compact_prefix, compact_continuation = map(instructions, compact)
                     assert compact_prefix != prefix and compact_prefix == compact_continuation
+                    assert "Policy rules omitted" in compact_prefix and "Policy rules omitted" not in prefix
                     assert max(sizes) < first_size
                     providers["local"]["models"][0].pop("inputLimits")
                     (state / "models.json").write_text(json.dumps({"providers": providers}))
@@ -1050,6 +1051,7 @@ def main() -> None:
                     layouts = [separate, linked]
                     subprocess.run([git, "init", "--quiet", f"--separate-git-dir={root / 'metadata'}", separate],
                                    env=repository_environment, check=True)
+                    (separate / ".git").write_text("gitdir: ../metadata\n")
                     subprocess.run([git, "-C", work, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                                     "commit", "--quiet", "--allow-empty", "-m", "Create fixture commit"],
                                    env=repository_environment, check=True)
